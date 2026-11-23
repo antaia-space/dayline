@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { calendarNotice, createRelay } from './receiver.mjs';
+import { BookingBoard } from './booking.mjs';
 
 export default {fetch:createRelay()};
 
@@ -35,6 +36,15 @@ export class DeviceStream extends DurableObject {
       }
       return new Response(null,{status:204});
     }
+    // A guest sent a booking request. The signal carries nothing; the Mac
+    // collects the request itself over HTTPS.
+    if (path==='/signal' && request.method==='POST') {
+      for (const ws of this.ctx.getWebSockets()) {
+        if (!this.active(ws)) continue;
+        try { ws.send('{"type":"booking"}'); } catch { this.end(ws,1011); }
+      }
+      return new Response(null,{status:204});
+    }
     return new Response(null,{status:404});
   }
 
@@ -65,4 +75,28 @@ export class DeviceStream extends DurableObject {
     this.end(ws,valid ? code : undefined);
   }
   webSocketError(ws) { this.end(ws,1011); }
+}
+
+// One person's booking page. Durable Objects run one request at a time, so two
+// guests can never be given the same time. An alarm deletes what is due.
+export class BookingPage extends DurableObject {
+  constructor(ctx,env) {
+    super(ctx,env);
+    this.board = new BookingBoard({storage:ctx.storage,secret:new TextEncoder().encode(env.RELAY_SECRET),
+      signal:streamId => env.STREAMS.get(env.STREAMS.idFromName(streamId)).fetch(new Request('https://device.internal/signal',{method:'POST'}))});
+  }
+
+  async schedule(due) {
+    if (due===null) await this.ctx.storage.deleteAlarm();
+    else await this.ctx.storage.setAlarm(due);
+  }
+
+  async fetch(request) {
+    if (request.method!=='POST' || new URL(request.url).pathname!=='/call') return new Response(null,{status:404});
+    const answer = await this.board.handle(await request.json());
+    await this.schedule(this.board.nextSweep());
+    return Response.json(answer);
+  }
+
+  async alarm() { await this.schedule(await this.board.expire()); }
 }

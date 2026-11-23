@@ -1,0 +1,27 @@
+/* Settings → Booking. Colours and spacing come from styles.css. */
+.form-body label.booking-check:not(.file-button) { display: flex; align-items: flex-start; gap: .55rem; margin-top: .8rem; font-weight: 450; cursor: pointer; }
+.form-body label.booking-check input { margin-top: .22rem; flex: none; }
+.booking-field-hint { display: block; color: var(--muted); font-size: .8rem; font-weight: 400; line-height: 1.45; }
+.booking-check .booking-field-hint { display: inline; }
+.booking-status, .booking-access { margin-top: 1rem; }
+.booking-status .hint, .booking-access .hint { margin: .5rem 0 0; }
+.booking-access .hint { margin: 0 0 .7rem; }
+.booking-link { display: flex; gap: .5rem; align-items: center; }
+.form-body .booking-link input { margin-top: 0; min-width: 0; font-size: .875rem; }
+.booking-status + .field-pair { margin-top: 1rem; }
+.form-body .booking-types, .form-body .booking-notices { margin-top: 1.25rem; }
+.booking-type-list { list-style: none; margin: 0 0 .35rem; padding: 0; border-top: 1px solid var(--line); }
+.booking-type { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: .55rem 0; border-bottom: 1px solid var(--line); }
+.booking-type-text { min-width: 0; }
+.booking-type-text strong { display: block; font-size: .9rem; font-weight: 550; overflow-wrap: anywhere; }
+.booking-type-facts { color: var(--muted); font-size: .8rem; }
+.booking-row-actions { display: flex; align-items: center; gap: .75rem; flex: none; }
+.booking-type-editor { flex: 1; min-width: 0; padding: .35rem 0 .45rem; }
+.booking-type-editor .booking-row-actions { justify-content: space-between; margin-top: .9rem; }
+.booking-notice { display: flex; align-items: flex-start; justify-content: space-between; gap: .75rem; padding: .45rem 0; border-bottom: 1px solid var(--soft); font-size: .875rem; }
+.booking-notice p { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.booking-copy-holder { position: fixed; left: -9999px; }
+@media (max-width: 520px) {
+  .booking-type-editor .field-pair { grid-template-columns: 1fr; }
+  .booking-link { flex-wrap: wrap; }
+}

@@ -4,8 +4,9 @@ import { CalendarPush } from './calendar-push.mjs';
 // One Google connection per installation serves every paired planner window.
 // A revision is published only after the local task plan has caught up.
 export class LiveCalendar {
-  constructor(service, { monitor, push, enabled }) {
+  constructor(service, { monitor, push, enabled, booking = null }) {
     this.service = service;
+    this.booking = booking;
     this.clients = new Set();
     this.revision = 0;
     this.requested = 0;
@@ -16,7 +17,8 @@ export class LiveCalendar {
       token: sub => service.token(sub), identity: () => service.relayIdentity(),
       google: service.google, load: () => service.data.calendarPush || {},
       save: value => service.run(() => { service.data.calendarPush = value; service.store.save(); }),
-      ...push, onChange: () => this.refresh().catch(() => {}), onStatus: () => this.check()
+      ...push, onChange: () => this.refresh().catch(() => {}), onStatus: () => this.check(),
+      onBooking: () => void this.booking?.wake()
     }) : null;
     this.monitor = new CalendarMonitor({
       sources: () => {
@@ -76,6 +78,8 @@ export class LiveCalendar {
       this.refreshing = null;
       this.scheduleRecovery();
       this.updateSources();
+      // Free times for booking links follow the calendar that was just read.
+      if (!this.closed) void this.booking?.wake();
     }
   }
 
@@ -137,6 +141,6 @@ export class LiveCalendar {
     const pushStopped = this.push?.stop();
     for (const res of this.clients) res.end();
     this.clients.clear();
-    await Promise.allSettled([this.checking, this.refreshing, pushStopped]);
+    await Promise.allSettled([this.checking, this.refreshing, pushStopped, this.booking?.stop()]);
   }
 }

@@ -6,6 +6,8 @@ import { invalid } from './service.mjs';
 import { durationNotes } from './task-learning.mjs';
 import { createCaptureHandler } from './capture.mjs';
 import { LiveCalendar } from './live-calendar.mjs';
+import { BookingDesk } from './booking-relay.mjs';
+import { dismissBookingNotice, publicBooking, updateBooking } from './booking-service.mjs';
 
 const POLICY = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.png': 'image/png' };
@@ -53,7 +55,7 @@ function page(title, body, link = '/', label = 'Open planner') {
 }
 
 export async function startServer({ service, agents, webRoot, port = 43127, intervalMs = 60000,
-  calendarMonitorOptions, calendarPushOptions }) {
+  calendarMonitorOptions, calendarPushOptions, bookingOptions }) {
   const sessionSecret = randomBytes(32).toString('base64url');
   const invitations = new Map();
   const capture = createCaptureHandler(service,agents);
@@ -61,10 +63,14 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
   let cookieName;
   let origin;
   let closed = false;
+  // The public booking page lives on the same receiver as live calendar updates.
+  const desk = new BookingDesk({ service, origin: calendarPushOptions?.origin, ...bookingOptions,
+    onBooked: () => live.refresh().catch(() => {}) });
   const live = new LiveCalendar(service, {
-    monitor: calendarMonitorOptions, push: calendarPushOptions,
+    monitor: calendarMonitorOptions, push: calendarPushOptions, booking: desk,
     enabled: Boolean(intervalMs || calendarMonitorOptions || calendarPushOptions)
   });
+  const bookingView = () => ({ ...publicBooking(service), status: desk.status() });
   const headers = {
     'Cache-Control': 'no-store', 'Content-Security-Policy': POLICY, 'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY', 'Cross-Origin-Resource-Policy': 'same-origin'
@@ -120,6 +126,9 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
       if (req.method === 'GET' && pathname === '/api/meetings') {
         const week = await service.meetings({ from: url.searchParams.get('from'), to: url.searchParams.get('to') });
         return send(res, 200, 'application/json', JSON.stringify(week));
+      }
+      if (req.method === 'GET' && pathname === '/api/booking') {
+        return send(res, 200, 'application/json', JSON.stringify(bookingView()));
       }
       if (req.method === 'GET' && pathname === '/api/agent' && agents) {
         const details = await agents.status(url.searchParams.get('provider') ?? undefined);
@@ -189,6 +198,20 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
       else if (req.method === 'PATCH' && pathname === '/api/settings') {
         await service.run(() => service.updateSettings(body));
         if (service.data.accounts.length) void live.refresh().catch(() => {});
+        syncAfter = false;
+      }
+      else if (req.method === 'PATCH' && pathname === '/api/booking') {
+        await service.run(() => updateBooking(service, body));
+        // Answer once the page has been published or switched off, so Settings shows the
+        // result. A slow network must not hold the dialog; publishing then finishes behind it.
+        let timer;
+        await Promise.race([desk.changed(), new Promise(resolve => { timer = setTimeout(resolve, 8000); })]);
+        clearTimeout(timer);
+        result = bookingView();
+        syncAfter = false;
+      } else if (req.method === 'POST' && pathname === '/api/booking/notices') {
+        await service.run(() => dismissBookingNotice(service, body.id));
+        result = bookingView();
         syncAfter = false;
       }
       else if (req.method === 'POST' && pathname === '/api/connection/config') await service.run(() => service.configure(body));

@@ -26,7 +26,7 @@ Hover over a meeting’s **name** in either calendar view to preview its time, o
 
 With your Antaia Google account connected, the Mac app subscribes to changes on your selected calendars. When Google delivers a change, Dayline refreshes the meeting, frees its former slot and replans flexible tasks in every open planner window. An open meeting panel follows changes to the time, guest responses and joining details. **Settings → Calendars** shows how many calendars have live delivery.
 
-Antaia hosts the notification receiver on Cloudflare. Dayline proves workspace membership with a Google ID token issued for the Dayline client. Google sends the receiver calendar channel headers. The receiver forwards an opaque change signal to your Mac. Meeting content, tasks and Google credentials that can read calendar data stay on your Mac or with Google. If a live channel disconnects, Dayline checks Google directly while reconnecting. Reopening the app or waking the Mac also catches up on changes. Google controls notification timing and can occasionally miss a notification. [Google Calendar push delivery](https://developers.google.com/workspace/calendar/api/guides/push)
+Antaia hosts the notification receiver on Cloudflare. Dayline proves workspace membership with a Google ID token issued for the Dayline client. Google sends the receiver calendar channel headers. The receiver forwards an opaque change signal to your Mac. Meeting content, tasks and Google credentials that can read calendar data stay on your Mac or with Google. If you switch on booking links, the receiver also holds what [What leaves your Mac](#what-leaves-your-mac) lists. If a live channel disconnects, Dayline checks Google directly while reconnecting. Reopening the app or waking the Mac also catches up on changes. Google controls notification timing and can occasionally miss a notification. [Google Calendar push delivery](https://developers.google.com/workspace/calendar/api/guides/push)
 
 ### Google Calendar setup
 
@@ -103,6 +103,57 @@ Codex defaults to `gpt-6.2-sol` with **low** reasoning effort. For Google or Ant
 
 Closing the Mac window keeps Dayline listening for calendar changes. After quitting, reopen Dayline to catch up. The planner lives in `~/Library/Application Support/Dayline`. The desktop app protects Google credentials with macOS Keychain-backed encryption.
 
+## Booking links
+
+Give people a link where they pick a time with you. The meeting lands in your Google Calendar with a Google Meet link, and Google sends the invitation. Your Google Calendar is the only store of bookings: a booking is a calendar event.
+
+1. Connect your Antaia Google account under **Settings → Calendars**. Then open **Settings → Booking**, enter the **Name guests see** and choose a calendar under **Bookings go to**.
+2. Tick **Offer booking links** and choose **Save booking**. If Dayline may not yet add events to that account, choose **Allow booked meetings** and approve event access in Google. This permission is separate from **Sync tasks as calendar events**: your tasks stay local unless you turn that on too.
+3. Copy the link of your page, or of one meeting type, and send it. Your page is at `https://dayline-calendar.antaia-space.workers.dev/` followed by the part of your Antaia address before the `@`.
+
+Under **Meeting types** you set each type’s title, link name, length, how often a start time is offered, the gap kept around your other meetings, the minimum notice and how many days ahead it can be booked. A **Hidden** type is left off your page; only people with its link can book it. **Notes may be copied to the company wiki** decides the first three characters of the event’s ID: `bkb` when on, `bkp` when off. The meeting-notes job in `antaia-brain` reads that prefix and never copies notes of `bkp` meetings.
+
+### Which times are offered
+
+Dayline offers start times inside your working hours, on the calendars you check for conflicts. It reads those calendars as busy or free only. A private account you connected blocks time, and its events are never read for booking.
+
+A task with an exact time in its text, such as “at 10:15”, blocks that time. Other tasks do not: a booking is a meeting, and Dayline replans flexible tasks around it. If a calendar cannot be read, your page offers no times until it can. Offering times blind could double-book you.
+
+### What a guest sees
+
+The guest picks a meeting type, a day and a time, and enters a name, an email address and optional notes.
+
+- **Your Mac is awake and Dayline is running.** Dayline checks your calendar again and creates the event. Within seconds the page says **You are booked**, and Google emails the invitation with the Meet link.
+- **Your Mac is asleep or Dayline is closed.** The page still shows your free times as of the last time Dayline published them. The guest’s time is held, so nobody else can take it, and the page says **Request received**: the Google Calendar invitation is the confirmation, and without one the meeting is not booked. When Dayline next runs, it checks your calendar and creates the event.
+
+A request that waits lapses 30 minutes before its start, or after 72 hours. If your calendar took the time in the meantime, the request is declined. In both cases the guest’s link says so, and Dayline shows you who asked under **Settings → Booking** so you can write to them. Dayline does not send email itself. After 72 hours without contact from your Mac, the page stops offering times.
+
+Every invitation and confirmation carries a **Reschedule or cancel** link. A change made there reaches your calendar the same way, and Google emails the update. If you move or delete a booked meeting in Google Calendar yourself, the guest’s link follows.
+
+Two guests cannot take the same time. The receiver handles one request at a time and removes a requested time, plus its gap, for everyone. Dayline then reads your calendar once more before it writes.
+
+### What leaves your Mac
+
+Antaia’s receiver on Cloudflare serves the page. It stores the following, per person:
+
+| Data | Fields | Kept until |
+| --- | --- | --- |
+| Page profile | The name guests see and the headline | Your next change. Deleted when you untick **Offer booking links**, and after 30 days without contact from your Mac |
+| Meeting types | Title, link name, description, length, gap, minimum notice, days ahead, hidden or not | Same |
+| Free times | For each type, the start times that are free, and when they were published | Replaced whenever your availability changes and at least every 5 minutes while Dayline runs. Not offered after 72 hours |
+| Waiting request | Request ID, meeting type, start, and the guest’s name, email address, time zone and notes | Deleted when your Mac has answered. If it never does, after 7 days |
+| Booking record | Request ID, meeting type, start, end, status | The end of the meeting. A declined, cancelled or lapsed request: 7 days, so the guest’s link can explain |
+
+These never leave your Mac: Google access and refresh tokens, the titles, descriptions and guests of any event, your tasks, calendar names and IDs, your busy times themselves, the `bkb`/`bkp` choice and the Meet link. Dayline composes the booked event on your Mac and sends it to Google only. The guest gets the Meet link in Google’s invitation.
+
+The receiver does not store guests’ IP addresses and writes no logs. The live connection still carries only a signal that says “a request is waiting”; your Mac collects the request itself over HTTPS. Your Mac does not trust the receiver: it checks every request against your settings and your calendar, and it only creates, moves or deletes events that are bookings.
+
+### Limits
+
+- With an **External** Google client in **Testing**, Google ends Dayline’s access after seven days. The page then pauses and **Settings → Booking** asks you to reconnect.
+- Offer booking links from one Mac. Two Macs signed in to the same Antaia account would publish the same page in turn.
+- The page limits how many requests one address can send and holds at most ten unanswered requests. It has no CAPTCHA.
+
 ## Run from source
 
 With Node.js 22.13 or later and access to the private repository, run these commands on your Mac.
@@ -119,11 +170,12 @@ npm start
 | `npm test` | Run the automated tests. |
 | `npm run package:mac` | Build the universal Mac application. |
 | `npm run dev` | Start the browser-only development server. Open the single-use URL printed in the terminal. |
+| `node scripts/booking-preview.mjs` | Preview the public booking page at `http://127.0.0.1:43129/demo`, without Cloudflare or Google. |
 
 The app and **File → Open in Browser** share the desktop profile on loopback port 43127. The development server runs on `127.0.0.1:43128` and stores its separate profile in `~/Library/Application Support/Dayline Development`.
 
 ### Maintain the Antaia receiver
 
-The Mac app uses the `dayline-calendar` Worker in Antaia’s Cloudflare account. Google delivers callbacks to its public HTTPS address. Each running Mac opens an authenticated outbound WebSocket. The Worker checks the Dayline client ID and the account’s verified Antaia Workspace membership before issuing separate, expiring receive and notification tickets. A Durable Object forwards signals to each connected Mac and can hibernate between messages.
+The Mac app uses the `dayline-calendar` Worker in Antaia’s Cloudflare account. Google delivers callbacks to its public HTTPS address. Each running Mac opens an authenticated outbound WebSocket. The Worker checks the Dayline client ID and the account’s verified Antaia Workspace membership before issuing separate, expiring receive and notification tickets. A Durable Object forwards signals to each connected Mac and can hibernate between messages. A second Durable Object per person holds their booking page; the page’s script and stylesheet are static assets in `relay/public`. The receiver names a booking page after the verified Antaia address of the Mac that publishes it, and signs the reschedule links with a key derived from `RELAY_SECRET`.
 
 For an update, run `npm ci`, sign in to Wrangler as an Antaia administrator, and run `npx wrangler@4.167.0 deploy --config relay/wrangler.jsonc`. Cloudflare holds the existing `RELAY_SECRET`. A new installation of the receiver needs a cryptographically random secret with at least 32 bytes and the public Dayline Desktop OAuth client ID. The Mac app reads `DAYLINE_PUSH_RELAY` as an optional HTTPS origin override. The browser-only development server enables the hosted receiver only when this variable is set. [Receiver health](https://dayline-calendar.antaia-space.workers.dev/health)

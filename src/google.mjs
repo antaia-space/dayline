@@ -83,7 +83,9 @@ function authorized(accessToken, options = {}) {
 function scopesFor(mode) {
   if (mode === 'availability') return AVAILABILITY_SCOPES;
   if (mode === 'details') return MEETING_SCOPES;
-  if (mode === 'sync') return SYNC_SCOPES;
+  // Booked meetings need the same event access as task sync. The separate
+  // mode keeps tasks local for a person who only wants booking links.
+  if (mode === 'sync' || mode === 'booking') return SYNC_SCOPES;
   throw new GoogleError(400, 'invalidMode', 'Choose availability or calendar sync for this connection.');
 }
 
@@ -565,4 +567,123 @@ export async function deleteTaskEvent(accessToken, { calendarId, eventId, taskId
     // Another client can delete the event between our read and conditional delete.
     if (await readEvent(accessToken, calendarId, eventId)) throw error;
   }
+}
+
+// ---------------------------------------------------------------- booking links
+// A booking is a calendar event with a Meet link and a private "booking"
+// marker; Google sends the invitation. The id starts with "bkb" or "bkp",
+// which the meeting-notes job in antaia-brain reads. Shape ported from
+// antaia-space/meet (src/lib/calendar.ts).
+const BOOKING_ID = /^bk[bp][0-9a-v]{24}$/;
+const BOOKING_FIELDS = 'id,etag,status,start,end,extendedProperties/private';
+const escapeHtml = value => String(value).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+function checkBookingId(id) {
+  if (typeof id !== 'string' || !BOOKING_ID.test(id)) throw new GoogleError(400, 'invalidEventId', 'The booking ID is invalid.');
+}
+
+function bookingOf(event) {
+  const props = event?.extendedProperties?.private;
+  if (!event || event.status === 'cancelled' || props?.booking !== '1' || !BOOKING_ID.test(event.id || '')) return null;
+  const start = Date.parse(eventTime(event.start)), end = Date.parse(eventTime(event.end));
+  if (!Number.isFinite(start) || !(start < end)) return null;
+  return { eventId: event.id, type: props.type ?? '', start, end, name: props.name ?? '', email: props.email ?? '', timeZone: props.tz ?? 'UTC' };
+}
+
+function bookingUrl(calendarId, eventId, updates) {
+  const url = new URL(eventCollection(calendarId) + (eventId ? '/' + eventId : ''));
+  url.searchParams.set('fields', BOOKING_FIELDS);
+  if (updates) {
+    url.searchParams.set('conferenceDataVersion', '1');
+    url.searchParams.set('sendUpdates', 'all');
+  }
+  return url.toString();
+}
+
+export async function getBookingEvent(accessToken, { calendarId, eventId }) {
+  checkBookingId(eventId);
+  try {
+    return bookingOf(await googleRequest(bookingUrl(calendarId, eventId), authorized(accessToken)));
+  } catch (error) {
+    if (error.status === 404 || error.status === 410) return null;
+    throw error;
+  }
+}
+
+// Google Calendar shows a description as HTML, so everything a guest typed is escaped.
+export function bookingDescription({ about, guest, notes, manageUrl }) {
+  const link = new URL(manageUrl);
+  if (link.protocol !== 'https:' || link.username || link.password) throw new GoogleError(400, 'invalidActionUrl', 'The booking needs a valid link.');
+  return [
+    about && escapeHtml(about),
+    'Booked by ' + escapeHtml(guest.name) + ' (' + escapeHtml(guest.email) + ').',
+    notes && 'Notes from ' + escapeHtml(guest.name) + ':<br>' + escapeHtml(notes).replace(/\r?\n/g, '<br>'),
+    '<a href="' + escapeHtml(link.href) + '">Reschedule or cancel</a>',
+  ].filter(Boolean).join('<br><br>');
+}
+
+export async function createBookingEvent(accessToken, { calendarId, eventId, title, description, start, end, ownerEmail, guest, type }) {
+  checkBookingId(eventId);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= end || !title || !guest?.email) {
+    throw new GoogleError(400, 'invalidBooking', 'The booking needs a title, a guest and a time.');
+  }
+  // The calendar's owner is listed as a guest too, as Google Calendar itself
+  // does for an event made in its own interface.
+  const attendees = [{ email: guest.email, displayName: guest.name }];
+  if (ownerEmail && ownerEmail.toLowerCase() !== guest.email.toLowerCase()) attendees.unshift({ email: ownerEmail, responseStatus: 'accepted' });
+  try {
+    const event = await googleRequest(bookingUrl(calendarId, null, true), authorized(accessToken, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: eventId, summary: title, description,
+        start: { dateTime: new Date(start).toISOString() }, end: { dateTime: new Date(end).toISOString() },
+        attendees,
+        conferenceData: { createRequest: { requestId: eventId, conferenceSolutionKey: { type: 'hangoutsMeet' } } },
+        extendedProperties: { private: { booking: '1', type, name: guest.name, email: guest.email, tz: guest.timeZone } },
+        guestsCanModify: false, reminders: { useDefault: true },
+      }),
+    }));
+    const booking = bookingOf(event);
+    if (!booking || booking.eventId !== eventId) throw invalidResponse('Google returned an unexpected event.');
+    return booking;
+  } catch (error) {
+    if (error.status !== 409) throw error;
+    // A retry may follow a successful write with a lost response.
+    const existing = await getBookingEvent(accessToken, { calendarId, eventId });
+    if (!existing) throw error;
+    return existing;
+  }
+}
+
+export async function moveBookingEvent(accessToken, { calendarId, eventId, start, end }) {
+  checkBookingId(eventId);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= end) throw new GoogleError(400, 'invalidInterval', 'Choose a valid time range.');
+  const event = await googleRequest(bookingUrl(calendarId, eventId, true), authorized(accessToken, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ start: { dateTime: new Date(start).toISOString() }, end: { dateTime: new Date(end).toISOString() } }),
+  }));
+  const booking = bookingOf(event);
+  if (!booking) throw invalidResponse('Google returned an unexpected event.');
+  return booking;
+}
+
+export async function cancelBookingEvent(accessToken, { calendarId, eventId }) {
+  checkBookingId(eventId);
+  const url = new URL(eventCollection(calendarId) + '/' + eventId);
+  url.searchParams.set('sendUpdates', 'all');
+  try {
+    await googleRequest(url.toString(), authorized(accessToken, { method: 'DELETE' }), fetch, false, true);
+  } catch (error) {
+    if (error.status !== 404 && error.status !== 410) throw error;
+  }
+}
+
+export async function listBookingEvents(accessToken, { calendarId, timeMin }) {
+  const url = new URL(eventCollection(calendarId));
+  url.searchParams.set('privateExtendedProperty', 'booking=1');
+  url.searchParams.set('singleEvents', 'true');
+  url.searchParams.set('maxResults', '2500');
+  url.searchParams.set('timeMin', timeMin);
+  url.searchParams.set('fields', 'kind,nextPageToken,items(' + BOOKING_FIELDS + ')');
+  return (await paginatedItems(accessToken, url, 'calendar#events')).map(bookingOf).filter(Boolean);
 }

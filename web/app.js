@@ -4,6 +4,7 @@ import {
 } from "./ui.js";
 import { fittedDuration, releasedCompletionDay, renderAgenda, renderBacklog, renderKey, renderWeek } from "./views.js";
 import { createAgentSettings, estimateSource } from "./agent.js";
+import { createBookingSettings } from "./booking-settings.js";
 import { createComposer } from "./composer.js";
 import { createDurationControls } from "./duration.js";
 import { createTaskOrder } from "./task-order.js";
@@ -316,6 +317,10 @@ function renderPlanningNote() {
   } else if (view === "day" && state.busyStart && state.busyEnd && (selectedDay < zonedDay(state.busyStart,state.settings.timeZone) || selectedDay >= zonedDay(state.busyEnd,state.settings.timeZone))) {
     add("Calendar availability has not been checked for this date.");
   }
+  if (state.booking?.notices) {
+    add(state.booking.notices === 1 ? "A booking request was not booked. " : state.booking.notices + " booking requests were not booked. ",
+      button("","booking-settings","Open booking settings","See who asked"));
+  }
   for (const warning of meetings.current.warnings) add(warning);
   if (state.connection.accounts?.some(account => !account.meetingDetails)) {
     add(settingsLink("Show meeting details")," to see titles, guests and join links for accounts sharing only busy times.");
@@ -405,6 +410,7 @@ byId("planner").addEventListener("click",async (event) => {
     return render();
   }
   if (action === "calendar-settings") return openSettings("calendars");
+  if (action === "booking-settings") return openSettings("booking");
   const task = state.tasks.find(({id}) => id === target.dataset.id);
   if (!task) return;
   if (action === "move-later") return movePicker.open(task);
@@ -474,10 +480,16 @@ function settingsTab(tab) {
   byId("work-form").hidden = tab !== "work";
   byId("calendar-settings").hidden = tab !== "calendars";
   byId("agent-settings").hidden = tab !== "agent";
+  byId("tab-booking").setAttribute("aria-pressed",String(tab === "booking"));
+  byId("booking-settings").hidden = tab !== "booking";
   errorAt("settings-error");
   if (tab === "calendars") fillCalendarSettings();
   if (tab === "agent") agentSettings.open(state);
+  if (tab === "booking") void bookingSettings.open();
 }
+const bookingSettings = createBookingSettings({api,toast,errorAt,connect:(control,options) => startConnection(control,options)});
+byId("tab-booking").addEventListener("click",() => settingsTab("booking"));
+window.addEventListener("focus",() => { if (byId("settings").open && settingTab === "booking") void bookingSettings.refresh(); });
 
 const agentSettings = createAgentSettings({api,toast,errorAt,onSaved:selected => {
   if (state) state.selectedAgent = selected;

@@ -16,6 +16,7 @@ import { capOverrun, observeOverrun, proposeOverrun } from './overrun.mjs';
 import { localTaskTitle, recordDurationFeedback } from './task-learning.mjs';
 import { adjustTaskDuration, previewAdjustedSlot, setManualDuration } from './duration.mjs';
 import { agentSelection } from './agents/manager.mjs';
+import { canWriteBookings, writesBookings } from './booking-service.mjs';
 
 const id = () => randomUUID().replaceAll('-', '');
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -178,7 +179,7 @@ const reservationOf = task => ({ ...task.remote, taskId: task.id, ...slotOf(task
 
 // Produce possible gaps for the planner. Google can merge an owned reservation
 // with an unrelated meeting, so a proposed gap is always verified by event ID.
-function withoutSlots(intervals, slots) {
+export function withoutSlots(intervals, slots) {
   let result = intervals;
   for (const slot of slots) {
     result = result.flatMap(block => {
@@ -301,7 +302,8 @@ export class DaylineService {
   snapshot() {
     const now = this.clock();
     const accounts = this.data.accounts.map(account => ({
-      sub: account.sub, email: account.email, mode: account.mode, meetingDetails: this.canReadMeetings(account)
+      sub: account.sub, email: account.email, mode: account.mode, meetingDetails: this.canReadMeetings(account),
+      bookingAccess: canWriteBookings(account)
     }));
     return {
       tasks: this.data.tasks.map(task => ({ ...safeTask(task, now), canReorder: this.canReorderTask(task, now) })),
@@ -315,6 +317,7 @@ export class DaylineService {
         syncing: this.syncing, lastSync: this.data.lastSync, error: this.error
       },
       busy: this.busy, busyStart: this.busyRange?.start || null, busyEnd: this.busyRange?.end || null,
+      booking: { enabled: this.data.booking?.enabled === true, notices: this.data.booking?.notices?.length ?? 0 },
       now: now.toISOString(),
       appVersion: metadata.version
     };
@@ -1009,9 +1012,10 @@ export class DaylineService {
   async beginConnection({ expectedMode, mode = this.data.settings.calendarMode, accountSub } = {}) {
     const plannerMode = this.data.settings.calendarMode;
     if (expectedMode !== undefined && expectedMode !== plannerMode) throw invalid('The calendar mode changed. Refresh Settings before connecting.', 409);
-    if (mode !== 'details' && mode !== plannerMode) throw invalid('Choose the calendar access shown in Settings.', 409);
+    if (mode !== 'details' && mode !== 'booking' && mode !== plannerMode) throw invalid('Choose the calendar access shown in Settings.', 409);
     const account = this.data.accounts.find(a => a.sub === accountSub);
     if (accountSub != null && !account) throw invalid('Choose a connected Google account.');
+    if (mode === 'booking' && !account) throw invalid('Choose the connected account that receives booked meetings.');
     const { clientId } = await this.client();
     const state = randomBytes(32).toString('base64url');
     const verifier = randomBytes(48).toString('base64url');
@@ -1041,14 +1045,18 @@ export class DaylineService {
       throw invalid('Google returned a different account. Choose the address shown for this connection in Dayline.', 409);
     }
     const existing = this.data.accounts.find(a => a.sub === profile.sub);
-    const mode = request.mode === 'details' ? 'availability' : request.mode;
-    const meetingDetails = request.mode === 'details';
-    if (!tokens.refresh_token && (!existing?.secret || existing.mode !== mode || Boolean(existing.meetingDetails) !== meetingDetails)) {
+    // Booking access adds event writes to one account and leaves its other choices alone.
+    // Any other sign-in replaces the grant, so it ends booking access for that account.
+    const booking = request.mode === 'booking';
+    const mode = booking ? existing?.mode ?? 'availability' : request.mode === 'details' ? 'availability' : request.mode;
+    const meetingDetails = booking ? Boolean(existing?.meetingDetails) : request.mode === 'details';
+    if (!tokens.refresh_token && (!existing?.secret || existing.mode !== mode || Boolean(existing.meetingDetails) !== meetingDetails ||
+        Boolean(existing.booking) !== booking)) {
       throw invalid('Google did not grant offline access. Reconnect and allow the requested calendar permissions.');
     }
     const secret = tokens.refresh_token ? await this.vault.seal(tokens.refresh_token) : existing.secret;
     checkMode();
-    const account = { ...existing, ...profile, secret, mode, meetingDetails };
+    const account = { ...existing, ...profile, secret, mode, meetingDetails, booking };
     if (existing) this.data.accounts[this.data.accounts.indexOf(existing)] = account;
     else this.data.accounts.push(account);
     this.discovery = null;
@@ -1107,7 +1115,7 @@ export class DaylineService {
     const account = this.data.accounts.find(a => a.sub === sub);
     if (!account) throw invalid('Reconnect the original Google account to sync this event.', 409);
     const mode = account.mode === 'sync' && this.data.settings.calendarMode === 'sync' ? 'sync'
-      : account.meetingDetails ? 'details' : 'availability';
+      : writesBookings(this, account) ? 'booking' : account.meetingDetails ? 'details' : 'availability';
     const cached = this.tokens.get(sub);
     if (cached?.mode === mode && cached.expires > Date.now() + 60000) return cached.access;
     const pending = this.refreshes.get(sub);

@@ -9,6 +9,7 @@
   <title>Dayline</title>
   <link rel="icon" href="/mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/booking-settings.css">
   <script type="module" src="/app.js"></script>
 </head>
 <body>
@@ -91,7 +92,7 @@
 
   <dialog id="settings" aria-labelledby="settings-title" class="panel">
     <div class="dialog-heading"><div><p class="eyebrow">Dayline</p><h2 id="settings-title">Settings</h2></div><button class="icon-button close-dialog" aria-label="Close settings"><span data-icon="x"></span></button></div>
-    <div class="settings-tabs" role="group" aria-label="Settings section"><button id="tab-work" type="button" aria-pressed="true">Working hours</button><button id="tab-calendars" type="button" aria-pressed="false">Calendars</button><button id="tab-agent" type="button" aria-pressed="false">Task agent</button></div>
+    <div class="settings-tabs" role="group" aria-label="Settings section"><button id="tab-work" type="button" aria-pressed="true">Working hours</button><button id="tab-calendars" type="button" aria-pressed="false">Calendars</button><button id="tab-agent" type="button" aria-pressed="false">Task agent</button><button id="tab-booking" type="button" aria-pressed="false">Booking</button></div>
     <div class="dialog-scroll">
       <form id="work-form" class="form-body">
         <fieldset><legend>Working days</legend><div id="work-days" class="work-days"></div></fieldset>
@@ -170,6 +171,7 @@
           <h3 id="duration-notes-title">Your duration notes</h3><ul id="duration-note-list" class="hint"></ul>
         </section>
       </section>
+      <section id="booking-settings" class="form-body" aria-label="Booking links" hidden></section>
       <p id="settings-error" class="field-error dialog-error" role="alert" hidden></p>
     </div>
   </dialog>
