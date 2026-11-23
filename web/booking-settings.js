@@ -67,6 +67,23 @@ export function hoursLabel(hours,settings) {
   return daysLabel(keys) + ", " + (ranges.size === 1 ? [...ranges][0] : "hours vary");
 }
 
+// A few of the next free times as plain text, to paste into an email:
+// up to three days, up to three times on each.
+export function timesText(slots,{timeZone,link,title,minutes}) {
+  if (!slots.length) return "No free times are published for this meeting type at the moment.\n\nBook here: " + link;
+  const day = new Intl.DateTimeFormat("en-GB",{weekday:"short",day:"numeric",month:"short",timeZone});
+  const time = new Intl.DateTimeFormat("en-GB",{hour:"2-digit",minute:"2-digit",hourCycle:"h23",timeZone});
+  const days = new Map();
+  for (const start of slots) {
+    const key = day.format(start);
+    if (!days.has(key)) { if (days.size === 3) break; days.set(key,[]); }
+    if (days.get(key).length < 3) days.get(key).push(time.format(start));
+  }
+  const lines = [...days].map(([name,times]) => name + ": " + times.join(", "));
+  return "Here are some times that work for a " + lengthLabel(minutes) + " " + title + (timeZone ? " (" + timeZone.replaceAll("_"," ") + " time)" : "") + ":\n\n" +
+    lines.join("\n") + "\n\nPick one of these or any other free time here:\n" + link;
+}
+
 export function createBookingSettings({api,toast,fail,connect,zone,settings,onChange}) {
   const root = document.getElementById("booking-settings");
   let view = null;
@@ -83,7 +100,8 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
       // The Mac app grants no clipboard permission; copying a selection needs none.
       const holder = input("text",text,{readonly:""});
       holder.className = "booking-copy-holder";
-      (panel?.open ? panel : root).append(holder);
+      // An open dialog makes the rest of the page inert, so the selection must live inside it.
+      (share?.open ? share : panel?.open ? panel : root).append(holder);
       holder.select();
       document.execCommand("copy");
       holder.remove();
@@ -193,27 +211,129 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
   }
 
   // --------------------------------------------------------- type cards
+  function iconButton(symbol,label,onClick) {
+    const control = element("button","icon-button booking-icon");
+    control.type = "button";
+    control.title = label;
+    control.setAttribute("aria-label",label);
+    control.append(icon(symbol));
+    if (onClick) control.addEventListener("click",onClick);
+    return control;
+  }
+
+  // An icon that opens the public page of a type, or says why it cannot yet.
+  function pageLink(href,symbol,label,why) {
+    if (!href) {
+      const idle = iconButton(symbol,label + ". " + why);
+      idle.disabled = true;
+      return idle;
+    }
+    const visit = openLink(href,label);
+    visit.replaceChildren(icon(symbol));
+    visit.classList.add("booking-icon");
+    return visit;
+  }
+
+  const withType = (index,change) => view.types.map((known,i) => i === index ? change(known) : known);
+  function freeSlug(base) {
+    for (let n = 2;;n++) {
+      const candidate = (base.slice(0,36) + "-" + n);
+      if (!view.types.some(known => known.slug === candidate)) return candidate;
+    }
+  }
+
+  // Edit, duplicate, switch off, delete: the less frequent actions of a card.
+  function typeMenu(type,index) {
+    const off = type.active === false;
+    const menu = element("details","booking-menu");
+    const opener = element("summary","icon-button booking-icon booking-more");
+    opener.title = "More for " + type.title;
+    opener.setAttribute("aria-label","More for " + type.title);
+    opener.append(icon("more"));
+    const list = element("div","booking-menu-list");
+    const item = (label,run) => {
+      const entry = element("button","",label);
+      entry.type = "button";
+      entry.addEventListener("click",() => { menu.open = false; run(); });
+      list.append(entry);
+      return entry;
+    };
+    item("Edit",() => openPanel(index));
+    item("Duplicate",() => openPanel(-1,type.accountSub,{...structuredClone(type),title:type.title + " (copy)",slug:freeSlug(type.slug),active:true}));
+    item(off ? "Turn on" : "Turn off",() => void send({types:withType(index,known => ({...known,active:off}))},"“" + type.title + "” is " + (off ? "on." : "off. Its link no longer answers.")));
+    const remove = item("Delete",async () => {
+      if (!window.confirm("Delete “" + type.title + "”? Its link stops working. Meetings already booked stay in your calendar.")) return;
+      await send({types:view.types.filter((_,i) => i !== index)},"Meeting type deleted.");
+    });
+    remove.disabled = view.types.length < 2;
+    remove.className = "is-danger";
+    menu.append(opener,list);
+    return menu;
+  }
+
   function typeCard(type,index) {
-    const card = element("li","booking-card" + (type.hidden ? " is-hidden" : ""));
+    const off = type.active === false;
+    const card = element("li","booking-card" + (type.hidden ? " is-hidden" : "") + (off ? " is-off" : ""));
     const main = element("button","booking-card-main");
     main.type = "button";
     main.setAttribute("aria-label","Edit " + type.title);
     main.title = "Edit this meeting type";
     main.addEventListener("click",() => openPanel(index));
     main.append(element("strong","",type.title),
-      element("span","booking-type-facts",[lengthLabel(type.durationMin),"Google Meet","One-on-one",type.hidden && "Hidden",!type.notesToWiki && "Notes stay private"].filter(Boolean).join(" · ")),
+      element("span","booking-type-facts",[off && "Off",lengthLabel(type.durationMin),"Google Meet","One-on-one",type.hidden && "Hidden",!type.notesToWiki && "Notes stay private"].filter(Boolean).join(" · ")),
       element("span","booking-type-facts",hoursLabel(type.hours,settings?.())));
     const actions = element("div","booking-row-actions");
-    const href = linkFor(type.slug);
+    const href = off ? "" : linkFor(type.slug);
+    const why = off ? "This meeting type is switched off" : view.enabled ? "The link appears once your page is published" : "Switch on booking links first";
+    // Booking for someone else is the public page, filled in on their behalf.
+    const book = pageLink(href,"calendarPlus","Book a meeting for someone",why);
+    const share = iconButton("share",href ? "Share " + type.title : "Share. " + why,() => openShare(type,href));
+    share.disabled = !href;
     const copyLink = action("secondary","Copy link","link");
     copyLink.setAttribute("aria-label","Copy the link for " + type.title);
     copyLink.disabled = !href;
-    copyLink.title = href ? href : view.enabled ? "The link appears once your page is published" : "Switch on booking links to get a link";
+    copyLink.title = href || why;
     copyLink.addEventListener("click",() => copy(href,copyLink));
-    actions.append(copyLink);
-    if (href) actions.append(openLink(href,"Open the page for " + type.title));
+    actions.append(book,share,copyLink,pageLink(href,"external","Preview the booking page for " + type.title,why),typeMenu(type,index));
     card.append(main,actions);
     return card;
+  }
+
+  // ----------------------------------------------------------- sharing
+  let share = null;
+  async function openShare(type,href) {
+    share?.remove();
+    const box = share = element("dialog","panel small booking-share");
+    box.setAttribute("aria-label","Share " + type.title);
+    box.addEventListener("click",event => { if (event.target === box) box.close(); });
+    box.addEventListener("close",() => { box.remove(); if (share === box) share = null; });
+    const head = element("div","dialog-heading");
+    const heading = element("div");
+    heading.append(element("p","eyebrow","Share"),element("h2","",type.title));
+    const close = iconButton("x","Close",() => box.close());
+    head.append(heading,close);
+    const body = element("div","form-body");
+    const link = input("text",href,{readonly:"","aria-label":"Link"});
+    link.addEventListener("focus",() => link.select());
+    const copyLink = action("secondary","Copy link","link");
+    copyLink.addEventListener("click",() => copy(href,copyLink));
+    const row = element("div","booking-link");
+    row.append(link,copyLink);
+    const text = input("textarea","Loading your free times…",{rows:"7","aria-label":"Times for an email"});
+    const copyTimes = action("secondary","Copy times","link");
+    copyTimes.disabled = true;
+    copyTimes.addEventListener("click",() => copy(text.value,copyTimes));
+    const timesActions = element("div","dialog-actions");
+    timesActions.append(copyTimes);
+    body.append(field("Link",row),field("Times for an email",text,"A few of your next free times, to paste into a message. Edit them before copying if you like."),timesActions);
+    box.append(head,body);
+    root.parentElement.append(box);
+    box.showModal();
+    try {
+      const {slots} = await api("/api/booking/times/" + type.slug);
+      text.value = timesText(slots,{timeZone:zone?.(),link:href,title:type.title,minutes:type.durationMin});
+      copyTimes.disabled = !slots.length;
+    } catch (error) { text.value = error.message; }
   }
 
   // ------------------------------------------------------ the side panel
@@ -221,11 +341,11 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
     if (panel?.open) panel.close();
   }
 
-  // `sub` is the address whose section a new type is created in.
-  function openPanel(index,sub) {
+  // `sub` is the address whose section a new type is created in; `template` is a type being duplicated.
+  function openPanel(index,sub,template) {
     const isNew = index < 0;
     const type = isNew ? {slug:"",title:"",description:"",durationMin:30,slotStepMin:30,bufferMin:15,minNoticeMin:720,maxDaysAhead:45,hidden:false,notesToWiki:true,hours:null,
-      accountSub:sub ?? view.addresses[0]?.sub ?? null} : structuredClone(view.types[index]);
+      active:true,...template,accountSub:sub ?? view.addresses[0]?.sub ?? null} : structuredClone(view.types[index]);
     panel?.remove();
     panel = element("dialog","booking-panel");
     panel.setAttribute("aria-label",isNew ? "New meeting type" : "Meeting type " + type.title);
@@ -249,7 +369,7 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
 
     const title = input("text",type.title,{maxlength:"80",required:""});
     const slug = input("text",type.slug,{maxlength:"40",pattern:"[a-z0-9][a-z0-9\\-]*",spellcheck:"false",autocapitalize:"none",required:""});
-    let slugTouched = !isNew;
+    let slugTouched = !isNew || Boolean(template);
     title.addEventListener("input",() => { if (!slugTouched) slug.value = slugOf(title.value); });
     slug.addEventListener("input",() => { slugTouched = true; });
     const base = view.status.url ? view.status.url.replace(/^https:\/\//,"") + "/" : "your page/";
@@ -361,7 +481,7 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
       }
       const next = {slug:slug.value.trim(),title:title.value.trim(),description:description.value.trim(),durationMin:Number(duration.value),
         slotStepMin:Number(step.value),bufferMin:Number(gap.value),minNoticeMin:Math.round(Number(notice.value) * 60),maxDaysAhead:Number(ahead.value),
-        hidden:hidden.box.checked,notesToWiki:wiki.box.checked,hours,...(type.accountSub && {accountSub:address.value || type.accountSub})};
+        hidden:hidden.box.checked,notesToWiki:wiki.box.checked,hours,active:type.active !== false,...(type.accountSub && {accountSub:address.value || type.accountSub})};
       const types = isNew ? [...view.types,next] : view.types.map((known,i) => i === index ? next : known);
       save.disabled = true;
       if (await send({types},isNew ? "Meeting type created." : "Meeting type saved.")) closePanel();
@@ -462,6 +582,11 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
     parts.push(element("p","hint booking-privacy","The public page shows your name, these meeting types and the start times that are free. Meeting details, tasks and Google access stay on this Mac."));
     root.replaceChildren(...parts);
   }
+
+  // A card's menu closes when the pointer goes anywhere else.
+  document.addEventListener("click",event => {
+    for (const menu of root.querySelectorAll(".booking-menu[open]")) if (!menu.contains(event.target)) menu.open = false;
+  });
 
   return {
     async open() {

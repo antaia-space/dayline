@@ -15,7 +15,7 @@ export const ID_PREFIX_WIKI = 'bkb';
 export const ID_PREFIX_PRIVATE = 'bkp';
 // A request that waited for a sleeping Mac is still confirmed this close to its start, not closer.
 export const CONFIRM_LEAD = 30 * MINUTE;
-const typeFields = ['slug', 'title', 'description', 'durationMin', 'slotStepMin', 'bufferMin', 'minNoticeMin', 'maxDaysAhead', 'hidden', 'notesToWiki', 'hours', 'accountSub'];
+const typeFields = ['slug', 'title', 'description', 'durationMin', 'slotStepMin', 'bufferMin', 'minNoticeMin', 'maxDaysAhead', 'hidden', 'notesToWiki', 'hours', 'accountSub', 'active'];
 const CLOCK = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const whole = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
 const line = (value, max) => typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, max) : '';
@@ -23,7 +23,7 @@ const iso = ms => new Date(ms).toISOString();
 
 export function defaultBooking() {
   const type = (slug, title, description, durationMin, slotStepMin, extra = {}) => ({ slug, title, description, durationMin, slotStepMin,
-    bufferMin: 15, minNoticeMin: 12 * 60, maxDaysAhead: 45, hidden: false, notesToWiki: true, hours: null, ...extra });
+    bufferMin: 15, minNoticeMin: 12 * 60, maxDaysAhead: 45, hidden: false, notesToWiki: true, hours: null, active: true, ...extra });
   return {
     enabled: false, published: false, owner: { name: '', headline: 'Antaia' }, accountSub: null, calendarId: null, notices: [],
     types: [
@@ -95,7 +95,7 @@ function checkedTypes(service, input) {
     if (t.accountSub != null && !service.data.accounts.some(a => a.sub === t.accountSub)) throw invalid('Choose a connected Google address for “' + title + '”.');
     return { slug: t.slug, title, description: line(t.description, 300), durationMin: t.durationMin, slotStepMin: t.slotStepMin,
       bufferMin: t.bufferMin, minNoticeMin: t.minNoticeMin, maxDaysAhead: t.maxDaysAhead, hidden: t.hidden === true, notesToWiki: t.notesToWiki !== false,
-      hours: checkedHours(t.hours, title), accountSub: t.accountSub ?? firstAddress(service) };
+      hours: checkedHours(t.hours, title), accountSub: t.accountSub ?? firstAddress(service), active: t.active !== false };
   });
 }
 
@@ -218,16 +218,19 @@ const publicType = ({ slug, title, description, durationMin, bufferMin, minNotic
  */
 export async function bookingSnapshot(service, now = service.clock().getTime()) {
   const state = bookingState(service), settings = service.data.settings;
-  const page = { owner: { ...state.owner }, types: state.types.map(publicType), slots: {}, paused: null };
+  // A meeting type that is switched off is not published at all: its link stops answering.
+  const offered = state.types.filter(type => type.active !== false);
+  const page = { owner: { ...state.owner }, types: offered.map(publicType), slots: {}, paused: null };
   try {
     if (service.data.accounts.length && !service.calendars.length) await service.discover();
     const targets = bookingTargets(service);
     const used = [...new Set(state.types.map(type => addressOf(service, type)))].map(sub => targets.get(sub)).filter(target => target?.ready);
     if (!used.length) return { page: { ...page, paused: 'setup' } };
-    const horizon = Math.max(...state.types.map(t => t.maxDaysAhead));
+    if (!offered.length) return { page: { ...page, paused: 'off' } };
+    const horizon = Math.max(...offered.map(t => t.maxDaysAhead));
     // Busy time is the same whichever address a guest books: every calendar checked for conflicts counts.
     const busy = await bookingBusy(service, now, now + (horizon + 1) * DAY);
-    for (const type of state.types) {
+    for (const type of offered) {
       // A type whose address may not write events yet offers no times.
       // The receiver stores at most 3,000 start times per type; the nearest ones come first.
       page.slots[type.slug] = !targets.get(addressOf(service, type))?.ready ? []
@@ -315,7 +318,7 @@ export async function settleBooking(service, request, { pageUrl, now = service.c
   }
 
   if (kind !== 'book') throw invalid('Unknown booking request.');
-  const type = state.types.find(t => t.slug === request.type);
+  const type = state.types.find(t => t.slug === request.type && t.active !== false);
   // The meeting goes to the calendar of the address this type is booked with.
   const target = type ? targets.get(addressOf(service, type)) : ready[0];
   if (!target?.ready) throw notReady();

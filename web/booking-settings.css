@@ -52,6 +52,25 @@
 .booking-row-actions { display: flex; align-items: center; gap: .35rem; flex: none; }
 .booking-row-actions .secondary .icon, .booking-section-bar .primary .icon, .booking-link .secondary .icon { width: .95rem; height: .95rem; }
 .booking-row-actions .secondary:disabled { opacity: .55; cursor: default; }
+.booking-row-actions .secondary .icon, .booking-section-bar .secondary .icon { width: .95rem; height: .95rem; }
+/* Card actions: book for someone, share, copy link, preview, more. */
+.booking-icon { flex: none; width: 2.2rem; height: 2.2rem; display: inline-grid; place-items: center; color: var(--muted); border-radius: .39rem; cursor: pointer; list-style: none; }
+.booking-icon::-webkit-details-marker { display: none; }
+.booking-icon:hover { color: var(--accent-dark); background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); }
+.booking-icon:disabled { opacity: .4; cursor: default; background: none; box-shadow: none; color: var(--muted); }
+.booking-icon .icon { width: 1.1rem; height: 1.1rem; }
+.booking-more .icon { stroke-width: 2.8; }
+.booking-card.is-off { border-inline-start-color: var(--line); }
+.booking-card.is-off .booking-card-main strong { color: var(--quiet); }
+.booking-menu { position: relative; }
+.booking-menu-list { position: absolute; z-index: 5; inset-block-start: calc(100% + .25rem); inset-inline-end: 0; min-inline-size: 10.5rem; padding: .3rem; display: grid; background: var(--surface); border: 1px solid var(--line); border-radius: .5rem; box-shadow: 0 10px 34px var(--shade); }
+.booking-menu-list button { padding: .5rem .7rem; text-align: start; font-size: .9rem; border-radius: .32rem; }
+.booking-menu-list button:hover:not(:disabled) { background: var(--surface-muted); }
+.booking-menu-list button:disabled { opacity: .45; cursor: default; }
+.booking-menu-list .is-danger { color: var(--accent-dark); }
+.booking-share .form-body { padding-top: 1rem; }
+.booking-share .booking-link { max-width: none; margin-top: .35rem; }
+.form-body .booking-share textarea, .booking-share textarea { font-size: .88rem; line-height: 1.5; }
 
 /* Booked meetings and requests. */
 .booking-type-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }

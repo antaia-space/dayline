@@ -10,6 +10,7 @@ const handle = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 const DAY = 86_400_000;
 const pauses = {
   setup: 'Choose a calendar with event access under Bookings go to.',
+  off: 'Every meeting type is switched off.',
   reconnect: 'Reconnect the Google account that receives booked meetings.',
   unavailable: 'Google could not confirm your availability. No times are offered until it can.',
 };
@@ -33,6 +34,7 @@ export class BookingDesk {
     this.publishedAt = null;
     this.dirty = true;
     this.upcoming = [];
+    this.slots = {};
   }
 
   status() {
@@ -122,7 +124,7 @@ export class BookingDesk {
         await this.send({ page: null });
         await service.run(() => { state.published = false; service.store.save(); });
       }
-      Object.assign(this, { paused: null, waiting: 0, publishedAt: null, dirty: true, upcoming: [] });
+      Object.assign(this, { paused: null, waiting: 0, publishedAt: null, dirty: true, upcoming: [], slots: {} });
       return;
     }
     let outcomes = [];
@@ -134,6 +136,7 @@ export class BookingDesk {
         const snapshot = await service.run(() => bookingSnapshot(service, this.now()));
         body.page = snapshot.page;
         if (snapshot.upcoming) this.upcoming = snapshot.upcoming; // Shown on this Mac; never sent.
+        this.slots = snapshot.page.slots; // For "copy times for an email" in the Bookings tab.
         if (snapshot.bookings) {
           // A meeting created a moment ago may be missing from Google's list for a few seconds.
           const listed = new Map(snapshot.bookings.map(b => [b.id, b]));
