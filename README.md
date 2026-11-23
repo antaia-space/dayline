@@ -6,7 +6,7 @@ Dayline finds time for your to-do list. Write a task in plain English and it est
 
 ## Install on a Mac
 
-1. Sign in to GitHub with access to the Antaia repository. For an Apple silicon or Intel Mac running macOS 13 or later, download the universal Mac ZIP, **Dayline-1.1.0-mac-universal.zip** for this version. [Latest Mac release](https://github.com/antaia-space/dayline/releases/latest)
+1. Sign in to GitHub with access to the Antaia repository. For an Apple silicon or Intel Mac running macOS 13 or later, download the universal Mac ZIP, **Dayline-1.1.1-mac-universal.zip** for this version. [Latest Mac release](https://github.com/antaia-space/dayline/releases/latest)
 2. Unzip the download, drag **Dayline.app** to **Applications**, and open it. To use the same planner in your browser, choose **File → Open in Browser** in the Mac app. Both views follow your system’s light or dark appearance.
 
 The internal build uses an ad hoc signature and has not been notarized by Apple. If your Mac’s launch policy requires approval, follow Antaia’s approved procedure or run the app from source below.
@@ -18,7 +18,7 @@ The internal build uses an ad hoc signature and has not been notarized by Apple.
 3. **Check for conflicts on** starts with all available calendars selected, including shared calendars. Google’s generated Week Numbers feed has no bookable events and is omitted. Keep at least one availability calendar selected and choose **Save calendars**. In availability-only mode, you can uncheck any calendar, including your primary.
 4. In **Settings → Working hours**, set your days, hours, and time zone. The default is Monday–Friday, 09:00–17:00, in the Mac’s time zone.
 
-Availability-only is the default for new installations and for planners upgraded from 1.0. Dayline reads calendar names and busy intervals. Task blocks, checkmarks, and deletions stay on your Mac. If a meeting takes a time you had planned to use, the next refresh moves the unfinished task to another opening. If Google cannot confirm availability, upcoming tasks wait under **Unscheduled** until a refresh succeeds. Choose **Refresh availability** to retry.
+Availability-only is the default for new installations and for planners upgraded from 1.0. Dayline reads calendar names and busy intervals. Task blocks, checkmarks, and deletions stay on your Mac. If a meeting takes a time you had planned to use, the next refresh moves the unfinished task to another opening. If Google cannot confirm availability, upcoming tasks wait under **Unscheduled** until a refresh succeeds. Choose **Refresh availability** to retry. After an internal Mac update, macOS may ask for access to **Dayline Safe Storage** in Keychain. Allow that item in the system dialog and refresh. You can keep capturing and estimating tasks while calendar access is waiting.
 
 ### Google Calendar setup
 

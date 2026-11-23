@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, openSync, closeSync, readFileSync, writeFileSync, fsyncSync, renameSync } from 'node:fs';
 import path from 'node:path';
-import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
+import { randomBytes, createCipheriv, createDecipheriv, createHash } from 'node:crypto';
 
 export function defaultSettings() {
   return {
@@ -53,6 +53,38 @@ export function openStore(directory) {
   };
   if (migrateCalendarModes(state)) store.save();
   return store;
+}
+
+// macOS can keep a Safe Storage request pending until the owner answers a
+// system dialog. Release the planner queue and share that one native prompt.
+export function keychainVault(safeStorage, timeoutMs = 12000) {
+  const pending = new Map();
+  const approval = 'Allow Dayline Safe Storage in the macOS Keychain prompt, then choose Refresh availability in Dayline.';
+
+  function access(method, value, operation) {
+    const key = method + createHash('sha256').update(value).digest('hex');
+    const existing = pending.get(key);
+    if (existing) return existing;
+    const request = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(Object.assign(new Error(approval), { status: 423 })), timeoutMs);
+      Promise.resolve().then(operation).then(resolve, () => reject(Object.assign(new Error(approval), { status: 423 })))
+        .finally(() => { clearTimeout(timer); pending.delete(key); });
+    });
+    pending.set(key, request);
+    return request;
+  }
+
+  return {
+    seal(value) {
+      return access('seal', value, async () => {
+        if (!await safeStorage.isAsyncEncryptionAvailable()) throw new Error(approval);
+        return (await safeStorage.encryptStringAsync(value)).toString('base64');
+      });
+    },
+    open(value) {
+      return access('open', value, async () => (await safeStorage.decryptStringAsync(Buffer.from(value, 'base64'))).result);
+    }
+  };
 }
 
 // The standalone development server has its own directory. The Mac app uses Keychain.

@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { openStore, developmentVault } from '../src/store.mjs';
+import { openStore, developmentVault, keychainVault } from '../src/store.mjs';
 import { DaylineService } from '../src/service.mjs';
 import { startServer } from '../src/http.mjs';
 
@@ -53,4 +53,29 @@ test('the development vault round-trips a client without saving plaintext in pla
   assert.ok(service.snapshot().connection.configured);
   assert.equal((await service.client()).clientSecret, 'example-desktop-client');
   assert.ok(!(await readFile(path.join(dir, 'planner.json'), 'utf8')).includes('example-desktop-client'));
+});
+
+
+test('a waiting Keychain prompt releases the task queue, stays single, and recovers after approval', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'dayline-keychain-test-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let finish, reads = 0;
+  const original = new Promise(resolve => { finish = resolve; });
+  const vault = keychainVault({
+    decryptStringAsync: () => (++reads === 1 ? original : Promise.resolve({ result: 'test-value' }))
+  }, 15);
+  const store = openStore(dir);
+  const service = new DaylineService({ store, vault });
+  const blocked = service.run(() => vault.open('dGVzdA=='));
+  const duplicate = vault.open('dGVzdA==');
+  const task = service.run(() => service.createTask({ text: 'Draft an update' }));
+  await assert.rejects(blocked, error => error.status === 423 && /Keychain/.test(error.message));
+  await assert.rejects(duplicate, /Refresh availability/);
+  assert.ok(await task);
+  await assert.rejects(vault.open('dGVzdA=='), /Keychain/);
+  assert.equal(reads, 1);
+  finish({ result: 'test-value' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(await vault.open('dGVzdA=='), 'test-value');
+  assert.equal(reads, 2);
 });

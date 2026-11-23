@@ -90,19 +90,13 @@ else {
     nativeTheme.on('updated', () => {
       if (window && !window.isDestroyed()) window.setBackgroundColor(windowBackground());
     });
-    const { openStore } = await import('../src/store.mjs');
+    const { openStore, keychainVault } = await import('../src/store.mjs');
     const { TaskAgents } = await import('../src/agents/manager.mjs');
     const { DaylineService } = await import('../src/service.mjs');
     const { startServer } = await import('../src/http.mjs');
     const resources = app.isPackaged ? process.resourcesPath : path.join(__dirname, 'resources');
     const estimator = path.join(resources, 'estimator');
-    const vault = {
-      async seal(value) {
-        if (!await safeStorage.isAsyncEncryptionAvailable()) throw new Error('Unlock your macOS Keychain to save the Google connection.');
-        return (await safeStorage.encryptStringAsync(value)).toString('base64');
-      },
-      async open(value) { return (await safeStorage.decryptStringAsync(Buffer.from(value, 'base64'))).result; }
-    };
+    const vault = keychainVault(safeStorage);
     const store = openStore(dataDirectory);
     const agents = new TaskAgents({ store, helperPath: fs.existsSync(estimator) ? estimator : null });
     service = new DaylineService({ store, vault,
