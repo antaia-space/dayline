@@ -37,11 +37,11 @@ function usableChannel(record) {
 // calendar access/refresh tokens are never included in the receiver protocol.
 export class CalendarPush {
   constructor({ origin, sources, google = googleCalendar, token, identity, load = () => ({}), save = () => {},
-    onChange = () => {}, onStatus = () => {}, fetch: request = globalThis.fetch, WebSocket: Socket = globalThis.WebSocket,
+    onChange = () => {}, onStatus = () => {}, onBooking = () => {}, fetch: request = globalThis.fetch, WebSocket: Socket = globalThis.WebSocket,
     now = Date.now, random = Math.random, automatic = true, maintenanceMs = 60000, retryMs = 1000, maxRetryMs = 120000,
     coalesceMs = 100, handshakeMs = 15000, heartbeatMs = 30000, staleAfterMs = Math.max(90000, maintenanceMs * 2),
     renewBeforeMs = 12 * hour, ttlSeconds = 604800, batchSize = 4, batchDelayMs = 1000 }) {
-    Object.assign(this, { origin: relayOrigin(origin), sources, google, token, identity, load, save, onChange, onStatus, request, Socket,
+    Object.assign(this, { origin: relayOrigin(origin), sources, google, token, identity, load, save, onChange, onStatus, onBooking, request, Socket,
       random, automatic, maintenanceMs, retryMs, maxRetryMs, coalesceMs, handshakeMs, heartbeatMs, staleAfterMs, renewBeforeMs, ttlSeconds,
       batchSize, batchDelayMs });
     this.now = () => Number(now());
@@ -240,6 +240,9 @@ export class CalendarPush {
         else this.arm(0);
       } else if (this.socketReady && packet?.type === 'pong') {
         heartbeat();
+      } else if (this.socketReady && packet?.type === 'booking') {
+        // A guest left a request on the booking page. The signal says no more than that.
+        this.onBooking();
       } else if (this.socketReady && packet?.type === 'calendar' && ['sync', 'exists', 'not_exists'].includes(packet.state)) {
         const channel = this.channels.find(c => c.channelId === packet.channelId) || this.registering.get(packet.channelId);
         if (!channel || channel.streamId !== streamId || channel.expiresAt <= this.now() ||

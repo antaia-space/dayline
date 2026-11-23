@@ -1,0 +1,271 @@
+// Booking links: which times a guest may book, and the calendar event a
+// booking becomes. Google Calendar is the only store of bookings. Rules ported
+// from antaia-space/meet (src/lib/booking.ts, booking.config.ts).
+import { computeSlots, isValidTimeZone, WEEKDAYS } from './booking-slots.mjs';
+import { explicitStartFor } from './planner.mjs';
+import { invalid, withoutSlots } from './service.mjs';
+
+const MINUTE = 60_000, DAY = 86_400_000;
+const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
+const REQUEST_ID = /^[0-9a-v]{24}$/;
+const TOKEN = /^[0-9a-v]{24}\.[A-Za-z0-9_-]{27}$/;
+// Event id prefixes. The meeting-notes job in antaia-brain (.claude/granola_sync.py)
+// copies notes of "bkb" meetings to the company wiki and never copies "bkp" ones.
+export const ID_PREFIX_WIKI = 'bkb';
+export const ID_PREFIX_PRIVATE = 'bkp';
+// A request that waited for a sleeping Mac is still confirmed this close to its start, not closer.
+export const CONFIRM_LEAD = 30 * MINUTE;
+const typeFields = ['slug', 'title', 'description', 'durationMin', 'slotStepMin', 'bufferMin', 'minNoticeMin', 'maxDaysAhead', 'hidden', 'notesToWiki'];
+const whole = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
+const line = (value, max) => typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, max) : '';
+const iso = ms => new Date(ms).toISOString();
+
+export function defaultBooking() {
+  const type = (slug, title, description, durationMin, slotStepMin, extra = {}) => ({ slug, title, description, durationMin, slotStepMin,
+    bufferMin: 15, minNoticeMin: 12 * 60, maxDaysAhead: 45, hidden: false, notesToWiki: true, ...extra });
+  return {
+    enabled: false, published: false, owner: { name: '', headline: 'Antaia' }, accountSub: null, calendarId: null, notices: [],
+    types: [
+      type('intro', 'Intro call', 'A short first conversation.', 15, 15),
+      type('meeting', 'Meeting', 'A regular working call.', 30, 30),
+      type('deep-dive', 'Deep dive', 'A longer session for technical or commercial detail.', 60, 60),
+      type('private', 'Private call', 'A confidential conversation.', 30, 30, { hidden: true, notesToWiki: false }),
+    ],
+  };
+}
+
+export function bookingState(service) {
+  return service.data.booking ??= defaultBooking();
+}
+
+/** An account whose Google grant includes event writes. */
+export function canWriteBookings(account) {
+  return account?.booking === true || account?.mode === 'sync';
+}
+
+/** True while this account's access token must be able to create booked meetings. */
+export function writesBookings(service, account) {
+  const state = service.data.booking;
+  return Boolean(state?.enabled && state.accountSub === account.sub && canWriteBookings(account));
+}
+
+export function bookingTarget(service) {
+  const state = bookingState(service);
+  const calendar = service.calendars.find(c => c.id === state.calendarId && c.sub === state.accountSub);
+  return calendar?.writable ? calendar : null;
+}
+
+function checkedTypes(input) {
+  if (!Array.isArray(input) || !input.length || input.length > 20) throw invalid('Keep between 1 and 20 meeting types.');
+  const seen = new Set();
+  return input.map(t => {
+    if (!t || typeof t !== 'object' || Object.keys(t).some(key => !typeFields.includes(key))) throw invalid('Unknown meeting type setting.');
+    const title = line(t.title, 80);
+    if (!title) throw invalid('Give every meeting type a title.');
+    if (typeof t.slug !== 'string' || !SLUG.test(t.slug) || t.slug === 'booking') throw invalid('“' + title + '” needs a link name made of a–z, 0–9 and “-”.');
+    if (seen.has(t.slug)) throw invalid('Two meeting types share the link name “' + t.slug + '”.');
+    seen.add(t.slug);
+    if (!whole(t.durationMin, 5, 480)) throw invalid('“' + title + '” needs a length between 5 minutes and 8 hours.');
+    if (!whole(t.slotStepMin, 5, 240)) throw invalid('“' + title + '” needs a time step between 5 minutes and 4 hours.');
+    if (!whole(t.bufferMin, 0, 240)) throw invalid('“' + title + '” needs a gap between 0 minutes and 4 hours.');
+    if (!whole(t.minNoticeMin, 0, 30 * 24 * 60)) throw invalid('“' + title + '” needs a minimum notice of at most 30 days.');
+    if (!whole(t.maxDaysAhead, 1, 90)) throw invalid('“' + title + '” can be booked between 1 and 90 days ahead.');
+    return { slug: t.slug, title, description: line(t.description, 300), durationMin: t.durationMin, slotStepMin: t.slotStepMin,
+      bufferMin: t.bufferMin, minNoticeMin: t.minNoticeMin, maxDaysAhead: t.maxDaysAhead, hidden: t.hidden === true, notesToWiki: t.notesToWiki !== false };
+  });
+}
+
+export function updateBooking(service, input) {
+  const state = bookingState(service);
+  if (!input || Object.keys(input).some(key => !['enabled', 'owner', 'calendarId', 'types'].includes(key))) throw invalid('Unknown booking setting.');
+  const next = { ...state };
+  if (input.enabled !== undefined) {
+    if (typeof input.enabled !== 'boolean') throw invalid('Choose whether to offer booking links.');
+    next.enabled = input.enabled;
+  }
+  if (input.owner !== undefined) next.owner = { name: line(input.owner?.name, 100), headline: line(input.owner?.headline, 100) };
+  if (input.types !== undefined) next.types = checkedTypes(input.types);
+  if (input.calendarId !== undefined && input.calendarId !== state.calendarId) {
+    const calendar = service.calendars.find(c => c.id === input.calendarId);
+    if (!calendar?.writable) throw invalid('Choose a calendar you can add meetings to.');
+    next.calendarId = calendar.id;
+    next.accountSub = calendar.sub;
+  }
+  if (next.enabled && !next.owner.name) throw invalid('Enter the name guests should see.');
+  if (next.enabled && !next.calendarId) throw invalid('Choose the calendar that receives booked meetings.');
+  Object.assign(state, next);
+  service.store.save();
+}
+
+export function dismissBookingNotice(service, id) {
+  const state = bookingState(service);
+  state.notices = state.notices.filter(notice => notice.id !== id);
+  service.store.save();
+}
+
+/** What the Booking tab shows. Nothing here is a secret. */
+export function publicBooking(service) {
+  const state = bookingState(service);
+  const account = service.data.accounts.find(a => a.sub === state.accountSub);
+  return {
+    enabled: state.enabled, owner: { ...state.owner }, calendarId: state.calendarId, types: structuredClone(state.types),
+    notices: structuredClone(state.notices), account: account ? { sub: account.sub, email: account.email, access: canWriteBookings(account) } : null,
+    calendars: service.calendars.filter(c => c.writable).map(c => ({ id: c.id, name: c.name, sub: c.sub, accountEmail: c.accountEmail,
+      access: canWriteBookings(service.data.accounts.find(a => a.sub === c.sub)) })),
+  };
+}
+
+function bookingHours(settings) {
+  const hours = {};
+  // Dayline counts Monday as 1 and Sunday as 7.
+  for (const day of settings.workDays) hours[WEEKDAYS[day % 7]] = [{ start: settings.startTime, end: settings.endTime }];
+  return hours;
+}
+
+function fixedTasks(service) {
+  const zone = service.data.settings.timeZone;
+  return service.data.tasks.filter(t => t.start && t.end && !t.deleting && !t.done && !t.pendingEstimate && explicitStartFor(t, zone));
+}
+
+// Busy time for bookings: the calendars Dayline checks for conflicts, read as
+// free/busy only, plus tasks pinned to an exact time. Flexible tasks do not
+// block a booking; Dayline replans them around it as it does for any meeting.
+export async function bookingBusy(service, fromMs, toMs, { confirm = false } = {}) {
+  const syncing = service.data.settings.calendarMode === 'sync';
+  const movable = syncing ? service.data.tasks.filter(t => t.remote && service.movableFlexibleEvent(t)) : [];
+  let busy = [];
+  if (confirm && movable.length) {
+    // Before a write, Dayline's own task events are told apart from real meetings by event id.
+    const range = { start: iso(fromMs), end: iso(toMs) };
+    const inside = movable.filter(t => Date.parse(t.start) < toMs && Date.parse(t.end) > fromMs);
+    busy = await service.availability(range, undefined, inside.map(t => ({ ...t.remote, taskId: t.id, start: t.start, end: t.end })), 'confirm');
+  } else {
+    for (let cursor = fromMs; cursor < toMs; cursor += 28 * DAY) {
+      busy.push(...await service.availability({ start: iso(cursor), end: iso(Math.min(toMs, cursor + 28 * DAY)) }));
+    }
+    busy = withoutSlots(busy, movable);
+  }
+  return [...busy, ...fixedTasks(service)].map(({ start, end }) => ({ start: Date.parse(start), end: Date.parse(end) }));
+}
+
+const transient = error => !error?.status || error.status >= 500 || error.status === 429 || error.status === 423 || error.status === 412;
+const publicType = ({ slug, title, description, durationMin, bufferMin, minNoticeMin, maxDaysAhead, hidden }) =>
+  ({ slug, title, description, durationMin, bufferMin, minNoticeMin, maxDaysAhead, hidden });
+
+/**
+ * Everything the public page needs, and nothing else: the display name, the
+ * meeting types, and the start times that are free. When the calendars cannot
+ * be read the page is paused: offering times blind could double-book.
+ */
+export async function bookingSnapshot(service, now = service.clock().getTime()) {
+  const state = bookingState(service), settings = service.data.settings;
+  const page = { owner: { ...state.owner }, types: state.types.map(publicType), slots: {}, paused: null };
+  try {
+    if (service.data.accounts.length && !service.calendars.length) await service.discover();
+    const target = bookingTarget(service);
+    const account = service.data.accounts.find(a => a.sub === state.accountSub);
+    if (!target || !canWriteBookings(account)) return { page: { ...page, paused: 'setup' } };
+    const horizon = Math.max(...state.types.map(t => t.maxDaysAhead));
+    const busy = await bookingBusy(service, now, now + (horizon + 1) * DAY);
+    const hours = bookingHours(settings);
+    for (const type of state.types) {
+      // The receiver stores at most 3,000 start times per type; the nearest ones come first.
+      page.slots[type.slug] = computeSlots({ type: { ...type, hours, dateOverrides: {} }, ownerTimeZone: settings.timeZone,
+        fromMs: now, toMs: now + type.maxDaysAhead * DAY, nowMs: now, busy }).slice(0, 3000);
+    }
+    const events = await service.google.listBookingEvents(await service.token(target.sub), { calendarId: target.providerId, timeMin: iso(now) });
+    const bookings = events.filter(e => SLUG.test(e.type)).map(e => ({ id: e.eventId.slice(3), type: e.type, start: e.start, end: e.end }));
+    return { page, bookings };
+  } catch (error) {
+    if (transient(error)) throw error; // The last published times stay until Google answers again.
+    const reconnect = error.status === 401 || error.status === 409 || /invalid_grant|insufficientScopes|unexpectedScopes/.test(error.reason || '');
+    return { page: { ...page, slots: {}, paused: reconnect ? 'reconnect' : 'unavailable' }, problem: error.message };
+  }
+}
+
+function notice(service, kind, reason, request, type) {
+  const state = bookingState(service);
+  if (state.notices.some(n => n.id === request.id)) return;
+  state.notices = [...state.notices, { id: request.id, at: iso(service.clock().getTime()), kind, reason,
+    name: line(request.guest?.name, 100), email: line(request.guest?.email, 254), type: type?.title || line(request.type, 80),
+    start: Number.isSafeInteger(request.start) ? iso(request.start) : null }].slice(-20);
+  service.store.save();
+}
+
+function access(service) {
+  const state = bookingState(service);
+  const target = bookingTarget(service), account = service.data.accounts.find(a => a.sub === state.accountSub);
+  if (!state.enabled || !target || !canWriteBookings(account)) throw invalid('Booked meetings need a calendar with event access. Check Settings → Booking.', 409);
+  return { target, account };
+}
+
+async function findBooking(service, token, target, id, first = ID_PREFIX_WIKI) {
+  for (const prefix of first === ID_PREFIX_WIKI ? [ID_PREFIX_WIKI, ID_PREFIX_PRIVATE] : [ID_PREFIX_PRIVATE, ID_PREFIX_WIKI]) {
+    const event = await service.google.getBookingEvent(token, { calendarId: target.providerId, eventId: prefix + id });
+    if (event) return event;
+  }
+  return null;
+}
+
+async function stillFree(service, type, start, end, now) {
+  const settings = service.data.settings, gap = type.bufferMin * MINUTE;
+  const busy = await bookingBusy(service, start - gap, end + gap, { confirm: true });
+  // The guest met the minimum notice when asking; a Mac that slept must not undo that.
+  return computeSlots({ type: { ...type, minNoticeMin: 0, hours: bookingHours(settings), dateOverrides: {} }, ownerTimeZone: settings.timeZone,
+    fromMs: start, toMs: start + 1, nowMs: now, busy }).includes(start);
+}
+
+/**
+ * Answers one request the receiver handed over: create, move or delete the
+ * calendar event. The receiver is not trusted: every field is checked again and
+ * the calendar is read again. A thrown error leaves the request waiting.
+ */
+export async function settleBooking(service, request, { pageUrl, now = service.clock().getTime() }) {
+  if (!request || !REQUEST_ID.test(request.id || '')) throw invalid('Invalid booking request.');
+  const state = bookingState(service), { id, kind } = request;
+  const { target, account } = access(service);
+  const token = await service.token(target.sub);
+  const calendarId = target.providerId;
+
+  if (kind === 'cancel') {
+    const event = await findBooking(service, token, target, id);
+    if (event) await service.google.cancelBookingEvent(token, { calendarId, eventId: event.eventId });
+    return { id, kind, ok: true };
+  }
+
+  const { start, end } = request;
+  const timed = Number.isSafeInteger(start) && Number.isSafeInteger(end) && start < end;
+  if (kind === 'move') {
+    const refused = { id, kind, ok: false, start, end };
+    const event = await findBooking(service, token, target, id);
+    if (!event || !timed) return refused;
+    if (event.start === start && event.end === end) return { id, kind, ok: true, start, end };
+    const type = state.types.find(t => t.slug === event.type);
+    if (!type || end - start !== type.durationMin * MINUTE || start - now < CONFIRM_LEAD || !await stillFree(service, type, start, end, now)) return refused;
+    const moved = await service.google.moveBookingEvent(token, { calendarId, eventId: event.eventId, start, end });
+    return { id, kind, ok: true, start: moved.start, end: moved.end };
+  }
+
+  if (kind !== 'book') throw invalid('Unknown booking request.');
+  const type = state.types.find(t => t.slug === request.type);
+  const prefix = type?.notesToWiki === false ? ID_PREFIX_PRIVATE : ID_PREFIX_WIKI;
+  // A retry after a lost answer finds the event it already made.
+  const existing = await findBooking(service, token, target, id, prefix);
+  if (existing) return { id, kind, ok: true, start: existing.start, end: existing.end };
+  const guest = { name: line(request.guest?.name, 100), email: line(request.guest?.email, 254).toLowerCase(), timeZone: line(request.guest?.timeZone, 64) };
+  const notes = typeof request.guest?.notes === 'string' ? request.guest.notes.trim().slice(0, 2000) : '';
+  const refuse = reason => {
+    notice(service, reason === 'expired' ? 'expired' : 'declined', reason, request, type);
+    return { id, kind, ok: false, reason };
+  };
+  if (!timed || !type || end - start !== type.durationMin * MINUTE || guest.name.length < 2 || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(guest.email) ||
+      !isValidTimeZone(guest.timeZone) || !TOKEN.test(request.token || '') || !request.token.startsWith(id + '.')) return refuse('unavailable');
+  if (request.expired === true || start - now < CONFIRM_LEAD) return refuse('expired');
+  if (!await stillFree(service, type, start, end, now)) return refuse('taken');
+  const event = await service.google.createBookingEvent(token, {
+    calendarId, eventId: prefix + id, title: type.title + ': ' + guest.name + ' and ' + state.owner.name,
+    description: service.google.bookingDescription({ about: type.description, guest, notes, manageUrl: pageUrl + '/booking/' + request.token }),
+    start, end, ownerEmail: account.email, guest, type: type.slug,
+  });
+  return { id, kind, ok: true, start: event.start, end: event.end };
+}

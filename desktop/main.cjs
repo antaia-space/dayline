@@ -10,6 +10,7 @@ let local;
 let service;
 let requestedPage = '/';
 let browserRequested = false;
+let bookingOrigin = null;
 const windowBackground = () => nativeTheme.shouldUseDarkColors ? '#1c1f1d' : '#fbfbf8';
 
 function openBrowserPlanner() {
@@ -40,6 +41,7 @@ function external(url) {
       'developers.openai.com', 'geminicli.com', 'antigravity.google', 'code.claude.com', 'claude.com'];
     if (target.protocol === 'https:' && !target.username && !target.password &&
       (allowed.includes(target.hostname) || (target.hostname === 'github.com' && target.pathname.startsWith('/antaia-space/dayline')) ||
+       (bookingOrigin && target.origin === bookingOrigin) ||
        service?.meetingAgenda.containsLink(target.href))) {
       void shell.openExternal(target.href);
     }
@@ -117,6 +119,8 @@ else {
     service = new DaylineService({ store, vault,
       estimate: (text, context) => agents.estimate(text, context), bundledClient: loadBundledClient(resources) });
     const relay = process.env.DAYLINE_PUSH_RELAY ?? 'https://dayline-calendar.antaia-space.workers.dev';
+    // The person's own public booking page lives on the receiver and may be opened from Settings.
+    try { bookingOrigin = relay ? new URL(relay).origin : null; } catch { bookingOrigin = null; }
     local = await startServer({ service, agents, webRoot: path.join(__dirname, '..', 'web'), port: Number(process.env.DAYLINE_PORT || 43127),
       calendarPushOptions: relay ? { origin: relay } : undefined });
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));

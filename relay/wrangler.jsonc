@@ -9,6 +9,7 @@
   "vars": {
     "GOOGLE_CLIENT_ID": "1084728392138-s82su94gcrvrs8le83j8ck8997kid0rb.apps.googleusercontent.com"
   },
-  "durable_objects": { "bindings": [{ "name": "STREAMS", "class_name": "DeviceStream" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DeviceStream"] }]
+  "assets": { "directory": "./public" },
+  "durable_objects": { "bindings": [{ "name": "STREAMS", "class_name": "DeviceStream" }, { "name": "PAGES", "class_name": "BookingPage" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DeviceStream"] }, { "tag": "v2", "new_sqlite_classes": ["BookingPage"] }]
 }

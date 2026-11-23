@@ -5,8 +5,20 @@ const googleIssuers = ['https://accounts.google.com', 'accounts.google.com'];
 const streamPattern = /^[A-Za-z0-9_-]{43}$/;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const maxBody = 1024;
+const maxGuestBody = 12 * 1024;
+const maxSyncBody = 1024 * 1024;
 const lifetime = 8 * 24 * 60 * 60;
 const encoder = new TextEncoder();
+const handlePattern = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+const reservedHandles = new Set(['api', 'v1', 'health', 'assets']);
+const HANDLE = '([a-z0-9][a-z0-9._-]{0,62})', SLUG = '([a-z0-9][a-z0-9-]{0,39})', TOKEN = '([0-9a-v]{24}\\.[A-Za-z0-9_-]{27})';
+const pageRoute = new RegExp('^/' + HANDLE + '(?:/' + SLUG + '|/booking/' + TOKEN + ')?$');
+const apiRoute = new RegExp('^/api/' + HANDLE + '/(?:(page)|(book)|slots/' + SLUG + '|booking/' + TOKEN + '(?:/(reschedule|cancel))?)$');
+const pagePolicy = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const shell = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+  '<meta name="color-scheme" content="light dark"><meta name="robots" content="noindex"><title>Book a meeting</title>' +
+  '<link rel="stylesheet" href="/assets/booking.css"><main id="app"><p class="muted">Loading…</p></main>' +
+  '<noscript>This booking page needs JavaScript.</noscript><script type="module" src="/assets/booking.js"></script></html>';
 
 function reply(status, data) {
   const headers = { 'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff', 'Referrer-Policy':'no-referrer' };
@@ -16,9 +28,9 @@ function reply(status, data) {
 
 // Webhook bodies carry no information needed by the Mac. Bound both declared
 // and chunked bodies before handling any content.
-async function boundedBody(request) {
+async function boundedBody(request, limit = maxBody) {
   const length = request.headers.get('content-length');
-  if (length !== null && (!/^\d+$/.test(length) || Number(length)>maxBody)) return null;
+  if (length !== null && (!/^\d+$/.test(length) || Number(length)>limit)) return null;
   if (!request.body) return new Uint8Array();
   const reader = request.body.getReader(), chunks = [];
   let size = 0;
@@ -27,7 +39,7 @@ async function boundedBody(request) {
       const {done,value} = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > maxBody) { await reader.cancel(); return null; }
+      if (size > limit) { await reader.cancel(); return null; }
       chunks.push(value);
     }
   } finally { reader.releaseLock(); }
@@ -37,8 +49,19 @@ async function boundedBody(request) {
   return result;
 }
 
-function signTicket(key, streamId, scope, expires) {
-  return new SignJWT({}).setProtectedHeader({alg:'HS256',typ:'dayline-relay+jwt'})
+// Returns the parsed object, or the HTTP status that explains why there is none.
+async function jsonBody(request, limit) {
+  if (!/^application\/json(?:\s*;|$)/i.test(request.headers.get('content-type') || '')) return 415;
+  const bytes = await boundedBody(request, limit);
+  if (!bytes) return 413;
+  try {
+    const input = JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));
+    return input && typeof input === 'object' && !Array.isArray(input) ? input : 400;
+  } catch { return 400; }
+}
+
+function signTicket(key, streamId, scope, expires, claims = {}) {
+  return new SignJWT(claims).setProtectedHeader({alg:'HS256',typ:'dayline-relay+jwt'})
     .setIssuer('dayline').setAudience(scope).setSubject(streamId).setExpirationTime(expires).sign(key);
 }
 
@@ -49,6 +72,22 @@ async function ticketExpiry(token,key,streamId,scope,now) {
       audience:scope,subject:streamId,requiredClaims:['exp'],currentDate:new Date(now)});
     return Number.isSafeInteger(payload.exp) ? payload.exp*1000 : null;
   } catch { return null; }
+}
+
+// A booking ticket names the one page its Mac may publish: the part of the
+// verified Workspace address before "@". Nobody can publish another person's page.
+async function bookingTicket(request,key,now) {
+  const auth = request.headers.get('authorization') || '';
+  if (auth.length>600 || !/^Bearer [\w-]+\.[\w-]+\.[\w-]+$/i.test(auth)) return null;
+  try {
+    const {payload} = await jwtVerify(auth.slice(7),key,{algorithms:['HS256'],typ:'dayline-relay+jwt',issuer:'dayline',
+      audience:'booking',requiredClaims:['exp','sub'],currentDate:new Date(now)});
+    return streamPattern.test(payload.sub) && bookingHandle(payload.handle) ? {streamId:payload.sub,handle:payload.handle} : null;
+  } catch { return null; }
+}
+
+function bookingHandle(value) {
+  return typeof value === 'string' && handlePattern.test(value) && !reservedHandles.has(value) ? value : null;
 }
 
 function receiverTicket(request) {
@@ -65,6 +104,52 @@ export function calendarNotice(channelId,messageNumber,state) {
   return {type:'calendar',channelId:channelId.toLowerCase(),messageNumber,state};
 }
 
+async function askPage(env, handle, call) {
+  const object = env.PAGES.get(env.PAGES.idFromName(handle));
+  const answer = await object.fetch(new Request('https://page.internal/call',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({...call,handle})}));
+  if (!answer.ok) return reply(503);
+  const {status,body} = await answer.json();
+  return reply(status,body);
+}
+
+// Public booking pages and the Mac's side of them. Returns undefined for any
+// other path, which then follows the calendar notification routes below.
+async function bookingRelay(request, env, url, time) {
+  const page = request.method==='GET' ? pageRoute.exec(url.pathname) : null;
+  const api = apiRoute.exec(url.pathname);
+  const sync = url.pathname==='/v1/booking/sync';
+  if (!sync && !api && !(page && bookingHandle(page[1]))) return undefined;
+  if (!env.PAGES) return reply(404);
+  if (page && !api) {
+    return new Response(shell,{headers:{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store',
+      'Content-Security-Policy':pagePolicy,'X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY'}});
+  }
+  if (typeof env.RELAY_SECRET!=='string' || encoder.encode(env.RELAY_SECRET).length<32) return reply(503);
+  if (sync) {
+    if (request.method!=='POST') return reply(405);
+    const ticket = await bookingTicket(request,encoder.encode(env.RELAY_SECRET),time);
+    if (!ticket) return reply(401);
+    const input = await jsonBody(request,maxSyncBody);
+    if (typeof input === 'number') return reply(input);
+    return askPage(env,ticket.handle,{op:'sync',streamId:ticket.streamId,input});
+  }
+  const [,handle,isPage,isBook,slug,token,action] = api;
+  if (!bookingHandle(handle)) return reply(404);
+  const reading = Boolean(isPage || slug || (token && !action));
+  if (request.method !== (reading ? 'GET' : 'POST')) return reply(405);
+  let input;
+  if (!reading) {
+    // A page on another site cannot post a booking through a visitor's browser.
+    const origin = request.headers.get('origin');
+    if (origin && origin !== url.origin) return reply(403,{error:'Open the booking page itself to send this request.'});
+    input = await jsonBody(request,maxGuestBody);
+    if (typeof input === 'number') return reply(input,{error:'Bad request.'});
+  }
+  const op = isPage ? 'page' : isBook ? 'book' : slug ? 'slots' : action || 'status';
+  return askPage(env,handle,{op,slug,token,input,ip:request.headers.get('cf-connecting-ip') || 'unknown'});
+}
+
 export function createRelay({keys = googleKeys,now = Date.now} = {}) {
   return async function fetchRelay(request,env) {
     const url = new URL(request.url);
@@ -72,7 +157,9 @@ export function createRelay({keys = googleKeys,now = Date.now} = {}) {
     if (request.method==='GET' && url.pathname==='/health') return reply(200,{ok:true});
     const route = /^\/v1\/(stream|google)\/([A-Za-z0-9_-]{43})$/.exec(url.pathname);
     const session = url.pathname==='/v1/session';
-    if (!session && !route) return reply(404);
+    if (!session && !route) {
+      try { return await bookingRelay(request,env,url,now()) ?? reply(404); } catch { return reply(503); }
+    }
     if (request.method !== (route?.[1]==='stream'?'GET':'POST')) return reply(405);
     if (typeof env.RELAY_SECRET!=='string' || encoder.encode(env.RELAY_SECRET).length<32) return reply(503);
     const key = encoder.encode(env.RELAY_SECRET), time = now();
@@ -100,7 +187,12 @@ export function createRelay({keys = googleKeys,now = Date.now} = {}) {
         const digest = await crypto.subtle.digest('SHA-256',encoder.encode(JSON.stringify(['dayline-device-v1',payload.sub,input.deviceId])));
         const streamId = base64url.encode(new Uint8Array(digest)), expires = Math.floor(time/1000)+lifetime;
         const [receiveToken,notifyToken] = await Promise.all([signTicket(key,streamId,'receive',expires),signTicket(key,streamId,'notify',expires)]);
-        return reply(200,{streamId,receiveToken,notifyToken,expiresAt:expires*1000});
+        const granted = {streamId,receiveToken,notifyToken,expiresAt:expires*1000};
+        // The Workspace address is verified above; its local part names this person's booking page.
+        const address = typeof payload.email==='string' ? payload.email.toLowerCase() : '';
+        const handle = env.PAGES && address.endsWith('@antaia.space') ? bookingHandle(address.slice(0,-'@antaia.space'.length)) : null;
+        if (handle) Object.assign(granted,{bookingHandle:handle,bookingToken:await signTicket(key,streamId,'booking',expires,{handle})});
+        return reply(200,granted);
       }
       const [,kind,streamId] = route;
       if (kind==='stream' && request.headers.get('upgrade')?.toLowerCase()!=='websocket') return reply(426);
