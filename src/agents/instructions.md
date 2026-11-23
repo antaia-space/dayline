@@ -18,7 +18,7 @@ Estimate hands-on minutes for one person, including preparation and review. Pres
 
 Give the ordinary, unadjusted duration estimate. When durationHistory is present, Dayline has prior corrections for a similar activity and will apply its local timing adjustment after your response.
 
-Use the supplied local date, current time, and time zone to resolve relative dates. Report dates as YYYY-MM-DD and clocks as 24-hour HH:mm. The workweek is supplied for interpreting terms such as “end of the workweek.” It does not itself impose task-specific constraints. Leave unspecified limits null.
+Use the supplied local date, current time, and time zone to resolve relative dates. Accept both 12-hour and 24-hour wording. Report dates as YYYY-MM-DD and clock times as 24-hour HH:mm, including in titles, checklist labels, and explanations you generate. The workweek is supplied for interpreting terms such as “end of the workweek.” It does not itself impose task-specific constraints. Leave unspecified limits null.
 
 For a task requested on one day, set earliestDay and latestDay to that day. “By Friday” sets only latestDay. “Starting Tuesday” sets only earliestDay. A dated cutoff such as “by Friday at 3pm” uses deadlineTime on latestDay. A daily restriction such as “before noon” uses windowEnd. At an exact start time set windowStart to that time and windowEnd to the stated or estimated finish. A time window describes availability for this task, not its duration. Do not choose a particular day or hour simply because it seems convenient.
 

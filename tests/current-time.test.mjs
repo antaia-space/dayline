@@ -16,8 +16,9 @@ test('the active timed task wins an overlap; exact boundaries change tasks and e
 test('compressed weeks place the marker between tasks, after all-day banners and around historical marker rows without assigning active work',()=>{
   const prior={kind:'task',from:-57,to:-17,top:10,bottom:90},later={kind:'task',from:34,to:54,top:150,bottom:190};
   const position=currentPosition([prior,later],true);assert.equal(position.y,110);assert.equal(position.active,undefined);
-  const moved={kind:'point',from:-2,to:-2,top:95,bottom:123};
+  const moved={kind:'moved',from:-12,to:-2,top:95,bottom:123};
   assert.ok(currentPosition([prior,moved,later],true).y>moved.bottom);
+  assert.equal(currentPosition([{...moved,from:-2,to:8}],true).active,undefined);
   const completed={kind:'finished',from:-10,to:50,top:20,bottom:80};
   assert.equal(currentPosition([completed],true).active,undefined);
   const banner={kind:'banner',from:-900,to:200,top:25,bottom:65};
@@ -75,7 +76,9 @@ test('a repeated planner-local hour selects the correct absolute task, with one 
   assert.ok(Math.abs(parseFloat(line.style.top)-80)<.1);assert.equal(first.attributes['aria-current'],'time');
   h.renderer.sync('2026-11-01T09:30:00Z');assert.equal(h.line(),line);assert.equal(line.dataset.currentTask,'Second occurrence');
   assert.equal(first.attributes['aria-current'],undefined);assert.equal(second.attributes['aria-current'],'time');
-  assert.ok(Math.abs(parseFloat(line.style.top)-220)<.1);assert.match(line.attributes['aria-label'],/Current time .*Second occurrence/);
+  assert.ok(Math.abs(parseFloat(line.style.top)-220)<.1);
+  assert.equal(line.attributes['aria-label'],'Current time 01:30. Scheduled task, Second occurrence');
+  assert.equal(line.children.find(node=>node.tag==='time').textContent,'01:30');
   assert.equal(line.children.filter(n=>n.className==='current-time-dot').length,1);
   h.renderer.sync('2026-11-02T08:10:00Z');assert.equal(h.line(),undefined);assert.equal(second.attributes['aria-current'],undefined);
 });

@@ -195,26 +195,25 @@ h1 { margin: 0; font-size: clamp(3.05rem, 5.5vw, 5.5rem); line-height: 1.04; let
 .move-later { justify-self: start; align-self: center; width: fit-content; color: var(--accent-dark); border-radius: .2rem; font-size: .76rem; line-height: 1.5; padding: .12rem .18rem; }
 .move-later:hover, .move-later:focus-visible { text-decoration: underline; text-underline-offset: .16em; }
 .task-row .move-later, .agenda-task .move-later { grid-column: 1 / -1; }
-.moved-marker { width: 100%; min-width: 0; display: grid; grid-template-columns: .85rem minmax(0,1fr); column-gap: .32rem; align-items: baseline; text-align: start; color: var(--muted); line-height: 1.32; border-radius: .2rem; }
+.moved-marker { width: 100%; min-width: 0; display: grid; grid-template-columns: .85rem minmax(0,1fr); gap: .12rem .45rem; align-items: baseline; align-content: center; text-align: start; color: var(--muted); line-height: 1.32; }
 .moved-arrow { color: var(--quiet); font-size: .9rem; }
 .moved-name { font-size: .84rem; overflow-wrap: anywhere; }
-.moved-detail { grid-column: 2; font-size: .73rem; color: var(--muted); }
-.moved-marker:hover .moved-detail, .moved-marker:focus-visible .moved-detail { color: var(--accent-dark); text-decoration: underline; text-underline-offset: .14em; }
-.day-body > .moved-marker { padding: .35rem .1rem; border-bottom: 1px solid var(--line); }
-.agenda-slot.agenda-moved { padding-block: .19rem; align-items: center; }
-.agenda-moved .agenda-start { min-height: 1.55rem; }
-.agenda-moved .moved-marker { padding: .15rem .45rem; grid-template-columns: .85rem auto minmax(0,1fr); }
-.agenda-moved .moved-name { max-width: 38ch; }
-.agenda-moved .moved-detail { grid-column: auto; padding-inline-start: .25rem; }
+.moved-detail { grid-column: 2; display: flex; flex-wrap: wrap; gap: .07rem .7rem; font-size: .76rem; color: var(--muted); }
+.moved-time { font-variant-numeric: tabular-nums; }
+.moved-marker:hover .moved-destination, .moved-marker:focus-visible .moved-destination { color: var(--accent-dark); text-decoration: underline; text-underline-offset: .14em; }
+.day-body > .moved-marker, .agenda-moved .moved-marker { border-inline-start: 3px dashed var(--swatch); background: var(--surface-muted); background: color-mix(in srgb,var(--swatch) 6%,var(--paper)); }
+.day-body > .moved-marker { margin-block: .35rem; padding: .35rem .45rem; }
+.agenda-moved .moved-marker { padding: .52rem .75rem; }
+.agenda-moved .moved-name { font-size: .96rem; font-weight: 520; }
+@media (min-width: 721px) {
+  .agenda-moved.is-compact .moved-marker { grid-template-columns: .85rem fit-content(55%) 1fr; }
+  .agenda-moved.is-compact .moved-detail { grid-column: 3; }
+}
 #move-task { margin: 0; }
 #move-source { margin: .2rem 0 .85rem; }
 @media (pointer: coarse) {
   .move-later, .moved-marker { min-height: 2.75rem; }
   .move-later { padding-inline: .4rem; }
-}
-@media (max-width: 540px) {
-  .agenda-moved .moved-marker { grid-template-columns: .85rem minmax(0,1fr); }
-  .agenda-moved .moved-detail { grid-column: 2; padding-inline-start: 0; }
 }
 [data-order-item] { position: relative; }
 [data-order-item][draggable="true"] { cursor: grab; }
@@ -284,9 +283,9 @@ h1 { margin: 0; font-size: clamp(3.05rem, 5.5vw, 5.5rem); line-height: 1.04; let
 .task-title:hover { color: var(--accent-dark); }
 .task-row.is-done .task-title, .agenda-task.is-done .task-title { color: var(--quiet); text-decoration: line-through; text-decoration-thickness: 1px; }
 .task-meta { margin-top: .36rem; display: inline-flex; flex-wrap: wrap; gap: .24rem .33rem; align-items: center; font-size: .765rem; color: var(--muted); font-variant-numeric: tabular-nums; line-height: 1.4; }
-.category-dot, .agenda-task { --swatch: var(--task-color,#76816f); }
+.category-dot, .agenda-task, .moved-marker { --swatch: var(--task-color,#76816f); }
 @supports (color: color-mix(in srgb, red, white)) {
-  .category-dot, .agenda-task { --swatch: color-mix(in srgb,var(--task-color,#76816f) var(--category-base),#fff9ed); }
+  .category-dot, .agenda-task, .moved-marker { --swatch: color-mix(in srgb,var(--task-color,#76816f) var(--category-base),#fff9ed); }
 }
 .category-dot { vertical-align: middle; width: .48rem; height: .48rem; border-radius: 50%; flex: none; background: var(--swatch); }
 .task-issue { font-size: .775rem; line-height: 1.42; color: var(--accent-dark); margin-top: .3rem; }
@@ -402,7 +401,7 @@ h1 { margin: 0; font-size: clamp(3.05rem, 5.5vw, 5.5rem); line-height: 1.04; let
 .form-body label:not(.file-button), .form-body legend { display: block; color: var(--ink); font-size: .875rem; font-weight: 550; }
 .form-body label + label, .form-body label + fieldset, .form-body fieldset + label, .form-body .field-pair, .form-body .field-pair + label, .form-body fieldset + .field-pair { margin-top: 1rem; }
 .form-body input:not([type="file"]):not([type="checkbox"]), .form-body select, .form-body textarea { display: block; width: 100%; margin-top: .35rem; border: 1px solid var(--field-line); border-radius: .34rem; padding: .53rem .65rem; background: var(--surface); font-size: 1rem; font-weight: 400; line-height: 1.4; }
-.form-body input[type="time"], .form-body input[type="date"] { min-height: 2.5rem; }
+.form-body .work-clock, .form-body input[type="date"] { min-height: 2.5rem; font-variant-numeric: tabular-nums; }
 .form-body select { appearance: none; padding-right: 2.15rem; background-image: var(--select-chevron); background-position: right .65rem center; background-size: .88rem auto; background-repeat: no-repeat; }
 .form-body textarea { resize: vertical; min-height: 4.35rem; }
 .form-body fieldset { margin: 0; padding: 0; border: 0; }

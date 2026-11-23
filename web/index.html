@@ -95,9 +95,12 @@
     <div class="dialog-scroll">
       <form id="work-form" class="form-body">
         <fieldset><legend>Working days</legend><div id="work-days" class="work-days"></div></fieldset>
-        <div class="field-pair"><label>Start time<input id="work-start" type="time" required></label><label>End time<input id="work-end" type="time" required></label></div>
+        <div class="field-pair">
+          <label>Start time<input id="work-start" class="work-clock" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="HH:MM" aria-describedby="work-time-help" title="Enter a 24-hour time, for example 08:30 or 0830." required></label>
+          <label>End time<input id="work-end" class="work-clock" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="HH:MM" aria-describedby="work-time-help" title="Enter a 24-hour time, for example 17:00 or 1700." required></label>
+        </div>
         <label>Time zone<input id="work-zone" list="time-zones" required autocomplete="off"><datalist id="time-zones"></datalist></label>
-        <p class="hint">Dayline fits tasks inside these hours, around busy times from your connected calendars.</p>
+        <p class="hint" id="work-time-help">Enter working hours in 24-hour time. Dayline fits tasks inside these hours, around busy times from your connected calendars.</p>
         <div class="dialog-actions"><button type="button" class="secondary close-dialog">Cancel</button><button type="submit" class="primary">Save hours</button></div>
       </form>
       <section id="calendar-settings" class="form-body" hidden>

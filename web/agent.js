@@ -1,3 +1,5 @@
+import { instantDateTime } from "./ui.js";
+
 const agents = {
   local: { label:"Local on this Mac" },
   codex: { label:"OpenAI via Codex", service:"OpenAI", client:"Codex", install:"https://developers.openai.com/codex/cli/" },
@@ -41,7 +43,7 @@ export function estimateSource(run) {
   return selected;
 }
 
-function paintUsage(run,selected) {
+function paintUsage(run,selected,timeZone) {
   const anotherSelection = run && selected && (run.provider !== selected.provider ||
     (selected.model && run.model && selected.model !== run.model));
   shown(id("agent-run-context"),anotherSelection ? "New tasks use " + selectionName(selected) + "." : "");
@@ -51,8 +53,7 @@ function paintUsage(run,selected) {
     shown(id("agent-run-notice"),"");
     return;
   }
-  const when = run.at ? new Date(run.at) : null;
-  const time = Number.isFinite(when?.getTime()) ? when.toLocaleString(undefined,{dateStyle:"medium",timeStyle:"short"}) : "";
+  const time = run.at ? instantDateTime(run.at,timeZone) : "";
   const result = run.outcome === "pending" ? "Estimate unavailable" : run.outcome === "fallback" ? "Used local rules" : "Completed";
   const source = run.outcome === "pending" || run.outcome === "fallback" ? selectionName(run) : estimateSource(run);
   id("agent-run").textContent = [result,source,time].filter(Boolean).join(" · ");
@@ -69,6 +70,7 @@ export function createAgentSettings({api,toast,errorAt,onSaved}) {
   let information = null;
   let savedSelection = null;
   let latestRun = null;
+  let timeZone;
   let snapshotVersion = 0;
   let sequence = 0;
   let busy = false;
@@ -89,12 +91,13 @@ export function createAgentSettings({api,toast,errorAt,onSaved}) {
   function currentSelection(selected) {
     if (selected?.provider) savedSelection = selected;
     shown(id("agent-current"),savedSelection && "New tasks use " + selectionName(savedSelection) + ".");
-    paintUsage(latestRun,savedSelection);
+    paintUsage(latestRun,savedSelection,timeZone);
   }
 
   function update(snapshot) {
     if (!snapshot) return;
     snapshotVersion++;
+    if (snapshot.settings?.timeZone) timeZone = snapshot.settings.timeZone;
     if (Object.hasOwn(snapshot,"lastAgentRun")) latestRun = snapshot.lastAgentRun;
     currentSelection(snapshot.selectedAgent);
     shown(id("agent-activity"),estimateActivity(snapshot.tasks));

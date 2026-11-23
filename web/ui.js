@@ -91,7 +91,15 @@ export const weekLabel = (monday) => {
   return formatDay(monday, {month:"long",day:"numeric",...(!sameYear ? {year:"numeric"} : {})}) + "–" + formatDay(sunday, sameMonth ? {day:"numeric"} : {month:"short",day:"numeric",...(!sameYear ? {year:"numeric"} : {})});
 };
 
-export const instantTime = (instant, timeZone) => formatter({hour:"numeric",minute:"2-digit",timeZone}).format(new Date(instant));
+function clockFormatter(timeZone, seconds = false) {
+  return formatter({timeZone,hour:"2-digit",minute:"2-digit",...(seconds ? {second:"2-digit"} : {}),hourCycle:"h23"},"en-GB-u-nu-latn");
+}
+export const instantTime = (instant, timeZone) => clockFormatter(timeZone).format(new Date(instant));
+export function instantDateTime(instant, timeZone, {seconds = false} = {}) {
+  const date = new Date(instant);
+  if (!Number.isFinite(date.getTime())) return "";
+  return formatter({timeZone,dateStyle:"medium"}).format(date) + ", " + clockFormatter(timeZone,seconds).format(date);
+}
 export const duration = (value) => {
   const minutes = Math.max(0, Math.round(Number(value) || 0));
   if (minutes < 60) return minutes + "m";
@@ -99,16 +107,14 @@ export const duration = (value) => {
 };
 export function displayTime(minutes) {
   const date = new Date(Date.UTC(2024,0,1,0,Math.max(0,Math.round(minutes)) || 0));
-  return formatter({hour:"numeric",minute:"2-digit",timeZone:"UTC"}).format(date);
+  return instantTime(date,"UTC");
 }
 export const hhmmMinutes = (time) => {
   const [h, m] = time.split(":").map(Number);
   return 60 * h + m;
 };
 export function instantMinutes(instant, timeZone) {
-  const parts = formatter({hour:"2-digit",minute:"2-digit",hourCycle:"h23",timeZone},"en-US-u-nu-latn").formatToParts(new Date(instant));
-  const get = (key) => Number(parts.find(({type}) => type === key)?.value || 0);
-  return 60 * get("hour") + get("minute");
+  return hhmmMinutes(instantTime(instant,timeZone));
 }
 export function categoryColor(color) {
   return /^#[\da-f]{6}$/i.test(color || "") ? color : "#76816f";

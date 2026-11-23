@@ -70,13 +70,26 @@ test('staggered overlaps show their own times across three simultaneous meetings
     assert.equal(new Set(Object.values(c).map(card=>card.style.gridColumn)).size,3);
     const [a,ae]=interval(c.one),[b,be]=interval(c.two),[d,de]=interval(c.three);
     assert.ok(a<b && b<d && d<de && de<ae && ae<be);
-    assert.match(words(c.two),/9:15 AM/); assert.match(words(c.three),/9:35 AM/);
+    assert.match(words(c.two),/09:15–10:20/); assert.match(words(c.three),/09:35–09:55/);
     assert.match(words(c.three),/Free/);
     assert.deepEqual(action(surface,'move-destination').map(n=>[n.dataset.id,n.dataset.day]),[['moved',next]]);
     assert.deepEqual(byClass(surface,'completed-row').map(row=>action(row,'toggle-task')[0].dataset.id),['done']);
     assert.equal(action(group,'move-destination').length,0);
   }
-  assert.match(words(h.get('agenda')),/Originally 9:40 AM/);
+  assert.match(words(h.get('agenda')),/Originally 09:40–09:50/);
+});
+
+test('afternoon task and meeting labels use the same planner-local 24-hour clock in Day and Week',t=>{
+  const h=fixture(t);
+  h.state.settings.timeZone='America/New_York';
+  h.state.tasks=[{id:'brief',text:'Write the brief',minutes:15,start:instant('19:20'),end:instant('19:35'),done:false}];
+  h.render([event('review','18:05','18:55')]);
+  const [agenda,week]=h.surfaces();
+  assert.match(words(cards(agenda).review),/Until 13:55/);
+  assert.match(words(cards(week).review),/13:05–13:55/);
+  assert.equal(byClass(agenda,'agenda-until')[0].textContent,'Until 14:35');
+  assert.match(words(byClass(week,'task-meta')[0]),/14:20/);
+  for (const surface of [agenda,week]) assert.doesNotMatch(words(surface),/\d:\d{2}\s*[ap]\.?\s*m\b/i);
 });
 
 test('pushing a moved or canceled meeting through the live feed rebuilds both views and drops its old controls',async t=>{

@@ -63,7 +63,7 @@ test('places released completed tasks under their original day without reserving
   assert.match(text(elements.get('agenda-summary')),/12m planned/);
   assert.match(text(elements.get('week-summary')),/12m planned/);
   assert.equal(text(elements.get('backlog-count')),'0');
-  assert.match(text(named('agenda','agenda-free')[0]),/Until 10:00 AM · 1h/);
+  assert.match(text(named('agenda','agenda-free')[0]),/Until 10:00 · 1h/);
   const replaced={...released,completedPlannedSlot:{start:at(0),end:at(5)}};
   const next={id:'next',text:'Review samples',minutes:10,done:false,start:at(0),end:at(10)};
   const second={...released,id:'another',text:'File a note',completedPlannedSlot:{start:at(2),end:at(7)}};
@@ -71,13 +71,13 @@ test('places released completed tasks under their original day without reserving
   state.tasks=[replaced,second,next,unmatched];
   renderAgenda(state,context); renderWeek(state,context);
   const [replacement]=named('agenda','has-completed');
-  assert.match(text(replacement),/Review samples.*Completed early.*Finish early.*Originally 9:00 AM–9:05 AM.*File a note/);
+  assert.match(text(replacement),/Review samples.*Completed early.*Finish early.*Originally 09:00–09:05.*File a note/);
   assert.equal(named('agenda','completed-row').length,3);
   const [group]=named('agenda','completed-group');
   assert.equal(group.open,false);
   assert.equal(named('agenda','completed-time').length,0);
   assert.deepEqual(named('agenda','completed-duration').map(node=>node.textContent),['5m','5m']);
-  assert.ok(flatten(replacement).some(node=>node.title?.includes('Originally 9:00 AM–9:05 AM')));
+  assert.ok(flatten(replacement).some(node=>node.title?.includes('Originally 09:00–09:05')));
 
   assert.equal(named('week-board','completed-row').length,3);
   assert.match(text(named('agenda','completed-section').at(-1)),/After hours/);

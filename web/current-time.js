@@ -10,7 +10,6 @@ export function timelineBlock(node,entry) {
   const item = entry.task || entry.meeting;
   let kind = entry.kind;
   if (item?.allDay || (kind === "busy" && entry.start === 0 && entry.end === 1440)) kind = "banner";
-  else if (kind === "moved") kind = "point";
   else if (entry.task) kind = entry.task.done ? "finished" : "task";
   node.dataset.clockBlock = kind;
   entries.set(node,entry);
@@ -38,10 +37,9 @@ function geometry(node,now,day,zone,wall) {
   const entry = entries.get(node), kind = node.dataset.clockBlock;
   const rect = node.getBoundingClientRect();
   if (!entry || !rect.height || !rect.width) return null;
-  const item = entry.task || entry.meeting;
+  const item = entry.task || entry.meeting || (entry.zone === zone && entry.move);
   let from = entry.start-wall, to = entry.end-wall, tracks;
-  if (kind === "point") to = from;
-  else if (kind === "overlap" || (item?.start && item.end && kind !== "banner")) {
+  if (kind === "overlap" || (item?.start && item.end && kind !== "banner")) {
     const first = midnight(day,zone), last = midnight(addDays(day,1),zone);
     if (kind === "overlap") {
       const times = [...new Set(entry.cells.flatMap(cell => [limit(cell.from,first,last),limit(cell.to,first,last)]))].sort((a,b) => a-b);
@@ -146,7 +144,7 @@ export function createCurrentTime({root,getSettings}) {
     label.textContent=time; label.dateTime=new Date(now).toISOString();
     line.style.top=limit((position.y ?? rect.top+9)-rect.top,1,Math.max(1,rect.height-1))+"px";
     const anchor=position.anchor;
-    if (anchor && anchor.kind!=="point" && anchor.kind!=="banner") {
+    if (anchor && anchor.kind!=="banner") {
       line.style.left=Math.max(4,anchor.left-rect.left)+"px";
       line.style.right=Math.max(2,rect.right-anchor.right)+"px";
     } else { line.style.removeProperty("left"); line.style.removeProperty("right"); }

@@ -34,7 +34,7 @@ test('saving applies to the next capture immediately and the receipt reflects th
     return {provider,installed:true,signedIn:true,selected,lastRun:previousRun,models:[{id:chosen.model}]};
   };
   const settings = createAgentSettings({api,toast(){},errorAt(){},onSaved:selection => applied.push(selection)});
-  await settings.open({selectedAgent:selected,lastAgentRun:previousRun,tasks:[]});
+  await settings.open({selectedAgent:selected,lastAgentRun:previousRun,tasks:[],settings:{timeZone:'Asia/Kathmandu'}});
   control('agent-provider').value=chosen.provider;
   await control('agent-provider').dispatch('change');
   control('agent-model').value=chosen.model;
@@ -45,8 +45,10 @@ test('saving applies to the next capture immediately and the receipt reflects th
   assert.equal(requests.length,3);
   assert.match(control('agent-current').textContent,/New tasks use Google Gemini · gemini-hydrogen/);
   assert.match(control('agent-run').textContent,/Completed · OpenAI via Codex/);
+  assert.match(control('agent-run').textContent,/21:15(?:\s|$)/);
   assert.match(control('agent-run-context').textContent,/Google Gemini/);
-  settings.update({selectedAgent:chosen,lastAgentRun:previousRun,tasks:[{estimateState:'estimating',estimateAgent:chosen}]});
+  settings.update({selectedAgent:chosen,lastAgentRun:previousRun,settings:{timeZone:'America/Los_Angeles'},tasks:[{estimateState:'estimating',estimateAgent:chosen}]});
+  assert.match(control('agent-run').textContent,/07:30(?:\s|$)/);
   assert.match(control('agent-activity').textContent,/Estimating now · Google Gemini · gemini-hydrogen/);
   const failure = {...chosen,at:'2026-11-02T10:00:00Z',outcome:'pending',notice:'Google could not complete this estimate.'};
   settings.update({selectedAgent:chosen,lastAgentRun:failure,tasks:[{estimateState:'failed',agent:failure}]});

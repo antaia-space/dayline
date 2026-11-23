@@ -1,6 +1,6 @@
 import {
   addDays, button, dayIndex, displayTime, element, formatDay,
-  hhmmMinutes, icon, instantTime, isoWeek, navigationLabel, startOfWeek, weekdayNames, weekLabel, workdaysLabel, zonedDay
+  hhmmMinutes, icon, instantDateTime, instantTime, isoWeek, navigationLabel, startOfWeek, weekdayNames, weekLabel, workdaysLabel, zonedDay
 } from "./ui.js";
 import { fittedDuration, releasedCompletionDay, renderAgenda, renderBacklog, renderKey, renderWeek } from "./views.js";
 import { createAgentSettings, estimateSource } from "./agent.js";
@@ -206,7 +206,7 @@ async function refresh(force = false, forceMeetings = false) {
     byId("planner").setAttribute("aria-busy","false");
     byId("service-error").hidden = true;
     byId("sync-now").title = state.connection.lastSync ? (calendarMode() === "availability" ? "Last checked " : "Last synced ") +
-      new Date(state.connection.lastSync).toLocaleString() : refreshLabel(false);
+      instantDateTime(state.connection.lastSync,zone,{seconds:true}) : refreshLabel(false);
     if (byId("settings").open && settingTab === "calendars") fillCalendarSettings();
     if (byId("settings").open && settingTab === "agent") agentSettings.update(next);
     if (byId("action-dialog").open) renderCalendarAction();
@@ -512,13 +512,22 @@ async function saveSettings(changes,form) {
   finally { submit.disabled = false; }
 }
 
+// Text inputs keep work hours on a 24-hour clock even when the system's
+// native time picker uses AM/PM. Compact entries work on numeric keyboards.
+const workClockPattern = /^([01]?\d|2[0-3])(?::?([0-5]\d))?$/;
+const workClockValue = (value) => value.replace(workClockPattern,(_,hour,minute = "00") => hour.padStart(2,"0") + ":" + minute);
+for (const input of byId("work-form").querySelectorAll(".work-clock")) {
+  input.pattern = workClockPattern.source;
+  input.addEventListener("change",() => { input.value = workClockValue(input.value); });
+}
+
 byId("work-form").addEventListener("submit",async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   const workDays = [...byId("work-days").querySelectorAll("input:checked")].map((i) => Number(i.value));
   if (!workDays.length) return errorAt("settings-error","Choose at least one working day.");
-  const startTime = byId("work-start").value;
-  const endTime = byId("work-end").value;
+  const startTime = workClockValue(byId("work-start").value);
+  const endTime = workClockValue(byId("work-end").value);
   if (startTime >= endTime) return errorAt("settings-error","End time must come after start time.");
   const timeZone = byId("work-zone").value.trim();
   try { new Intl.DateTimeFormat(undefined,{timeZone}); }
@@ -581,7 +590,7 @@ function hasEventPermission(calendar) {
 function fillCalendarSettings() {
   const connection = state.connection;
   const events = calendarMode() === "sync";
-  const health = connection.error || (connection.lastSync && connection.connected ? (events ? "Last synced " : "Availability checked ") + new Date(connection.lastSync).toLocaleString() + "." : "");
+  const health = connection.error || (connection.lastSync && connection.connected ? (events ? "Last synced " : "Availability checked ") + instantDateTime(connection.lastSync,state.settings.timeZone,{seconds:true}) + "." : "");
   const push = state.calendarPush;
   let delivery = "";
   if (connection.connected) {
@@ -592,7 +601,7 @@ function fillCalendarSettings() {
   byId("calendar-health").textContent = [delivery,health].filter(Boolean).join(" ");
   byId("calendar-health").hidden = !delivery && !health;
   byId("calendar-health").title = push?.lastNotificationAt
-    ? "Last Google notification received " + new Date(push.lastNotificationAt).toLocaleString() : "";
+    ? "Last Google notification received " + instantDateTime(push.lastNotificationAt,state.settings.timeZone,{seconds:true}) : "";
   const accounts = connection.accounts || (connection.connected && connection.email ? [{sub:"",email:connection.email}] : []);
   updateModeControls();
   const signature = JSON.stringify([events,accounts,state.calendars,state.settings.targetCalendarId,state.settings.excludedCalendarIds,connection.configured]);

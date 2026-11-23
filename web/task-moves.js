@@ -1,4 +1,4 @@
-import {addDays,button,dayIndex,element,formatDay,instantMinutes,instantTime,zonedDay} from "./ui.js";
+import {addDays,button,categoryColor,dayIndex,duration,element,formatDay,instantMinutes,instantTime,zonedDay} from "./ui.js";
 import {localRead,localWrite} from "./outbox.js";
 
 const shortDate = day => formatDay(day,{weekday:"short",month:"short",day:"numeric"});
@@ -14,27 +14,29 @@ export function moveLaterButton(task,view) {
   return control;
 }
 
-// A move is a point on the source day's timeline. Its former duration
-// is descriptive only and is never included in the planner's occupied time.
+// History uses the source day's wall clock even if the planner's zone changes.
 export function movesByDay(tasks,days,zone) {
   const result = new Map(days.map(day => [day,[]]));
   for (const task of tasks) for (const move of task.movedSlots || []) {
     if (!result.has(move.day) || !validDay(move.toDay) || !(Date.parse(move.end) > Date.parse(move.start))) continue;
     const originalZone = move.timeZone || zone;
-    const minute = instantMinutes(move.start,originalZone);
-    result.get(move.day).push({kind:"moved",start:minute,end:minute,parent:task,move,zone:originalZone});
+    const start = instantMinutes(move.start,originalZone);
+    const end = zonedDay(move.end,originalZone) === move.day ? instantMinutes(move.end,originalZone) : 1440;
+    result.get(move.day).push({kind:"moved",start,end,parent:task,move,zone:originalZone});
   }
   return result;
 }
 
-export function movedMarker(entry,view) {
+export function movedMarker(entry,view,color) {
   const {parent,move,zone} = entry;
   const name = parent.title || parent.text;
-  const time = instantTime(move.start,zone);
+  const time = instantTime(move.start,zone) + "–" + instantTime(move.end,zone);
+  const length = duration(Math.round((Date.parse(move.end) - Date.parse(move.start))/60000));
   const destination = "Moved to " + shortDate(move.toDay);
-  const label = name + ". Originally " + fullDate(move.day) + ", " + time + "–" + instantTime(move.end,zone) +
+  const label = name + ". Originally " + fullDate(move.day) + ", " + time + ", " + length +
     ". Moved to " + fullDate(move.toDay) + ". Open that day.";
-  const link = button("moved-marker","move-destination",label);
+  const link = button(view === "agenda" ? "agenda-block moved-marker" : "moved-marker","move-destination",label);
+  link.style.setProperty("--task-color",categoryColor(color));
   link.dataset.id = parent.id;
   link.dataset.day = move.toDay;
   link.dataset.movedSlot = move.id;
@@ -42,8 +44,9 @@ export function movedMarker(entry,view) {
   link.title = label;
   const arrow = element("span","moved-arrow","↪");
   arrow.setAttribute("aria-hidden","true");
-  link.append(arrow,element("span","moved-name",name),
-    element("span","moved-detail",(view === "board" ? time + " · " : "") + destination));
+  const details = element("span","moved-detail");
+  details.append(element("span","moved-time",time + " · " + length),element("span","moved-destination",destination));
+  link.append(arrow,element("span","moved-name",name),details);
   return link;
 }
 

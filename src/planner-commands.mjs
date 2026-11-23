@@ -241,7 +241,7 @@ function resolveTarget(query, action, changes, context, from) {
   return command(action, matches, changes);
 }
 
-const invalidDate = () => clarify('invalid-date', 'Choose one calendar date or start time, such as Wednesday or Friday at 2 pm.');
+const invalidDate = () => clarify('invalid-date', 'Choose one calendar date or start time, such as Wednesday or Friday at 14:00.');
 function move(verb, body, context) {
   // Use the first suffix that parses in full. A title may contain “to”, and a
   // destination such as “2pm on Wednesday” includes its own separator.

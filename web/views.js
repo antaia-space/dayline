@@ -222,7 +222,7 @@ function groupReleasedSlots(tasks,entries,day,zone) {
   const matched = new Map(), remaining = [];
   // Prefer the timed task now occupying the reservation, then the nearest
   // meeting or free interval. All-day banners have no clock position.
-  const rank = entry => entry.task ? 0 : entry.meeting ? 1 : 2;
+  const rank = entry => entry.task ? 0 : entry.meeting ? 1 : entry.kind === "moved" ? 3 : 2;
   const positions = entries.filter(entry => !entry.task?.allDay && !entry.meeting?.allDay &&
     !(entry.kind === "busy" && entry.start === 0 && entry.end === 1440))
     .sort((a,b) => rank(a)-rank(b) || b.start-a.start);
@@ -324,7 +324,7 @@ export function renderWeek(state,{monday,selected,today,weekends,events = []}) {
       if (entry.task) row=taskRow(entry.task,state,day,"board");
       else if (entry.kind === "overlap") row=meetingColumns(entry,day);
       else if (entry.meeting) row=meetingCard(entry,day,false);
-      else if (entry.kind === "moved") row=movedMarker(entry,"board");
+      else if (entry.kind === "moved") row=movedMarker(entry,"board",categoryOf(state,entry.parent).color);
       else {
         row=element("div","week-busy");
         const time = entry.start === 0 && entry.end === 1440 ? "All day" : displayTime(entry.start) + "–" + displayTime(entry.end);
@@ -344,6 +344,7 @@ export function renderWeek(state,{monday,selected,today,weekends,events = []}) {
 function mergeRanges(ranges) {
   const result = [];
   for (const next of [...ranges].sort((a,b) => a.start - b.start || a.end - b.end)) {
+    if (next.end <= next.start) continue;
     const last = result.at(-1);
     if (last && next.start <= last.end) last.end = Math.max(last.end,next.end);
     else result.push({...next});
@@ -388,7 +389,7 @@ function subtractRanges(range, cuts) {
   return result;
 }
 
-export function freeTimeRows(ranges,day,now,zone) {
+export function freeTimeRows(ranges,day,now,zone,history = []) {
   const instant = new Date(now);
   if (!Number.isFinite(instant.getTime())) return ranges.map(range => ({...range,kind:"available"}));
   const next = new Date(Math.ceil(instant.getTime() / 60000) * 60000);
@@ -396,7 +397,10 @@ export function freeTimeRows(ranges,day,now,zone) {
   const cutoff = day < nextDay ? 1440 : day > nextDay ? 0 : instantMinutes(next,zone);
   const result = [];
   for (const {start,end} of ranges) {
-    if (start < cutoff) result.push({start,end:Math.min(end,cutoff),kind:"elapsed"});
+    if (start < cutoff) {
+      const earlier = {start,end:Math.min(end,cutoff)};
+      for (const gap of subtractRanges(earlier,history)) result.push({...gap,kind:"elapsed"});
+    }
     if (end > cutoff) result.push({start:Math.max(start,cutoff),end,kind:"available"});
   }
   return result;
@@ -413,14 +417,15 @@ function agendaTask(entry,state,day) {
 }
 
 export function agendaBlockSize(entry,day,zone) {
-  const item = entry.task || entry.meeting;
+  const item = entry.task || entry.meeting || entry.move;
   if (item?.allDay || (entry.kind === "busy" && entry.start === 0 && entry.end === 1440)) {
     return {minimumRem:2.5,compact:true};
   }
   let minutes = Math.max(0,entry.end-entry.start);
   // On a clock-change day elapsed time can differ from the clock labels.
   // Multi-day entries use the part displayed on this day.
-  if (item?.start && item.end && zonedDay(item.start,zone) === day && zonedDay(item.end,zone) === day) {
+  const slotZone = entry.zone || zone;
+  if (item?.start && item.end && zonedDay(item.start,slotZone) === day && zonedDay(item.end,slotZone) === day) {
     minutes = (Date.parse(item.end)-Date.parse(item.start))/60000;
   }
   const minimumRem = item
@@ -444,28 +449,25 @@ export function renderAgenda(state,{monday,selected,today,events = []}) {
   const booked = mergeRanges(taskEntries);
   const {meetings,anonymous,occupied} = calendar.get(selected);
   const completed = tasksByDay.get(selected).filter(task => !task.start && task.done);
-  const entries = [...taskEntries,...meetings,...anonymous];
+  const history = moves.get(selected);
+  const entries = [...taskEntries,...meetings,...anonymous,...history];
   const workday = state.settings.workDays.includes(dayIndex(selected));
   const coverage = !state.connection.error && rangeOnDay({start:state.busyStart,end:state.busyEnd},selected,zone);
   if (workday) {
     const hours = {start:hhmmMinutes(state.settings.startTime),end:hhmmMinutes(state.settings.endTime)};
     const free = subtractRanges(hours,mergeRanges([...booked,...occupied]));
-    entries.push(...freeTimeRows(free,selected,state.now || Date.now(),zone));
+    // Saved move intervals describe the old plan. Only elapsed free-time
+    // labels give way to them, so future availability stays independent.
+    entries.push(...freeTimeRows(free,selected,state.now || Date.now(),zone,mergeRanges(history)));
   }
   const released = groupReleasedSlots(completed,entries,selected,zone);
-  entries.push(...moves.get(selected));
   summary(id("agenda-summary"),[...taskEntries.map((entry) => entry.task),...completed],meetings.length);
   if (!entries.length && !completed.length) {
     id("agenda").replaceChildren(element("p","agenda-empty",workday ? "No time blocks for this day." : "Outside your working days. No tasks are scheduled."));
     return;
   }
   const rows = groupOverlappingMeetings(entries).sort(entryOrder).map((entry) => {
-    if (entry.kind === "moved") {
-      const row = element("div","agenda-slot agenda-moved");
-      row.append(element("span","agenda-start",instantTime(entry.move.start,entry.zone)),movedMarker(entry,"agenda"));
-      return timelineBlock(row,entry);
-    }
-    const row = element("div","agenda-slot");
+    const row = element("div","agenda-slot" + (entry.kind === "moved" ? " agenda-moved" : ""));
     if (entry.kind !== "overlap") {
       const size = agendaBlockSize(entry,selected,zone);
       row.style.setProperty("--agenda-block-height",size.minimumRem + "rem");
@@ -474,6 +476,7 @@ export function renderAgenda(state,{monday,selected,today,events = []}) {
     const fullBusyDay = entry.kind === "busy" && entry.start === 0 && entry.end === 1440;
     row.append(element("span","agenda-start",entry.task?.allDay || entry.meeting?.allDay || fullBusyDay ? "All day" : displayTime(entry.start)));
     if (entry.kind === "task") row.append(timelineBlock(agendaTask(entry,state,selected),entry));
+    else if (entry.kind === "moved") row.append(timelineBlock(movedMarker(entry,"agenda",categoryOf(state,entry.parent).color),entry));
     else if (entry.kind === "overlap") row.append(timelineBlock(meetingColumns(entry,selected,meeting => agendaBlockSize(meeting,selected,zone)),entry));
     else if (entry.meeting) row.append(timelineBlock(meetingCard(entry,selected,true),entry));
     else {
