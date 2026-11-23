@@ -4,6 +4,9 @@ import { migrateCalendarModes } from './store.mjs';
 import metadata from '../package.json' with { type: 'json' };
 import * as googleCalendar from './google.mjs';
 import { CATEGORIES, estimateTask, findSlot, planningRange } from './planner.mjs';
+import { localTaskTitle, recordDurationFeedback } from './task-learning.mjs';
+import { adjustTaskDuration, previewAdjustedSlot, setManualDuration } from './duration.mjs';
+import { agentSelection } from './agents/manager.mjs';
 
 const id = () => randomUUID().replaceAll('-', '');
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -13,6 +16,8 @@ const messageOf = error => error?.message || 'Google Calendar could not be reach
 const recordKey = (sub, calendarId) => Buffer.from(JSON.stringify([sub, calendarId])).toString('base64url');
 const scheduleFields = ['minutes', 'earliestDay', 'latestDay', 'windowStart', 'windowEnd', 'deadlineTime'];
 const noSlot = 'No open work period fits. Change the day, duration, or working hours.';
+const estimateFailed = 'The selected model could not finish this estimate. Check the agent settings and retry.';
+const interrupted = 'Dayline closed during this estimate. Retry it to schedule the task.';
 const publicCalendar = ({ providerId, sub, canInspectReservations, ...visible }) => visible;
 
 export function invalid(message, status = 400) {
@@ -32,9 +37,24 @@ function requestedDay(day) {
   return day;
 }
 
+function capturedAt(value, fallback) {
+  if (value == null) return fallback;
+  if (!Number.isSafeInteger(value) && !(typeof value === 'string' && /T.+(?:Z|[+-]\d\d:\d\d)$/i.test(value))) {
+    throw invalid('Choose a valid capture time.');
+  }
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime()) || date.getUTCFullYear() < 1 || date.getUTCFullYear() > 9999) throw invalid('Choose a valid capture time.');
+  return date > fallback ? fallback : date;
+}
+
 function safeTask(task) {
-  const { remote, dirty, intent, pausedSync, lastLocalSlot, held, deleting, estimateOverrides, estimateRequestedAt, ...visible } = task;
-  return { ...visible, allDay: Boolean(remote?.allDay) };
+  const { remote, dirty, intent, pausedSync, lastLocalSlot, held, deleting, estimateJob, estimateOverrides,
+    estimateRequestedAt, estimateRetryIds, estimateRemoteTitle, durationRequests, durationCheckPending, ...visible } = task;
+  const text = estimateJob?.text ?? task.text;
+  const active = task.estimateState === 'queued' || task.estimateState === 'estimating';
+  return { ...visible, text, title: task.title || localTaskTitle(text), allDay: Boolean(remote?.allDay),
+    estimateState: task.estimateState ?? (task.pendingEstimate ? 'failed' : null),
+    ...(active && estimateJob && { estimateAgent: { ...estimateJob.selection } }) };
 }
 
 function isRemoteFallback(task) {
@@ -57,6 +77,11 @@ function estimateOverrides(task, timeZone) {
 }
 
 function applyEstimate(task, estimate, overrides) {
+  if (!estimate.pendingEstimate) {
+    if (overrides.title || estimate.title) task.title = overrides.title || estimate.title;
+    task.baseMinutes = estimate.baseMinutes ?? estimate.minutes;
+    task.estimatedMinutes = estimate.estimatedMinutes ?? estimate.minutes;
+  }
   Object.assign(task, {
     category: overrides.category || estimate.category,
     minutes: overrides.minutes ?? estimate.minutes,
@@ -74,16 +99,27 @@ function applyEstimate(task, estimate, overrides) {
 }
 
 function waitForEstimate(task) {
-  task.start = null;
-  task.end = null;
-  task.dirty = {};
-  delete task.lastLocalSlot;
-  task.syncStatus = task.done ? 'local' : 'attention';
-  task.issue = task.done ? null : (task.agent?.notice || 'Waiting for a model estimate.');
+  if (!task.estimateJob?.protected) {
+    task.start = null;
+    task.end = null;
+    task.dirty = {};
+    delete task.lastLocalSlot;
+  }
+  const active = task.estimateState === 'queued' || task.estimateState === 'estimating';
+  task.syncStatus = task.done ? 'local' : active ? 'pending' : 'attention';
+  task.issue = task.done || active ? null : (task.estimateJob?.notice || task.agent?.notice || 'Waiting for a model estimate.');
+}
+
+function keepRevisionWording(task) {
+  task.title ||= task.text;
+  task.text = task.estimateJob.text;
+  task.estimateJob = null;
+  task.estimateState = null;
+  task.pendingEstimate = false;
 }
 
 function captureTask(task) {
-  return Object.fromEntries(['text', 'category', 'done', 'start', 'end', ...scheduleFields].map(key => [key, task[key]]));
+  return Object.fromEntries(['text', 'title', 'category', 'done', 'start', 'end', ...scheduleFields].map(key => [key, task[key]]));
 }
 
 function combinedRanges(ranges) {
@@ -115,6 +151,9 @@ export class DaylineService {
     this.syncing = false;
     this.tail = Promise.resolve();
     this.pendingSync = null;
+    this.estimateWorker = null;
+    this.estimateWorkerEnabled = false;
+    this.estimateSession = 0;
     this.auth = new Map();
     this.authVersion = 0;
     this.tokens = new Map();
@@ -157,6 +196,7 @@ export class DaylineService {
         for (const key of ['text', 'category', 'done']) {
           if (task[key] !== paused.original[key]) task.dirty[key] = true;
         }
+        if (task.title !== paused.original.title) task.dirty.text = true;
         if (scheduleFields.some(key => task[key] !== paused.original[key]) ||
             (task.start && task.start !== paused.original.start)) task.dirty.schedule = true;
         delete task.pausedSync;
@@ -213,7 +253,7 @@ export class DaylineService {
   }
 
   localBusy(except) {
-    return this.data.tasks.filter(t => t.id !== except && t.start && t.end && !t.deleting && !t.pendingEstimate)
+    return this.data.tasks.filter(t => t.id !== except && t.start && t.end && !t.deleting && (!t.pendingEstimate || t.estimateJob?.protected))
       .map(({ start, end }) => ({ start, end }));
   }
 
@@ -225,14 +265,15 @@ export class DaylineService {
     task.issue = slot ? null : noSlot;
   }
 
-  async createTask(input) {
+  captureDraft(input) {
     const text = taskText(input.text);
     if (input.requestId != null && (typeof input.requestId !== 'string' || !/^[a-f0-9]{32}$/.test(input.requestId))) throw invalid('Invalid task request identifier.');
-    if (input.requestId && this.data.tasks.some(t => t.id === input.requestId)) return input.requestId;
+    if (input.requestId && (this.data.tasks.some(t => t.id === input.requestId) || this.data.deletedTaskIds?.includes(input.requestId))) return null;
     const day = requestedDay(input.day);
     const viewDay = requestedDay(input.viewDay);
-    const now = this.clock();
-    const estimate = await this.estimate(text, { now, timeZone: this.data.settings.timeZone });
+    const now = capturedAt(input.capturedAt, this.clock());
+    if (input.captureTimeZone != null && (typeof input.captureTimeZone !== 'string' ||
+        !(IANAZone.isValidZone(input.captureTimeZone) || input.captureTimeZone === 'UTC'))) throw invalid('Choose a valid capture time zone.');
     const task = {
       id: input.requestId || id(), text,
       start: null, end: null, done: false, syncStatus: 'pending', issue: null,
@@ -241,12 +282,164 @@ export class DaylineService {
     const overrides = {};
     if (day) overrides.day = day;
     else if (viewDay) overrides.viewDay = viewDay;
-    applyEstimate(task, estimate, overrides);
+    task.estimateOverrides = overrides;
+    return task;
+  }
+
+  async createTask(input) {
+    const task = this.captureDraft(input);
+    if (!task) return input.requestId;
+    const estimate = await this.estimate(task.text, { now: new Date(task.createdAt), timeZone: input.captureTimeZone || this.data.settings.timeZone,
+      taskId: task.id, ...(input.captureAgent != null && { selection: agentSelection(input.captureAgent) }) });
+    applyEstimate(task, estimate, task.estimateOverrides);
     if (task.pendingEstimate) waitForEstimate(task);
     else if (!this.data.accounts.length) this.planLocal(task);
     this.data.tasks.push(task);
     this.store.save();
     return task.id;
+  }
+
+  enqueueTask(input) {
+    const task = this.captureDraft(input);
+    if (!task) return input.requestId;
+    task.title = localTaskTitle(task.text);
+    task.earliestDay = task.latestDay = task.estimateOverrides.day || task.estimateOverrides.viewDay || null;
+    this.stageEstimate(task, task.text, false, { at: task.createdAt, timeZone: input.captureTimeZone, agent: input.captureAgent });
+    this.data.tasks.push(task);
+    try { this.store.save(); }
+    catch (error) {
+      this.data.tasks.splice(this.data.tasks.indexOf(task), 1);
+      throw error;
+    }
+    this.wakeEstimateWorker();
+    return task.id;
+  }
+
+  stageEstimate(task, text, retry = false, capture = {}) {
+    const previous = task.estimateJob;
+    const requestedAt = retry ? previous?.at || task.estimateRequestedAt || task.createdAt : capture.at || this.clock().toISOString();
+    const { timeZone, workDays, startTime, endTime } = this.data.settings;
+    const { provider = 'local', model = '', effort } = this.data.agent || {};
+    const selection = agentSelection(capture.agent ?? { provider, model, ...(effort && { effort }) });
+    const order = this.data.tasks.reduce((max, t) => Math.max(max, t.estimateJob?.order || 0), 0) + 1;
+    const protectedTask = previous?.protected || Boolean(task.remote || task.intent || task.pausedSync || task.done ||
+      (task.start && Date.parse(task.start) < this.clock().getTime()));
+    const workHours = retry && previous?.workHours ? previous.workHours : { workDays: [...workDays], startTime, endTime };
+    task.estimateJob = { id: id(), order, text, at: requestedAt, timeZone: retry && previous ? previous.timeZone : capture.timeZone || timeZone,
+      selection, workHours, protected: protectedTask };
+    if (task.remote) task.estimateJob.remoteTitle = previous?.remoteTitle || task.title || task.text;
+    task.estimateRequestedAt = requestedAt;
+    task.pendingEstimate = true;
+    task.estimateState = 'queued';
+    if (!protectedTask) {
+      task.text = text;
+      task.title = task.estimateOverrides?.title || localTaskTitle(text);
+    }
+    waitForEstimate(task);
+  }
+
+  enqueueRetry(taskId, { requestId } = {}) {
+    const task = this.findTask(taskId);
+    if (requestId != null && (typeof requestId !== 'string' || !/^[a-f0-9]{32}$/.test(requestId))) throw invalid('Invalid estimate request identifier.');
+    if (requestId && task.estimateRetryIds?.includes(requestId)) return taskId;
+    if (task.done || task.deleting) throw invalid('Reopen this task before retrying its estimate.', 409);
+    if (!task.pendingEstimate && !isRemoteFallback(task)) throw invalid('This task already has an estimate.', 409);
+    const changed = structuredClone(task);
+    if (requestId) (changed.estimateRetryIds ||= []).push(requestId);
+    if (!['queued', 'estimating'].includes(changed.estimateState)) {
+      changed.estimateOverrides = estimateOverrides(changed, this.data.settings.timeZone);
+      this.stageEstimate(changed, changed.estimateJob?.text || changed.text, true);
+    }
+    this.saveEdit(task, changed);
+    this.wakeEstimateWorker();
+    return taskId;
+  }
+
+  startEstimateWorker() {
+    if (this.estimateWorkerEnabled) return;
+    this.estimateWorkerEnabled = true;
+    ++this.estimateSession;
+    // A previous process may already have spent its model call. Queued work is
+    // safe to resume; a claimed call needs an explicit retry from its owner.
+    const unfinished = this.data.tasks.filter(t => t.estimateState === 'estimating' && t.estimateJob);
+    for (const task of unfinished) {
+      task.estimateState = 'failed';
+      task.estimateJob.notice = interrupted;
+      waitForEstimate(task);
+    }
+    if (unfinished.length) this.store.save();
+    this.wakeEstimateWorker();
+  }
+
+  stopEstimateWorker() {
+    this.estimateWorkerEnabled = false;
+    ++this.estimateSession;
+  }
+
+  wakeEstimateWorker() {
+    if (!this.estimateWorkerEnabled || this.estimateWorker || !this.data.tasks.some(t => t.estimateState === 'queued' && t.estimateJob && !t.deleting)) return;
+    const session = this.estimateSession;
+    this.estimateWorker = new Promise(resolve => setImmediate(resolve)).then(() => this.drainEstimates(session)).catch(() => {
+      // A local commit failed. Do not launch an unrecorded or duplicate call.
+      this.stopEstimateWorker();
+      this.error = 'Dayline could not save its estimate queue. Check the local data folder and restart the app.';
+    }).finally(() => {
+      this.estimateWorker = null;
+      this.wakeEstimateWorker();
+    });
+  }
+
+  async whenEstimatesIdle() {
+    while (this.estimateWorker) await this.estimateWorker;
+    if (this.pendingSync) await this.pendingSync;
+  }
+
+  async drainEstimates(session) {
+    while (session === this.estimateSession) {
+      const job = await this.run(() => {
+        if (session !== this.estimateSession) return null;
+        const task = this.data.tasks.filter(t => t.estimateState === 'queued' && t.estimateJob && !t.deleting)
+          .sort((a, b) => a.estimateJob.order - b.estimateJob.order)[0];
+        if (!task) return null;
+        task.estimateState = 'estimating';
+        this.store.save();
+        return { ...structuredClone(task.estimateJob), taskId: task.id };
+      });
+      if (!job) return;
+      let estimate;
+      try {
+        // Only claims and commits use the planner’s mutation queue. Calendar
+        // refreshes and editing remain available throughout the model call.
+        estimate = await this.estimate(job.text, { now: new Date(job.at), timeZone: job.timeZone,
+          taskId: job.taskId, selection: job.selection, workHours: job.workHours });
+      } catch { /* A throwing provider has no trusted notice to display. */ }
+      const scheduled = await this.run(() => {
+        const task = this.data.tasks.find(t => t.id === job.taskId);
+        if (session !== this.estimateSession || task?.estimateJob?.id !== job.id || task.estimateState !== 'estimating' || task.deleting) return false;
+        const changed = structuredClone(task);
+        if (estimate?.agent) this.data.agent = { ...this.data.agent, lastRun: estimate.agent };
+        if (!estimate || estimate.pendingEstimate || !Number.isSafeInteger(estimate.minutes) || estimate.minutes < 1) {
+          changed.estimateState = 'failed';
+          changed.estimateJob.notice = estimate?.agent?.notice || estimateFailed;
+          if (!job.protected && estimate?.pendingEstimate) applyEstimate(changed, estimate, changed.estimateOverrides);
+          this.saveEdit(task, changed);
+          return false;
+        }
+        const before = captureTask(changed);
+        changed.text = job.text;
+        changed.title = estimate.title || localTaskTitle(job.text);
+        applyEstimate(changed, estimate, changed.estimateOverrides || {});
+        changed.estimateState = null;
+        changed.estimateJob = null;
+        if (before.title !== changed.title || before.text !== changed.text) changed.dirty.text = true;
+        if (changed.dirty.text && job.remoteTitle && !changed.estimateOverrides?.title) changed.estimateRemoteTitle = job.remoteTitle;
+        if (before.category !== changed.category) changed.dirty.category = true;
+        if (!changed.done && (!changed.start || !job.protected || scheduleFields.some(key => before[key] !== changed[key]))) changed.dirty.schedule = true;
+        this.saveEdit(task, changed);
+        return true;
+      });
+      if (scheduled && this.data.accounts.length) this.queueSync();
+    }
   }
 
   async reviseEstimate(task, text, retry = false) {
@@ -255,7 +448,7 @@ export class DaylineService {
     // Relative dates in the saved text refer to the original capture or rename.
     const previousTime = Date.parse(task.estimateRequestedAt || task.createdAt);
     const requested = retry && Number.isFinite(previousTime) ? new Date(previousTime) : now;
-    const estimate = await this.estimate(text, { now: requested, timeZone: zone });
+    const estimate = await this.estimate(text, { now: requested, timeZone: zone, taskId: task.id });
     if (estimate.pendingEstimate && (task.remote || task.intent || task.pausedSync || task.done ||
         (task.start && Date.parse(task.start) < now.getTime()))) {
       throw invalid((estimate.agent?.notice || 'The selected model could not estimate this change.') +
@@ -267,7 +460,7 @@ export class DaylineService {
     applyEstimate(task, estimate, overrides);
     task.text = text;
     task.estimateRequestedAt = requested.toISOString();
-    if (previous.text !== text) task.dirty.text = true;
+    if (previous.text !== text || previous.title !== task.title) task.dirty.text = true;
     if (previous.category !== task.category) task.dirty.category = true;
     if (wasPending || !task.start || previous.text !== text || scheduleFields.some(k => previous[k] !== task[k])) {
       task.dirty.schedule = true;
@@ -278,6 +471,7 @@ export class DaylineService {
   // Calendar timers and planning passes never call the estimator.
   async retryEstimate(taskId) {
     const task = this.findTask(taskId);
+    if (task.estimateJob) return this.enqueueRetry(taskId);
     if (task.done || task.deleting) throw invalid('Reopen this task before retrying its estimate.', 409);
     if (!task.pendingEstimate && !isRemoteFallback(task)) throw invalid('This task already has an estimate.', 409);
     const changed = structuredClone(task);
@@ -285,32 +479,46 @@ export class DaylineService {
     this.saveEdit(task, changed);
   }
 
-  async editTask(taskId, input) {
+  enqueueEdit(taskId, input) {
+    return this.editTask(taskId, input, true);
+  }
+
+  adjustDuration(taskId, input) {
     const task = this.findTask(taskId);
+    return adjustTaskDuration(this, task, input, estimateOverrides(task, this.data.settings.timeZone));
+  }
+
+  async editTask(taskId, input, queueEstimate = false) {
+    const task = this.findTask(taskId);
+    queueEstimate ||= Boolean(task.estimateJob);
     if (task.deleting) throw invalid('This task is waiting for its calendar entry to be removed.', 409);
-    if (!Object.keys(input).length || Object.keys(input).some(k => !['done', 'text', 'minutes', 'category', 'day'].includes(k))) {
+    if (!Object.keys(input).length || Object.keys(input).some(k => !['done', 'text', 'title', 'minutes', 'category', 'day'].includes(k))) {
       throw invalid('Unknown task change.');
     }
     const changed = structuredClone(task);
     if (owns(input, 'text')) {
       const text = taskText(input.text);
-      if (text !== task.text) await this.reviseEstimate(changed, text);
+      if (text !== (task.estimateJob?.text || task.text)) {
+        if (queueEstimate) this.stageEstimate(changed, text);
+        else await this.reviseEstimate(changed, text);
+      }
     }
     const overrides = estimateOverrides(changed, this.data.settings.timeZone);
     changed.estimateOverrides = overrides;
+    if (owns(input, 'title')) {
+      const title = typeof input.title === 'string' ? input.title.trim() : '';
+      if (!title || title.length > 120) throw invalid('Choose a title between 1 and 120 characters.');
+      overrides.title = title;
+      delete changed.estimateRemoteTitle;
+      if (changed.title !== title) { changed.title = title; changed.dirty.text = true; }
+    }
     if (owns(input, 'category')) {
       if (!CATEGORIES.some(c => c.id === input.category)) throw invalid('Choose a task type from the list.');
       overrides.category = input.category;
       if (changed.category !== input.category) { changed.category = input.category; changed.dirty.category = true; }
     }
     if (owns(input, 'minutes')) {
-      if (!Number.isInteger(input.minutes) || input.minutes < 1 || input.minutes > 1440) throw invalid('Choose a duration of 1 to 1,440 minutes.');
-      overrides.minutes = input.minutes;
-      if (changed.minutes !== input.minutes) {
-        changed.minutes = input.minutes;
-        changed.reason = 'Duration set by you.';
-        changed.dirty.schedule = true;
-      }
+      setManualDuration(changed, input.minutes, this.data.settings.timeZone);
     }
     if (owns(input, 'day')) {
       const day = requestedDay(input.day);
@@ -325,19 +533,33 @@ export class DaylineService {
     }
     if (owns(input, 'done')) {
       if (typeof input.done !== 'boolean') throw invalid('Choose complete or open.');
-      if (changed.done !== input.done) { changed.done = input.done; changed.dirty.done = true; }
+      if (changed.done !== input.done) {
+        changed.done = input.done;
+        changed.dirty.done = true;
+        if (changed.done && changed.estimateJob) {
+          if (changed.estimateJob.protected) {
+            keepRevisionWording(changed);
+          } else {
+            changed.estimateState = 'failed';
+            changed.estimateJob.notice = 'Estimation stopped when you completed this task. Reopen and retry to schedule it.';
+          }
+        }
+      }
     }
-    this.saveEdit(task, changed);
+    const learning = this.data.durationLearning;
+    if (owns(input, 'minutes') && task.minutes !== changed.minutes) recordDurationFeedback(this.data, task, changed);
+    try { this.saveEdit(task, changed, { durationOnly: Object.keys(input).length === 1 && owns(input, 'minutes') }); }
+    catch (error) { this.data.durationLearning = learning; throw error; }
+    if (queueEstimate) this.wakeEstimateWorker();
+    return taskId;
   }
 
-  saveEdit(task, changed) {
+  saveEdit(task, changed, { durationOnly = false } = {}) {
     if (changed.pendingEstimate) {
       waitForEstimate(changed);
-      Object.assign(task, changed);
-      delete task.lastLocalSlot;
-      this.store.save();
-      return;
+      return this.commitEdit(task, changed);
     }
+    if (durationOnly && (changed.done || changed.remote?.allDay)) delete changed.dirty.schedule;
     if (changed.dirty.schedule) changed.held = false;
     changed.issue = null;
     changed.syncStatus = Object.keys(changed.dirty).length ? 'pending' : changed.syncStatus;
@@ -345,11 +567,16 @@ export class DaylineService {
       const needsPlacement = Boolean(changed.dirty.schedule);
       changed.dirty = {};
       if (needsPlacement && !changed.done) {
-        if (changed.start) changed.lastLocalSlot = { start: changed.start, end: changed.end };
-        changed.start = null;
-        changed.end = null;
-        changed.syncStatus = 'pending';
-        if (!this.data.accounts.length) this.planLocal(changed);
+        const preview = durationOnly ? previewAdjustedSlot(this, task, changed) : null;
+        if (preview) {
+          Object.assign(changed, preview, { syncStatus: 'local', durationCheckPending: this.data.accounts.length > 0 });
+        } else {
+          if (changed.start) changed.lastLocalSlot = { start: changed.start, end: changed.end };
+          changed.start = null;
+          changed.end = null;
+          changed.syncStatus = 'pending';
+          if (!this.data.accounts.length) this.planLocal(changed);
+        }
       } else if (changed.done || changed.start) {
         changed.syncStatus = 'local';
       }
@@ -357,12 +584,26 @@ export class DaylineService {
       if (changed.dirty.schedule && !changed.done) this.planLocal(changed);
       else changed.syncStatus = 'local';
     }
+    this.commitEdit(task, changed);
+  }
+
+  commitEdit(task, changed) {
+    // Persist the candidate first. On disk failure the original record, including
+    // its in-flight model claim or retry identifier, remains live in this process.
+    const index = this.data.tasks.indexOf(task);
+    this.data.tasks[index] = changed;
+    try { this.store.save(); }
+    finally { this.data.tasks[index] = task; }
+    for (const key of Object.keys(task)) if (!owns(changed, key)) delete task[key];
     Object.assign(task, changed);
-    this.store.save();
   }
 
   deleteTask(taskId) {
     const task = this.findTask(taskId);
+    this.data.deletedTaskIds ||= [];
+    if (!this.data.deletedTaskIds.includes(taskId)) this.data.deletedTaskIds.push(taskId);
+    task.estimateJob = null;
+    task.estimateState = null;
     if (this.data.settings.calendarMode === 'sync' && (task.remote || task.intent)) {
       task.deleting = true;
       task.syncStatus = 'deleting';
@@ -584,7 +825,21 @@ export class DaylineService {
   acceptRemote(task, event, ref) {
     if (!event.owned || event.taskId !== task.id) throw invalid('Google could not verify ownership of the linked event.', 409);
     if (!event.start || !event.end) throw invalid('The linked event needs a timed start and end in Google Calendar.', 409);
-    if (!task.dirty.text) task.text = event.text;
+    if (task.estimateRemoteTitle && event.text !== task.estimateRemoteTitle && event.text !== task.title) {
+      // A person renamed this appointment in Calendar after the model started.
+      delete task.dirty.text;
+    }
+    if (!task.dirty.text) {
+      delete task.estimateRemoteTitle;
+      if (task.title) {
+        if (task.remote && event.text !== task.title) {
+          task.estimateOverrides ||= {};
+          task.estimateOverrides.title = event.text;
+        }
+        task.title = event.text;
+      }
+      else task.text = event.text;
+    }
     if (!task.dirty.done) task.done = event.done;
     // Google all-day dates float with the calendar day. The board groups by local
     // instants, and a day-long reservation should preserve the task’s estimated effort.
@@ -592,7 +847,7 @@ export class DaylineService {
     const instant = value => allDay ? DateTime.fromISO(value, { zone: this.data.settings.timeZone }).toUTC().toISO() : value;
     task.start = instant(event.start);
     task.end = instant(event.end);
-    if (!allDay && !task.dirty.schedule) {
+    if (!allDay && !task.dirty.schedule && !(task.done && task.estimateOverrides?.minutes != null)) {
       const length = Math.round((Date.parse(task.end) - Date.parse(task.start)) / 60000);
       if (length > 0) task.minutes = length;
     }
@@ -608,7 +863,7 @@ export class DaylineService {
     if (this.data.settings.calendarMode !== 'sync') return;
     const groups = new Map();
     for (const task of this.data.tasks) {
-      if (!task.remote || (task.pendingEstimate && !task.deleting)) continue;
+      if (!task.remote || (task.pendingEstimate && !task.deleting && !task.estimateJob?.protected)) continue;
       const ref = task.remote;
       const key = recordKey(ref.sub, ref.calendarId);
       if (!groups.has(key)) groups.set(key, []);
@@ -636,8 +891,14 @@ export class DaylineService {
       for (const task of tasks) {
         const ref = task.remote;
         const event = byId.get(ref.eventId) || await this.google.getTaskEvent(access, { ...ref, taskId: task.id });
-        if (event) { this.acceptRemote(task, event, ref); continue; }
+        if (event) {
+          if (task.estimateJob?.protected && event.done && !ref.done && !task.dirty.done) keepRevisionWording(task);
+          this.acceptRemote(task, event, ref);
+          if (task.pendingEstimate) waitForEstimate(task);
+          continue;
+        }
         if (task.deleting) { this.data.tasks = this.data.tasks.filter(t => t !== task); continue; }
+        if (task.estimateJob?.protected) keepRevisionWording(task);
         // An explicit deletion in Calendar stays deleted. A new scheduling gesture can create a fresh event.
         Object.assign(task, { remote: null, intent: null, start: null, end: null, held: true, dirty: {},
           syncStatus: 'attention', issue: 'Removed in Google Calendar. Choose a day in the task editor to book it again.' });
@@ -675,7 +936,8 @@ export class DaylineService {
       const found = await this.google.getTaskEvent(await this.eventToken(ref.sub), { ...ref, taskId: task.id });
       if (found) {
         const later = { ...task.dirty };
-        for (const field of ['text', 'category', 'done']) if (task[field] === task.intent.snapshot[field]) delete later[field];
+        for (const field of ['category', 'done']) if (task[field] === task.intent.snapshot[field]) delete later[field];
+        if (task.text === task.intent.snapshot.text && task.title === task.intent.snapshot.title) delete later.text;
         if (task.minutes === task.intent.snapshot.minutes && task.earliestDay === task.intent.snapshot.earliestDay &&
             task.latestDay === task.intent.snapshot.latestDay && task.windowStart === task.intent.snapshot.windowStart &&
             task.windowEnd === task.intent.snapshot.windowEnd && task.deadlineTime === task.intent.snapshot.deadlineTime) delete later.schedule;
@@ -698,7 +960,7 @@ export class DaylineService {
         if (!rangeCache.has(cacheKey)) rangeCache.set(cacheKey, await this.availability(range, destinationId));
         // Free/busy merges simultaneous meetings. Reuse the original time only
         // after excluding this one verified event and checking every other source.
-        if (task.remote && !task.remote.allDay && Date.parse(task.start) >= now.getTime()) {
+        if (task.remote && !task.remote.allDay && Date.parse(task.end) > now.getTime()) {
           const candidate = findSlot({ task, settings, now: new Date(task.start), busy: this.localBusy(task.id) });
           if (candidate && Date.parse(candidate.start) === Date.parse(task.start) &&
               !(await this.availability(candidate, destinationId, task.remote)).length) placement = candidate;
@@ -720,10 +982,10 @@ export class DaylineService {
       const dest = this.target();
       ref = { sub: dest.sub, calendarId: dest.providerId, eventId: id() };
     }
-    const outgoing = { ...task, ...slot };
+    const outgoing = { ...task, ...slot, text: task.title || task.text };
     if (!task.remote) {
       task.intent = { ...ref, snapshot: {
-        text: task.text, category: task.category, done: task.done, minutes: task.minutes, earliestDay: task.earliestDay,
+        text: task.text, title: task.title, category: task.category, done: task.done, minutes: task.minutes, earliestDay: task.earliestDay,
         latestDay: task.latestDay, windowStart: task.windowStart, windowEnd: task.windowEnd, deadlineTime: task.deadlineTime
       } };
       this.store.save();
@@ -742,7 +1004,8 @@ export class DaylineService {
   }
 
   futureLocalTask(task, now) {
-    return !task.pendingEstimate && !task.done && !task.held && (!task.start || Date.parse(task.start) >= now.getTime());
+    return !task.pendingEstimate && !task.done && !task.held && (!task.start || Date.parse(task.start) >= now.getTime() ||
+      (task.durationCheckPending && Date.parse(task.end) > now.getTime()));
   }
 
   async planAgainstCalendars(boardRange) {
@@ -760,7 +1023,7 @@ export class DaylineService {
 
     // Reserve existing valid slots first. A newly conflicting task should never
     // displace a second task whose original time still works.
-    const fixed = this.data.tasks.filter(t => !t.pendingEstimate && t.start && !this.futureLocalTask(t, now))
+    const fixed = this.data.tasks.filter(t => (!t.pendingEstimate || t.estimateJob?.protected) && t.start && !this.futureLocalTask(t, now))
       .map(t => ({ start: t.start, end: t.end }));
     const unplaced = [];
     const place = (task, slot) => {
@@ -768,12 +1031,12 @@ export class DaylineService {
       task.syncStatus = slot ? 'local' : 'attention';
       task.issue = slot ? null : noSlot;
       delete task.lastLocalSlot;
-      if (slot) fixed.push(slot);
+      if (slot) { delete task.durationCheckPending; fixed.push(slot); }
     };
     for (const task of movable) {
       const prior = task.start ? task : task.lastLocalSlot;
       let sameSlot = null;
-      if (prior && Date.parse(prior.start) >= now.getTime()) {
+      if (prior && (Date.parse(prior.start) >= now.getTime() || (task.durationCheckPending && Date.parse(prior.end) > now.getTime()))) {
         // Free/busy omits event IDs. An old reservation can share a busy interval
         // with a separate meeting, so every Google block participates in this check.
         const candidate = findSlot({ task, settings, now: new Date(prior.start), busy: [...busy, ...fixed] });

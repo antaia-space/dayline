@@ -31,7 +31,9 @@ test('paired app and browser share one planner; visiting a calendar link require
   assert.match(await (await fetch(app.origin)).text(), /href="dayline:\/\/browser"/);
   await write('/api/settings', 'PATCH', { timeZone: 'UTC' }, desktop);
   const input = { text: 'Write notes for 25 minutes', requestId: 'a'.repeat(32) };
-  await Promise.all([write('/api/tasks', 'POST', input, desktop), write('/api/tasks', 'POST', input, desktop)]);
+  const captures = await Promise.all([write('/api/tasks', 'POST', input, desktop), write('/api/tasks', 'POST', input, desktop)]);
+  assert.deepEqual(captures.map(r => r.status), [202, 202]);
+  await service.whenEstimatesIdle();
   const tasks = (await state(browser)).tasks;
   assert.equal(tasks.length, 1);
   assert.equal(tasks[0].minutes, 25);

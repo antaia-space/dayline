@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { runCli } from './agents/cli.mjs';
 import { CATEGORIES, estimateTask } from './planner.mjs';
+import { localTaskTitle, verifiedTaskTitle } from './task-learning.mjs';
 
 export async function localStatus(helperPath) {
   let detail = 'Built-in text rules estimate tasks on this Mac.';
@@ -18,7 +19,7 @@ export async function localStatus(helperPath) {
 
 export function makeEstimator(helperPath) {
   return async (text, context) => {
-    const rules = estimateTask(text, context);
+    const rules = { ...estimateTask(text, context), title: localTaskTitle(text) };
     if (!helperPath) return rules;
     try {
       const suggestion = await onDeviceEstimate(helperPath, text);
@@ -28,7 +29,7 @@ export function makeEstimator(helperPath) {
       const keepDuration = rules.explicitMinutes || (rules.windowStart && rules.windowEnd);
       return {
         ...rules,
-        engine: 'apple', category,
+        engine: 'apple', category, title: verifiedTaskTitle(suggestion.title, text),
         minutes: keepDuration ? rules.minutes : suggestion.minutes,
         reason: keepDuration ? rules.reason : 'On-device estimate · ' + String(suggestion.reason).slice(0, 180)
       };

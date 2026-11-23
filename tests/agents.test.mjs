@@ -56,7 +56,9 @@ test('the paired app saves a subscription choice, sends only one task, and repor
   assert.equal(requests.length, 0);
   const text = 'Write a two-paragraph update by Friday';
   const input = { text, requestId: 'f'.repeat(32) };
-  await Promise.all([post('/api/tasks', input), post('/api/tasks', input)]);
+  const captures = await Promise.all([post('/api/tasks', input), post('/api/tasks', input)]);
+  assert.deepEqual(captures.map(r => r.status), [202, 202]);
+  await service.whenEstimatesIdle();
   const result = service.snapshot().tasks.at(-1);
   assert.equal(requests.length, 1);
   assert.deepEqual(requests[0].input, { task: text, today: '2026-11-24', currentTime: '10:00',
@@ -182,11 +184,10 @@ test('desktop and browser retries share a single paid estimate for a waiting tas
   const first = retry();
   await atProvider;
   const second = retry();
-  // A subsequent read on the same client lets the server accept both requests.
-  await fetch(server.origin + '/api/state', { headers });
-  release();
   const responses = await Promise.all([first, second]);
-  assert.deepEqual(responses.map(r => r.status), [200, 200]);
+  assert.deepEqual(responses.map(r => r.status), [202, 202]);
+  release();
+  await service.whenEstimatesIdle();
   assert.equal(calls, 2);
   const [task] = service.snapshot().tasks;
   assert.equal(task.id, id);

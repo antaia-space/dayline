@@ -5,6 +5,8 @@ import {
 import { renderAgenda, renderBacklog, renderKey, renderWeek } from "./views.js";
 import { createAgentSettings, estimateSource } from "./agent.js";
 import { createComposer } from "./composer.js";
+import { createDurationControls } from "./duration.js";
+import { localRead,localWrite } from "./outbox.js";
 
 const byId = (id) => document.getElementById(id);
 const pref = {
@@ -39,6 +41,7 @@ const composer = createComposer({
   api, refresh, openTask: openEditor, showLocation: showTaskLocation,
   context:() => ({state,view,monday,selectedDay,compact:compact.matches})
 });
+const durationControls = createDurationControls({api,refresh,getState:() => state,notify:toast});
 
 for (const holder of document.querySelectorAll("[data-icon]")) holder.append(icon(holder.dataset.icon));
 for (const [index,name] of weekdayNames.entries()) {
@@ -98,7 +101,11 @@ async function api(path, method = "GET", body) {
     throw new Error("Reconnect this browser to Dayline on this Mac.");
   }
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(typeof data.error === "string" ? data.error : "Dayline could not finish this action.");
+  if (!response.ok) {
+    const error = new Error(typeof data.error === "string" ? data.error : "Dayline could not finish this action.");
+    error.status = response.status;
+    throw error;
+  }
   if (path === "/api/state") {
     try { sessionStorage.removeItem("dayline.pairingReload"); } catch {}
   }
@@ -118,7 +125,9 @@ async function refresh(force = false) {
     state.categories ||= [];
     today = day;
     window.clearTimeout(syncRefreshTimer);
-    if (next.connection.syncing) syncRefreshTimer = window.setTimeout(() => refresh(),1500);
+    if (next.connection.syncing || next.tasks.some(task => task.estimateState === "queued" || task.estimateState === "estimating")) {
+      syncRefreshTimer = window.setTimeout(() => refresh(),1100);
+    }
     if (!selectedDay || (lastToday && day !== lastToday && selectedDay === lastToday)) {
       selectedDay = day;
       monday = startOfWeek(day);
@@ -138,6 +147,10 @@ async function refresh(force = false) {
     byId("service-error").hidden = true;
     if (byId("settings").open && settingTab === "calendars") fillCalendarSettings();
     if (byId("action-dialog").open) renderCalendarAction();
+    if (byId("task-dialog").open && editingTask && !retryingEstimates.has(editingTask.id)) {
+      const latest = state.tasks.find(task => task.id === editingTask.id);
+      if (latest && latest.estimateState !== editingTask.estimateState && !Object.keys(taskChanges()).length) openEditor(latest);
+    }
     if (route && !routeOpened) {
       routeOpened = true;
       openCalendarAction();
@@ -178,6 +191,7 @@ function render() {
   if (weekView) renderWeek(state,context);
   else renderAgenda(state,context);
   renderBacklog(state);
+  durationControls.paint();
   composer.update();
   renderKey(state.categories);
   const account = state.connection;
@@ -200,7 +214,11 @@ function render() {
   byId("hours-summary").textContent = workdaysLabel(hours.workDays) + " · " + displayTime(hhmmMinutes(hours.startTime)) + "–" + displayTime(hhmmMinutes(hours.endTime)) + " · " + hours.timeZone.replaceAll("_"," ");
   byId("hours-open").title = "Edit working hours and time zone";
   renderPlanningNote();
-  if (bookmark && !active.isConnected) document.querySelector('[data-focus="' + CSS.escape(bookmark) + '"]')?.focus({preventScroll:true});
+  if (bookmark && !active.isConnected) {
+    const matches = document.querySelectorAll('[data-focus="' + CSS.escape(bookmark) + '"]');
+    const visible = [...matches].find(node => !node.disabled && node.getClientRects().length);
+    visible?.focus({preventScroll:true});
+  }
 }
 
 function renderPlanningNote() {
@@ -301,6 +319,7 @@ byId("planner").addEventListener("click",async (event) => {
   if (action === "calendar-settings") return openSettings("calendars");
   const task = state.tasks.find(({id}) => id === target.dataset.id);
   if (!task) return;
+  if (action === "adjust-duration") return durationControls.adjust(task,Number(target.dataset.delta));
   if (action === "edit-task") return openEditor(task);
   if (action === "toggle-task") {
     target.disabled = true;
@@ -623,6 +642,9 @@ const syncDescriptions = {
 };
 
 function taskStatus(task) {
+  if (task.estimateState === "queued") return "Queued for an estimate.";
+  if (task.estimateState === "estimating") return "Your task agent is estimating this task.";
+  if (task.estimateState === "failed") return "Estimate unavailable.";
   if (task.pendingEstimate) return "Awaiting estimate";
   if (calendarMode() === "sync") return syncDescriptions[task.syncStatus];
   if (task.syncStatus === "pending") return "Waiting to check calendar availability.";
@@ -632,9 +654,15 @@ function taskStatus(task) {
 
 function openEditor(task) {
   editingTask = task;
+  const title = byId("task-title-input");
+  title.value = task.title || "";
+  title.dataset.initial = title.value;
   byId("task-text").value = task.text;
   byId("task-estimate-fields").hidden = Boolean(task.pendingEstimate);
   byId("task-minutes").value = task.pendingEstimate ? "" : task.minutes;
+  byId("duration-learning").hidden = Boolean(task.pendingEstimate);
+  const originalEstimate = task.estimatedMinutes > 0 && task.estimatedMinutes !== task.minutes ? "Originally estimated at " + task.estimatedMinutes + " min. " : "";
+  byId("duration-learning").textContent = originalEstimate + "Changing the duration helps Dayline estimate similar tasks on this Mac.";
   byId("task-category").replaceChildren(...state.categories.map((cat) => new Option(cat.name,cat.id)));
   byId("task-category").value = task.pendingEstimate ? "" : task.category;
   byId("task-day").value = task.earliestDay && task.earliestDay === task.latestDay ? task.earliestDay : "";
@@ -650,7 +678,7 @@ function openEditor(task) {
   } else info.push(element("span","","Unscheduled"));
   const status = taskStatus(task);
   const source = estimateSource(task.agent);
-  if (status && !(task.pendingEstimate && source)) info.push(element("span","",status));
+  if (status && (task.estimateState || !(task.pendingEstimate && source))) info.push(element("span","",status));
   if (source) info.push(element("span","",task.pendingEstimate ? source : "Estimate · " + source));
   const notes = new Set([task.agent?.notice,task.issue].filter((note) => note && !(reason && reason.includes(note))));
   for (const note of notes) info.push(element("span","task-issue",note));
@@ -671,7 +699,8 @@ function updateEditorControls(task) {
   }
   const retry = byId("retry-estimate");
   const historicalFallback = task.agent?.outcome === "fallback" && task.agent.provider !== "local";
-  retry.hidden = Boolean(task.done || deleting || (!task.pendingEstimate && !historicalFallback));
+  const activeEstimate = task.estimateState === "queued" || task.estimateState === "estimating";
+  retry.hidden = Boolean(task.done || deleting || activeEstimate || (!task.pendingEstimate && !historicalFallback));
   retry.disabled = retrying;
   retry.textContent = retrying ? "Requesting estimate…" : "Retry estimate";
 }
@@ -679,6 +708,8 @@ function updateEditorControls(task) {
 function taskChanges() {
   const text = byId("task-text").value.trim();
   const changes = {};
+  const title = byId("task-title-input");
+  if (title.value.trim() !== title.dataset.initial) changes.title = title.value.trim();
   if (text !== editingTask.text) changes.text = text;
   if (!editingTask.pendingEstimate) {
     const minutes = Number(byId("task-minutes").value);
@@ -700,8 +731,17 @@ byId("retry-estimate").addEventListener("click",async () => {
   updateEditorControls(task);
   errorAt("task-error");
   let problem = "";
-  try { await api("/api/tasks/" + encodeURIComponent(task.id) + "/estimate","POST",{}); }
-  catch (error) { problem = error.message; }
+  const key = "dayline.estimateRetry." + task.id;
+  const prior = localRead("sessionStorage",key);
+  const requestId = /^[a-f0-9]{32}$/.test(prior || "") ? prior : crypto.randomUUID().replaceAll("-","");
+  localWrite("sessionStorage",key,requestId);
+  try {
+    await api("/api/tasks/" + encodeURIComponent(task.id) + "/estimate","POST",{requestId});
+    localWrite("sessionStorage",key,null);
+  } catch (error) {
+    if (error.status >= 400 && error.status < 500 && ![401,408,429].includes(error.status)) localWrite("sessionStorage",key,null);
+    problem = error.message;
+  }
   await refresh(true);
   retryingEstimates.delete(task.id);
   if (!byId("task-dialog").open || editingTask?.id !== task.id) return;
@@ -710,7 +750,7 @@ byId("retry-estimate").addEventListener("click",async () => {
   openEditor(updated);
   if (problem) errorAt("task-error",problem);
   else if (!byId("service-error").hidden) errorAt("task-error","The retry was sent. Refresh the planner to check the result.");
-  else toast(updated.pendingEstimate ? "Still awaiting an estimate." : "Estimate updated.");
+  else toast(updated.estimateState === "queued" ? "Estimate queued." : updated.estimateState === "estimating" ? "Your agent is estimating the task." : updated.pendingEstimate ? "Still awaiting an estimate." : "Estimate updated.");
 });
 
 byId("task-form").addEventListener("submit",async (event) => {
@@ -719,6 +759,7 @@ byId("task-form").addEventListener("submit",async (event) => {
   const submit = event.currentTarget.querySelector('[type="submit"]');
   if (submit.disabled) return;
   const changes = taskChanges();
+  if (changes.title === "") return errorAt("task-error","Enter a title of 1–120 characters.");
   if (changes.text === "") return errorAt("task-error","Enter the task you want to schedule.");
   const day = byId("task-day").value;
   if (day && !editingTask.start && !editingTask.pendingEstimate && editingTask.syncStatus === "attention") changes.day = day;
@@ -763,7 +804,7 @@ function renderCalendarAction() {
   const finished = task && Boolean(task.done) === actionDone;
   const label = actionDone ? "Mark complete" : "Reopen task";
   byId("action-heading").textContent = !task ? "Task unavailable" : finished ? (actionDone ? "Task complete" : "Task open") : label;
-  byId("action-task").textContent = task?.text || "This task could not be found in this Mac’s planner.";
+  byId("action-task").textContent = task?.title || task?.text || "This task could not be found in this Mac’s planner.";
   const change = calendarMode() === "sync" ? "Confirm to update this task in Dayline and its linked Google Calendar event." : "Availability-only planning is on. Confirm to update completion in Dayline on this Mac.";
   byId("action-description").textContent = !task ? "Open the link on the Mac where the task was scheduled." : finished ? "This task is already in the requested state." : change;
   byId("confirm-action").textContent = label;

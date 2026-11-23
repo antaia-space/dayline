@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { DateTime } from 'luxon';
 import { CATEGORIES, estimateTask } from '../planner.mjs';
 import { localStatus, makeEstimator } from '../estimate.mjs';
+import { durationCalibration, localTaskTitle, validTaskTitle, verifiedTaskTitle } from '../task-learning.mjs';
 import { findCli, openProviderLogin } from './cli.mjs';
 import { codexEstimate, codexModel, codexStatus } from './codex.mjs';
 import { googleAgent } from './google.mjs';
@@ -17,6 +18,7 @@ const providers = {
 const categories = CATEGORIES.map(category => category.id);
 const nullable = { type: ['string', 'null'] };
 const properties = {
+  title: { type: 'string' },
   category: { type: 'string', enum: categories },
   minutes: { type: 'integer' },
   earliestDay: nullable, latestDay: nullable, windowStart: nullable, windowEnd: nullable, deadlineTime: nullable,
@@ -32,16 +34,28 @@ function providerId(value) {
   return value;
 }
 
+export function agentSelection(input) {
+  const provider = providerId(input?.provider);
+  const model = input.model === undefined ? '' : input.model;
+  if (typeof model !== 'string' || (model && (!modelId.test(model) || provider === 'local'))) {
+    throw badRequest('Choose a valid model for this agent.');
+  }
+  return provider === 'codex' ? { provider, model: model || codexModel, effort: 'low' } : { provider, model };
+}
+
 function usageFields(usage = {}) {
   return Object.fromEntries(['inputTokens', 'outputTokens', 'cachedInputTokens'].filter(key =>
     Number.isSafeInteger(usage[key]) && usage[key] >= 0).map(key => [key, usage[key]]));
 }
 
-function checked(output) {
+function checked(output, text) {
   const fail = () => { throw new Error('The agent returned an estimate that Dayline could not use.'); };
   if (!output || Array.isArray(output) || typeof output !== 'object' ||
     Object.keys(output).some(key => !Object.hasOwn(properties, key)) ||
-    estimateSchema.required.some(key => !Object.hasOwn(output, key))) fail();
+    estimateSchema.required.some(key => key !== 'title' && !Object.hasOwn(output, key))) fail();
+  // Documented provider schemas require the title. Older custom adapters can
+  // still supply their duration and constraints, with a locally derived title.
+  if (Object.hasOwn(output, 'title') && !validTaskTitle(output.title)) fail();
   if (!categories.includes(output.category) || !Number.isSafeInteger(output.minutes) || output.minutes < 1 ||
     output.minutes > 1440 || typeof output.reason !== 'string' || !output.reason.trim() || output.reason.length > 400) fail();
   for (const key of ['earliestDay', 'latestDay']) {
@@ -56,7 +70,7 @@ function checked(output) {
   if ((output.earliestDay && output.latestDay && output.earliestDay > output.latestDay) ||
       (output.windowStart && output.windowEnd && output.windowStart >= output.windowEnd) ||
       (output.deadlineTime && !output.latestDay)) fail();
-  return output;
+  return { ...output, title: output.title ? verifiedTaskTitle(output.title.trim(), text) : localTaskTitle(text) };
 }
 
 export class TaskAgents {
@@ -85,13 +99,10 @@ export class TaskAgents {
     return { ...info, ...fixed, provider, selected: this.selected, lastRun: this.store.state.agent?.lastRun || null };
   }
 
-  select({ provider, model = '' }) {
-    providerId(provider);
-    if (typeof model !== 'string' || (model && (!modelId.test(model) || provider === 'local'))) throw badRequest('Choose a valid model for this agent.');
+  select(input) {
+    const selection = agentSelection(input);
     const lastRun = this.store.state.agent?.lastRun || null;
-    this.store.state.agent = provider === 'codex'
-      ? { provider, model: model || codexModel, effort: 'low', lastRun }
-      : { provider, model, lastRun };
+    this.store.state.agent = { ...selection, lastRun };
     this.store.save();
     return this.selected;
   }
@@ -106,20 +117,24 @@ export class TaskAgents {
   }
 
   async estimate(text, context) {
-    const selection = this.selected;
+    const requested = context.selection || this.selected;
+    const selection = requested.provider === 'codex'
+      ? { provider: 'codex', model: requested.model || codexModel, effort: 'low' } : requested;
     const { provider, model } = selection;
     const now = DateTime.fromJSDate(context.now, { zone: context.timeZone });
     // A retry interprets relative dates at capture time and receives a fresh usage timestamp.
     const run = { ...selection, at: new Date().toISOString(), outcome: 'success' };
-    const rules = estimateTask(text, context);
+    const rules = { ...estimateTask(text, context), title: localTaskTitle(text) };
     let result = rules;
     if (provider === 'local') {
       result = await this.local(text, context);
       run.model = result.engine === 'apple' ? 'Apple Foundation Models' : 'Built-in rules';
     } else {
-      const { workDays, startTime, endTime } = this.store.state.settings;
+      const { workDays, startTime, endTime } = context.workHours || this.store.state.settings;
       const input = { task: text, today: now.toISODate(), currentTime: now.toFormat('HH:mm'),
         timeZone: context.timeZone, workDays, startTime, endTime };
+      const previous = !rules.explicitMinutes && durationCalibration(this.store.state, text, rules.category, context.taskId);
+      if (previous) input.durationHistory = { activity: previous.activity, sampleCount: previous.sampleCount };
       try {
         const response = await this.adapters[provider].estimate({ model, instructions, input, schema: estimateSchema });
         if (provider === 'codex' && (response.model !== model || response.effort !== 'low')) {
@@ -127,12 +142,12 @@ export class TaskAgents {
         }
         if (typeof response.model === 'string' && modelId.test(response.model)) run.model = response.model;
         Object.assign(run, usageFields(response.usage));
-        const proposal = checked(response.output);
+        const proposal = checked(response.output, text);
         const minutes = rules.explicitMinutes ? rules.minutes : proposal.minutes;
         const fixed = estimateTask(text, { ...context, estimatedMinutes: minutes });
         const knownDays = Boolean(fixed.earliestDay || fixed.latestDay);
         const knownWindow = Boolean(fixed.windowStart || fixed.windowEnd);
-        result = { ...rules, category: proposal.category, minutes, reason: rules.explicitMinutes ? rules.reason : proposal.reason.trim(),
+        result = { ...rules, title: proposal.title, category: proposal.category, minutes, reason: rules.explicitMinutes ? rules.reason : proposal.reason.trim(),
           earliestDay: knownDays ? fixed.earliestDay : proposal.earliestDay,
           latestDay: knownDays ? fixed.latestDay : proposal.latestDay,
           deadlineTime: knownDays ? fixed.deadlineTime : proposal.deadlineTime,
@@ -147,8 +162,21 @@ export class TaskAgents {
           message.length <= 190 && !/[\r\n]/.test(message) ? message : 'The selected model could not finish this estimate. Check the agent settings and retry.';
       }
     }
-    // The service saves this record and the task together under its write queue.
-    this.store.state.agent = { ...this.selected, lastRun: run };
+    if (!result.pendingEstimate) {
+      const baseMinutes = result.minutes;
+      const history = !rules.explicitMinutes && durationCalibration(this.store.state, text, result.category, context.taskId);
+      const minutes = history?.changeMinutes ? Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, baseMinutes + history.changeMinutes)) : baseMinutes;
+      result = { ...result, title: result.title || rules.title, baseMinutes, estimatedMinutes: minutes, minutes };
+      if (minutes !== baseMinutes) {
+        const fixed = estimateTask(text, { ...context, estimatedMinutes: minutes });
+        if (fixed.windowStart || fixed.windowEnd) Object.assign(result, { windowStart: fixed.windowStart, windowEnd: fixed.windowEnd });
+        const delta = Math.abs(minutes - baseMinutes);
+        result.reason += ` Your past edits ${minutes > baseMinutes ? 'add' : 'subtract'} ${delta} ${delta === 1 ? 'minute' : 'minutes'}.`;
+      }
+    }
+    // Queued work is committed by the service only if that estimate is still
+    // current. An older in-flight request must not replace the latest receipt.
+    if (!context.selection) this.store.state.agent = { ...this.selected, lastRun: run };
     return { ...result, agent: run };
   }
 }

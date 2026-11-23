@@ -6,7 +6,7 @@ Dayline finds time for your to-do list. Write a task in plain English and it est
 
 ## Install on a Mac
 
-1. Sign in to GitHub with access to the Antaia repository. For an Apple silicon or Intel Mac running macOS 13 or later, download **Dayline-1.2.0-mac-universal.zip**. [Latest Mac release](https://github.com/antaia-space/dayline/releases/latest)
+1. Sign in to GitHub with access to the Antaia repository. For an Apple silicon or Intel Mac running macOS 13 or later, download **Dayline-1.3.0-mac-universal.zip**. [Latest Mac release](https://github.com/antaia-space/dayline/releases/latest)
 2. Unzip the download, drag **Dayline.app** to **Applications**, and open it. To use the same planner in your browser, choose **File → Open in Browser** in the Mac app. Both views follow your system’s light or dark appearance.
 
 The internal build uses an ad hoc signature and has not been notarized by Apple. If your Mac’s launch policy requires approval, follow Antaia’s approved procedure or run the app from source below.
@@ -32,10 +32,17 @@ To distribute a build with the company’s Desktop client already configured, se
 
 ## Plan a task
 
+- Press **Enter** to capture a task and keep typing. Dayline saves each entry on your Mac, then creates a short title and estimates the work in the background. Open the task to see your original wording or edit the title. Changing just the title uses no model quota.
 - **“Draft a proposal by Friday”** lets Dayline estimate the duration and choose an opening before the deadline. **“Call Morgan for 20 minutes tomorrow afternoon”** sets the duration and narrows the search to tomorrow afternoon.
-- In **Day agenda**, a task without a date in its text uses the day you are viewing. Choose a date in the entry field to pin the task to that day, or choose **Auto-schedule** to let Dayline find the next opening. The date and text stay with your draft if you reload while the estimate is running.
+- In **Day agenda**, a task without a date in its text uses the day you are viewing. Choose a date in the entry field to pin the task to that day, or choose **Auto-schedule** to let Dayline find the next opening. Queued tasks keep their dates across reloads and restarts.
 - Each task type has a consistent color. Select a task to see how its duration was estimated or edit its text, duration, type, or preferred day. If there is no opening long enough, the task appears under **Unscheduled**.
 - You can start using the planner before connecting a calendar. It finds time within your work hours and around your other tasks. After you connect, it also checks for conflicts with meetings.
+
+### Adjust a duration
+
+Use **−** or **+** at the right of a task to subtract or add five minutes per click. Dayline keeps the start time when the resized block fits. Otherwise it looks for another opening within the task’s constraints. On a completed task or an all-day event, the controls adjust the effort estimate while preserving the original calendar block.
+
+Dayline keeps a personal duration note on this Mac. For each activity, it uses the median difference between estimates and your corrections to personalize later estimates. Repeated clicks update a single example. Restoring the original suggestion removes that example. A duration you type into a new task takes precedence. Read your notes in **Settings → Task agent → Your duration notes**.
 
 ### Choose a task agent
 
@@ -49,7 +56,7 @@ To connect a subscription, select a provider. Install its official client if pro
 | Google Gemini | For an individual Google AI Pro or Ultra account, start Antigravity CLI with `agy` and choose personal Google OAuth. Eligible organization accounts can also use the legacy Gemini CLI by starting `gemini` and choosing **Login with Google** under `/auth`. [Antigravity sign-in](https://antigravity.google/docs/cli/install/) · [Gemini CLI sign-in](https://geminicli.com/docs/get-started/authentication/) · [Google’s migration notice](https://developers.google.com/gemini-code-assist/docs/deprecations/code-assist-individuals) |
 | Anthropic via Claude Code | Run `claude auth login --claudeai` and sign in with the Claude subscription that includes Claude Code. [Claude Code authentication](https://code.claude.com/docs/en/authentication) |
 
-Codex defaults to `gpt-6.2-sol` with **low** reasoning effort. For Google or Anthropic, leave **Model** blank to use the client’s default. You can also choose a suggestion or enter a model ID supported by your account. Choose **Save agent** to apply it. Each estimate sends the task text, local date and time, time zone, and working hours to the selected provider. Calendar availability and placement stay on the Mac. Usage draws on the same account quota as the official client, subject to the provider’s limits and any extra usage you enabled there. Dayline uses subscription sign-in and never switches to API-key billing.
+Codex defaults to `gpt-6.2-sol` with **low** reasoning effort. For Google or Anthropic, leave **Model** blank to use the client’s default. You can also choose a suggestion or enter a model ID supported by your account. Choose **Save agent** to apply it. Each estimate sends the current task, local date and time, time zone, and working hours to the selected provider. When duration feedback matches, the provider can also receive the activity label and number of examples. Dayline applies the correction on your Mac, where previous task text and calendar availability stay. Usage draws on the same account quota as the official client, subject to the provider’s limits and any extra usage you enabled there.
 
 **Last estimate** shows the source, model, Codex reasoning effort, and token counts when available. The account area shows plan and quota details when the client supplies them. If the selected remote agent is offline, out of quota, or returns an unusable estimate, the task stays **Unscheduled** with **Awaiting estimate** and the reason. Open the task and choose **Retry estimate** to request one new estimate from the currently selected agent. Dayline retries only when you ask. Older tasks estimated by a local fallback retain that history and can also be retried. An explicit duration in the task takes precedence. [Shared estimation instructions](src/agents/instructions.md)
 

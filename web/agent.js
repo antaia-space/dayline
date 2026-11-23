@@ -121,6 +121,13 @@ export function createAgentSettings({api,toast,errorAt,onSaved}) {
       : "Task estimation runs on this Mac.";
     shown(id("agent-sharing"),sharing);
     paintUsage(record.lastRun);
+    const notes = Array.isArray(record.durationNotes) ? record.durationNotes.filter(note => typeof note === "string" && note.trim()) : [];
+    id("duration-notes").hidden = !notes.length;
+    id("duration-note-list").replaceChildren(...notes.map(note => {
+      const item = document.createElement("li");
+      item.textContent = note;
+      return item;
+    }));
     allowSave();
   }
 

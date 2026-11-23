@@ -1,76 +1,78 @@
 import { addDays, duration, formatDay, instantTime, zonedDay } from "./ui.js";
+import { createCaptureOutbox, localRead, localWrite, recordsWithPrefix } from "./outbox.js";
 
-const byId = (id) => document.getElementById(id);
-const key = "dayline.taskDraft";
+const byId = id => document.getElementById(id);
+const draftKey = "dayline.taskDraft";
+const draftPrefix = "dayline.draft.";
+const receiptKey = "dayline.lastCapture";
 const clients = { local:"the local agent", codex:"Codex", gemini:"Google Gemini", claude:"Claude Code" };
 
-function stored(area) {
-  try { return window[area].getItem(key); } catch { return null; }
-}
-function write(area,value) {
-  try {
-    if (value === null) window[area].removeItem(key);
-    else window[area].setItem(key,value);
-  } catch { /* The form still works if browser storage is unavailable. */ }
+function readJSON(raw) { try { return JSON.parse(raw); } catch { return null; } }
+function validDraft(draft) {
+  return typeof draft?.text === "string" && draft.text.trim() && draft.text.length <= 1000 &&
+    /^[a-f0-9]{32}$/.test(draft.id) && (draft.day === null ||
+      (/^\d{4}-\d{2}-\d{2}$/.test(draft.day) && Number.isFinite(Date.parse(draft.day + "T12:00Z"))));
 }
 function restoreDraft() {
-  try {
-    const draft = JSON.parse(stored("sessionStorage") ?? stored("localStorage"));
-    if (typeof draft?.text !== "string" || !draft.text.trim() || draft.text.length > 1000 ||
-      !/^[a-f0-9]{32}$/.test(draft.id) || (draft.day !== null &&
-      !(/^\d{4}-\d{2}-\d{2}$/.test(draft.day) && Number.isFinite(Date.parse(draft.day + "T12:00Z"))))) return null;
-    return draft;
-  } catch { return null; }
+  const session = localRead("sessionStorage",draftKey);
+  if (session !== null) { const draft = readJSON(session); return validDraft(draft) ? draft : null; }
+  const recent = recordsWithPrefix("localStorage",draftPrefix).filter(validDraft).sort((a,b) => b.updatedAt - a.updatedAt)[0];
+  const prior = readJSON(localRead("localStorage",draftKey));
+  return recent || (validDraft(prior) ? prior : null);
 }
-
+function shortTitle(text) {
+  const clean = String(text || "").trim();
+  return clean.length <= 60 ? clean : clean.slice(0,57).trimEnd() + "…";
+}
 export function createComposer({api,refresh,context,showLocation,openTask}) {
   const form = byId("quick-add"), input = byId("quick-text"), picker = byId("quick-day");
   let draft = restoreDraft();
-  let selected = draft?.day || null;
-  let implicit = Boolean(selected && draft?.implicit);
-  let sending = false, lastContext = "", choicesKey = "", follow = "", resultId = null;
-  let recoveryTimer;
+  let selected = draft?.day || null, implicit = Boolean(selected && draft?.implicit);
+  let lastContext = "", choicesKey = "", issueKey = "", legacyChecked = false;
+  let receipt = readJSON(localRead("sessionStorage",receiptKey) ?? localRead("localStorage",receiptKey));
   input.value = draft?.text || "";
+  const outbox = createCaptureOutbox({api,onChange:update,onRemoteChange:() => { void refresh(true); },onAccepted(item) {
+    // Storage-denied browsers keep their original text until the local service acknowledges it.
+    if (draft?.id === item.id) { storeDraft(null); input.value = ""; lastContext = ""; }
+    if (receipt?.id === item.id) receipt.ackAt = Date.now();
+    void refresh(true);
+  }});
 
   function storeDraft(next) {
-    const previous = draft ? JSON.stringify(draft) : null;
+    const previous = draft;
     draft = next;
     const value = next ? JSON.stringify(next) : "";
-    write("sessionStorage",value);
-    if (next) write("localStorage",value);
-    else if (stored("localStorage") === previous) write("localStorage",null);
+    localWrite("sessionStorage",draftKey,value);
+    let durable = !next;
+    if (next) {
+      const individual = localWrite("localStorage",draftPrefix + next.id,value);
+      const backup = localWrite("localStorage",draftKey,value);
+      durable = individual || backup;
+    } else if (readJSON(localRead("localStorage",draftKey))?.id === previous?.id) {
+      localWrite("localStorage",draftKey,null);
+    }
+    if (durable && previous && previous.id !== next?.id) localWrite("localStorage",draftPrefix + previous.id,null);
   }
   function capture() {
     if (!input.value.trim()) { if (draft) storeDraft(null); return; }
     if (draft?.text === input.value && draft.day === selected && Boolean(draft.implicit) === implicit) return;
-    storeDraft({id:crypto.randomUUID().replaceAll("-",""),text:input.value,day:selected,implicit,sent:false});
+    storeDraft({id:crypto.randomUUID().replaceAll("-",""),text:input.value,day:selected,implicit,updatedAt:Date.now()});
   }
-  function feedback(message,task) {
-    byId("entry-feedback").hidden = !message;
-    const status = byId("entry-status");
-    if (status.textContent !== message) status.textContent = message;
-    const action = byId("view-added");
-    action.hidden = !task;
-    if (task) action.setAttribute("aria-label","View task — " + task.text);
+  function remember(item) {
+    receipt = {id:item.id,text:item.text,provider:item.provider,model:item.model};
+    const value = JSON.stringify(receipt);
+    localWrite("sessionStorage",receiptKey,value);
+    localWrite("localStorage",receiptKey,value);
   }
   function error(message = "") {
     byId("quick-error").textContent = message;
     byId("quick-error").hidden = !message;
   }
-  function controls() {
-    form.setAttribute("aria-busy",String(sending));
-    input.readOnly = sending;
-    picker.disabled = sending;
-    byId("add-button").disabled = sending || !context().state;
-    byId("add-label").textContent = sending ? "Estimating…" : draft?.sent ? "Retry add" : "Add task";
-    for (const item of document.querySelectorAll('#agenda-add,[data-action="add-day"]')) item.disabled = sending;
-  }
-  function scope({view,selectedDay,monday,compact}) { return [view,selectedDay,monday,compact].join("|"); }
   function dayOptions(ctx) {
-    const contextKey = scope(ctx);
+    const contextKey = [ctx.view,ctx.selectedDay,ctx.monday,ctx.compact].join("|");
     const viewed = ctx.view === "day" || ctx.compact ? ctx.selectedDay : null;
     if (contextKey !== lastContext) {
-      if (!draft && !sending) { selected = viewed; implicit = Boolean(viewed); }
+      if (!draft) { selected = viewed; implicit = Boolean(viewed); }
       lastContext = contextKey;
     }
     const preferred = implicit ? selected : viewed;
@@ -81,22 +83,43 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
       if (selected && !days.includes(selected)) days.push(selected);
       const name = day => formatDay(day,{weekday:"short",month:"short",day:"numeric"});
       const preferredOption = preferred ? [new Option("Prefer " + name(preferred),"view:" + preferred)] : [];
-      picker.replaceChildren(new Option("Auto-schedule",""),...preferredOption,...days.map(day =>
-        new Option("On " + name(day),day)));
+      picker.replaceChildren(new Option("Auto-schedule",""),...preferredOption,...days.map(day => new Option("On " + name(day),day)));
     }
     picker.value = implicit && selected ? "view:" + selected : selected || "";
     picker.title = implicit ? "Use this day unless your task names a date." : "Choose a date, or let Dayline find the next opening.";
     input.placeholder = selected ? "What needs doing that day?" : ctx.compact ? "e.g. Review deck, 45m" : "Add a task, e.g. review the deck for 45 minutes tomorrow";
   }
-  function accepted(task) {
-    resultId = task.id;
-    storeDraft(null);
-    input.value = "";
-    lastContext = "";
-    error();
+  function sendIssues(waiting) {
+    const issues = waiting.filter(item => item.problem);
+    const signature = JSON.stringify(issues.map(item => [item.id,item.problem,item.blocked]));
+    if (signature === issueKey) return;
+    issueKey = signature;
+    const box = byId("capture-problems");
+    box.hidden = !issues.length;
+    box.replaceChildren(...issues.map(item => {
+      const row = document.createElement("div");
+      const line = document.createElement("span");
+      line.textContent = "“" + shortTitle(item.text) + "” · " + item.problem;
+      const retry = document.createElement("button");
+      retry.type = "button"; retry.className = "summary-link"; retry.textContent = "Retry send";
+      retry.addEventListener("click",() => outbox.retry(item.id));
+      row.append(line,retry);
+      if (item.blocked) {
+        const edit = document.createElement("button");
+        edit.type = "button"; edit.className = "summary-link"; edit.textContent = "Edit draft";
+        edit.addEventListener("click",() => {
+          if (input.value.trim()) { error("Finish the current draft before editing this saved task."); input.focus(); return; }
+          input.value = item.text; selected = item.day || null; implicit = Boolean(item.implicit);
+          capture(); outbox.remove(item.id); update(); input.focus();
+        });
+        row.append(edit);
+      }
+      return row;
+    }));
   }
   function update() {
     const ctx = context();
+    byId("add-button").disabled = !ctx.state;
     if (!ctx.state || !ctx.monday) return;
     const agent = ctx.state.selectedAgent;
     const link = byId("entry-agent");
@@ -106,83 +129,79 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
       link.textContent = ["Task agent",name,agent.model].filter(Boolean).join(" · ");
       link.title = "Change task agent" + (agent.effort ? " · " + agent.effort + " reasoning effort" : "");
     }
-    if (!sending && draft?.sent) {
-      const saved = ctx.state.tasks.find(task => task.id === draft.id);
-      if (saved) accepted(saved);
+    outbox.reconcile(ctx.state.tasks);
+    if (!legacyChecked) {
+      legacyChecked = true;
+      // The previous client retained an already-submitted task in the text field.
+      if (draft?.sent || (draft && (outbox.entries().some(item => item.id === draft.id) || ctx.state.tasks.some(task => task.id === draft.id)))) {
+        const saved = ctx.state.tasks.some(task => task.id === draft.id);
+        const item = {...draft,createdAt:draft.sentAt || Date.now()};
+        const durable = saved || outbox.add(item);
+        remember(item);
+        if (durable) { storeDraft(null); input.value = ""; }
+      }
     }
     dayOptions(ctx);
-    controls();
-    if (sending) return;
-    const task = resultId && ctx.state.tasks.find(item => item.id === resultId);
-    if (!task) {
-      const recent = draft?.sent && Date.now() - Number(draft.sentAt) < 115000;
-      feedback(recent ? "Checking for your submitted task. Your draft is saved." : draft?.sent ? "Your draft is saved. Retry add to finish the same request." : "");
-      if (recent && !recoveryTimer && !document.hidden) recoveryTimer = window.setTimeout(() => {
-        recoveryTimer = null;
-        if (draft?.sent && !sending) void refresh(true);
-      },2000);
-      return;
-    }
-    const checking = !task.start && !task.pendingEstimate && task.syncStatus === "pending" && ctx.state.connection.connected;
-    if (task.pendingEstimate) feedback("Saved in Unscheduled. Awaiting an estimate from your task agent.",task);
-    else if (task.start) {
-      const zone = ctx.state.settings.timeZone;
-      const day = formatDay(zonedDay(task.start,zone),{weekday:"short",month:"short",day:"numeric"});
-      const when = task.allDay ? day + " · All day" : day + " at " + instantTime(task.start,zone) + " · " + duration(task.minutes);
-      feedback("Scheduled " + when + ".",task);
-    } else if (checking) feedback("Saved. Checking calendar availability…",task);
-    else feedback("Saved in Unscheduled." + (task.issue ? " " + task.issue : ""),task);
-    if (follow && !checking) {
-      const canFollow = follow === scope(ctx) && !document.querySelector("dialog[open]") && !input.value;
-      follow = "";
-      if (canFollow) queueMicrotask(() => { if (resultId === task.id) showLocation(task); });
-    }
+    const waiting = outbox.entries();
+    sendIssues(waiting);
+    const task = receipt && ctx.state.tasks.find(item => item.id === receipt.id);
+    const unsent = receipt && waiting.find(item => item.id === receipt.id);
+    let message = "";
+    if (task) {
+      const title = "“" + shortTitle(task.title || task.text) + "”";
+      const agent = task.estimateAgent || task.agent || receipt;
+      const client = [clients[agent.provider],agent.model].filter(Boolean).join(" · ");
+      if (task.estimateState === "queued") message = "Queued " + title + (client ? " for " + client : "") + ".";
+      else if (task.estimateState === "estimating") message = "Estimating " + title + (client ? " with " + client : "") + "…";
+      else if (task.pendingEstimate) message = title + " needs an estimate. Open it to retry.";
+      else if (task.start) {
+        const zone = ctx.state.settings.timeZone;
+        const day = formatDay(zonedDay(task.start,zone),{weekday:"short",month:"short",day:"numeric"});
+        const when = task.allDay ? day + " · All day" : day + " at " + instantTime(task.start,zone) + " · " + duration(task.minutes);
+        message = title + " scheduled " + when + ".";
+      } else if (task.syncStatus === "pending" && ctx.state.connection.connected) message = "Checking calendar availability for " + title + "…";
+      else message = title + " is in Unscheduled." + (task.issue ? " " + task.issue : "");
+    } else if (unsent) {
+      message = (unsent.problem ? "Waiting to save " : "Saving ") + "“" + shortTitle(unsent.text) + "” on this Mac.";
+    } else if (receipt?.ackAt && Date.now() - receipt.ackAt < 10000) message = "Saved “" + shortTitle(receipt.text) + "” on this Mac.";
+    const other = waiting.length - (unsent ? 1 : 0);
+    if (other) message += (message ? " " : "") + other + (other === 1 ? " task waiting to send." : " tasks waiting to send.");
+    const status = byId("entry-status");
+    byId("entry-feedback").hidden = !message;
+    if (status.textContent !== message) status.textContent = message;
+    const action = byId("view-added");
+    action.hidden = !task;
+    if (task) action.setAttribute("aria-label","View task — " + (task.title || task.text));
   }
   function choose(day,focus = true,fromView = false) {
-    if (sending) return;
-    selected = day || null;
-    implicit = Boolean(selected && fromView);
+    selected = day || null; implicit = Boolean(selected && fromView);
     capture();
     if (context().state) dayOptions(context());
-    controls();
     if (focus) input.focus();
   }
-  input.addEventListener("input",() => {
-    if (sending) return;
-    capture();
-    resultId = null; follow = "";
-    error(); feedback(""); controls();
-  });
+  input.addEventListener("input",() => { capture(); error(); });
   picker.addEventListener("change",() => {
     const fromView = picker.value.startsWith("view:");
     choose(fromView ? picker.value.slice(5) : picker.value,false,fromView);
   });
   byId("view-added").addEventListener("click",() => {
-    const task = context().state?.tasks.find(item => item.id === resultId);
+    const task = context().state?.tasks.find(item => item.id === receipt?.id);
     if (task) { showLocation(task); openTask(task); }
   });
-  form.addEventListener("submit",async (event) => {
+  form.addEventListener("submit",event => {
     event.preventDefault();
     const ctx = context();
-    if (sending || !ctx.state || !input.value.trim()) return;
+    if (!ctx.state || !input.value.trim()) return;
     capture();
-    const request = {requestId:draft.id,text:draft.text.trim()};
-    if (selected) request[implicit ? "viewDay" : "day"] = selected;
-    storeDraft({...draft,sent:true,sentAt:Date.now()});
-    sending = true;
-    follow = scope(ctx); resultId = null;
-    error(); controls();
     const agent = ctx.state.selectedAgent || {};
-    const name = clients[agent.provider] || "your task agent";
-    feedback("Estimating with " + name + (agent.model ? " (" + agent.model + ")" : "") + "…");
-    let problem = "";
-    try { await api("/api/tasks","POST",request); }
-    catch (cause) { problem = cause.message; }
-    sending = false;
-    await refresh(true);
-    update();
-    if (draft?.id === request.requestId && problem) error(problem);
+    const item = {id:draft.id,text:draft.text.trim(),day:draft.day,implicit:Boolean(draft.implicit),createdAt:Date.now(),
+      captureTimeZone:ctx.state.settings.timeZone,provider:agent.provider,model:agent.model,effort:agent.effort};
+    const saved = outbox.add(item);
+    remember(item);
+    if (saved) { storeDraft(null); input.value = ""; lastContext = ""; }
+    error(saved ? "" : "Browser storage is unavailable. Your text stays here until Dayline confirms receipt.");
+    update(); input.focus({preventScroll:true});
   });
-  controls();
+  byId("add-button").disabled = true;
   return {update,choose};
 }

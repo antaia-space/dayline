@@ -38,7 +38,8 @@ export function summary(container, tasks) {
 }
 
 function taskControls(task, state, agenda = false) {
-  const checkbox = button("task-toggle","toggle-task",(task.done ? "Reopen " : "Mark complete — ") + task.text);
+  const name = task.title || task.text;
+  const checkbox = button("task-toggle","toggle-task",(task.done ? "Reopen " : "Mark complete — ") + name);
   checkbox.dataset.id = task.id;
   checkbox.dataset.focus = (agenda ? "agenda-" : "board-") + "toggle-" + task.id;
   checkbox.setAttribute("aria-pressed", String(Boolean(task.done)));
@@ -46,28 +47,55 @@ function taskControls(task, state, agenda = false) {
   checkbox.disabled = task.syncStatus === "deleting";
   if (task.done) checkbox.append(icon("check"));
   const content = element("div","task-content");
-  const title = button("task-title","edit-task","Edit " + task.text,task.text);
+  const title = button("task-title","edit-task","Edit " + name,name);
   title.dataset.id = task.id;
   title.dataset.focus = (agenda ? "agenda-" : "board-") + "edit-" + task.id;
   content.append(title);
   const category = categoryOf(state,task);
   const meta = element("span","task-meta");
-  if (task.pendingEstimate) {
+  if (task.estimateState === "queued") {
+    meta.textContent = "Queued for estimate";
+  } else if (task.estimateState === "estimating") {
+    meta.textContent = "Estimating…";
+  } else if (task.estimateState === "failed") {
+    meta.textContent = "Estimate unavailable";
+  } else if (task.pendingEstimate) {
     meta.textContent = "Awaiting estimate";
   } else if (task.allDay) {
     if (agenda) meta.textContent = category.name;
     else meta.append(categoryDot(category),document.createTextNode("All day · " + category.name));
   } else if (agenda) {
     const endTime = task.end ? "Until " + instantTime(task.end,state.settings.timeZone) + " · " : "";
-    meta.textContent = endTime + duration(task.minutes) + " · " + category.name;
+    meta.textContent = endTime + category.name;
   } else {
-    const time = task.start ? instantTime(task.start,state.settings.timeZone) + " · " : "";
-    meta.append(categoryDot(category),element("span","sr-only",category.name + ", "),document.createTextNode(time + duration(task.minutes)));
-    meta.title = category.name + " · " + time + duration(task.minutes);
+    const time = task.start ? instantTime(task.start,state.settings.timeZone) : category.name;
+    meta.append(categoryDot(category),element("span","sr-only",task.start ? category.name + ", " : ""),document.createTextNode(time));
+    meta.title = category.name;
   }
-  content.append(meta);
+  const details = element("div","task-details");
+  details.append(meta);
+  if (!task.pendingEstimate && task.syncStatus !== "deleting" && Number.isSafeInteger(task.minutes) && task.minutes > 0) {
+    const group = element("div","duration-adjust");
+    group.setAttribute("role","group");
+    group.setAttribute("aria-label","Work duration for " + name);
+    group.dataset.durationFor = task.id;
+    const decrease = button("nudge","adjust-duration","Subtract 5 minutes from " + name,"−");
+    const increase = button("nudge","adjust-duration","Add 5 minutes to " + name,"+");
+    for (const [control,delta] of [[decrease,-5],[increase,5]]) {
+      control.dataset.id = task.id;
+      control.dataset.delta = String(delta);
+      control.dataset.focus = (agenda ? "agenda-" : "board-") + "duration-" + task.id + "-" + delta;
+      control.title = delta > 0 ? "Add 5 minutes" : "Subtract 5 minutes";
+    }
+    decrease.disabled = task.minutes <= 5;
+    const initial = task.allDay && task.minutes === 1440 && !task.estimatedMinutes ? "Effort" : duration(task.minutes);
+    const value = element("span","duration-value",initial);
+    value.setAttribute("aria-live","polite");
+    group.append(decrease,value,increase); details.append(group);
+  }
+  content.append(details);
   const issue = task.syncStatus === "deleting" ? "Removal queued" : task.issue;
-  if (issue) content.append(element("span","task-issue",issue));
+  if (issue && task.estimateState !== "queued" && task.estimateState !== "estimating") content.append(element("span","task-issue",issue));
   return [checkbox,content];
 }
 

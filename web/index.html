@@ -55,6 +55,7 @@
       <div id="entry-feedback" class="entry-feedback" hidden><span id="entry-status" role="status" aria-live="polite"></span><button id="view-added" type="button" class="summary-link" hidden>View task</button></div>
       <button id="entry-agent" type="button" class="agent-link" hidden>Task agent</button>
     </div>
+    <div id="capture-problems" class="capture-problems" hidden></div>
 
     <section id="week-section" aria-label="Weekly task board">
       <div class="section-bar">
@@ -160,6 +161,9 @@
           <p id="agent-run-usage" class="hint" hidden></p>
           <p id="agent-run-notice" class="hint" hidden></p>
         </section>
+        <section id="duration-notes" class="agent-usage" aria-labelledby="duration-notes-title" hidden>
+          <h3 id="duration-notes-title">Your duration notes</h3><ul id="duration-note-list" class="hint"></ul>
+        </section>
       </section>
       <p id="settings-error" class="field-error dialog-error" role="alert" hidden></p>
     </div>
@@ -168,10 +172,12 @@
   <dialog id="task-dialog" aria-labelledby="task-heading" class="panel">
     <div class="dialog-heading"><div><p class="eyebrow">Task details</p><h2 id="task-heading">Edit task</h2></div><button class="icon-button close-dialog" aria-label="Close task details"><span data-icon="x"></span></button></div>
     <div class="dialog-scroll"><form id="task-form" class="form-body">
-      <label>Task<textarea id="task-text" required maxlength="1000" rows="2"></textarea></label>
-      <div id="task-estimate-fields" class="field-pair"><label>Duration in minutes<input id="task-minutes" type="number" min="1" max="1440" step="1" required></label><label>Type<select id="task-category" required></select></label></div>
+      <label>Title<input id="task-title-input" type="text" maxlength="120" placeholder="Dayline will suggest a title"></label>
+      <label>Original task<textarea id="task-text" required maxlength="1000" rows="2"></textarea></label>
+      <div id="task-estimate-fields" class="field-pair"><label>Duration in minutes<input id="task-minutes" type="number" min="1" step="1" required></label><label>Type<select id="task-category" required></select></label></div>
       <label>Schedule on a day <span class="optional">Optional</span><input id="task-day" type="date"></label>
       <p id="estimate-reason" class="hint"></p>
+      <p id="duration-learning" class="hint" hidden>Changing the duration helps Dayline estimate similar tasks on this Mac.</p>
       <div id="task-status" class="task-status" aria-live="polite"></div>
       <button type="button" id="retry-estimate" class="secondary" title="Request one estimate using the agent selected in Settings" hidden>Retry estimate</button>
       <p id="task-error" class="field-error" role="alert" hidden></p>

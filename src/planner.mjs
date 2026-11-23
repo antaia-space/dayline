@@ -254,6 +254,25 @@ export function estimateTask(text, { now, timeZone = 'UTC', estimatedMinutes } =
   return { ...estimate, ...dates, ...timeConstraints(flexibleText, estimate.explicitMinutes ? estimate.minutes : (estimatedMinutes ?? estimate.minutes)) };
 }
 
+// An exact start such as “at 10” creates an end derived from the estimate.
+// Recompute that end on resize while retaining explicit deadlines and ranges.
+export function resizedClockWindow(task, minutes, timeZone) {
+  if (!task.windowStart || !task.windowEnd) return task.windowEnd;
+  const captured = instantInZone(task.estimateRequestedAt || task.createdAt, timeZone).startOf('day');
+  if (!captured.isValid) return task.windowEnd;
+  try {
+    const { flexibleText } = dateConstraints(task.text, captured);
+    const original = timeConstraints(flexibleText, task.minutes);
+    if (original.windowStart === task.windowStart && original.windowEnd === task.windowEnd) {
+      return timeConstraints(flexibleText, minutes).windowEnd;
+    }
+  } catch (error) {
+    if (!(error instanceof RangeError)) throw error;
+    // Legacy or calendar-edited text may have an unrelated clock expression.
+  }
+  return task.windowEnd;
+}
+
 const minuteMs = 60_000;
 const gridMs = 5 * minuteMs;
 

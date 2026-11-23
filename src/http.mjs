@@ -3,12 +3,14 @@ import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { invalid } from './service.mjs';
+import { durationNotes } from './task-learning.mjs';
 
 const POLICY = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.png': 'image/png' };
 const escape = v => String(v).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c]);
 const TASK_ROUTE = /^\/api\/tasks\/([a-f0-9]{32})$/;
 const ESTIMATE_ROUTE = /^\/api\/tasks\/([a-f0-9]{32})\/estimate$/;
+const DURATION_ROUTE = /^\/api\/tasks\/([a-f0-9]{32})\/duration$/;
 const ACTION_ROUTE = /^\/action\/([a-f0-9]{32})$/;
 
 async function jsonInput(req) {
@@ -36,7 +38,7 @@ function page(title, body, link = '/', label = 'Open planner') {
 export async function startServer({ service, agents, webRoot, port = 43127, intervalMs = 60000 }) {
   const sessionSecret = randomBytes(32).toString('base64url');
   const invitations = new Map();
-  const retrying = new Map();
+  let durationSyncTimer;
   let cookieName;
   let origin;
   let closed = false;
@@ -87,30 +89,47 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
       }
       if (req.method === 'GET' && pathname === '/api/agent' && agents) {
         const details = await agents.status(url.searchParams.get('provider') ?? undefined);
-        return send(res, 200, 'application/json', JSON.stringify(details));
+        return send(res, 200, 'application/json', JSON.stringify({ ...details, durationNotes: durationNotes(service.data) }));
       }
       if (req.headers.origin !== origin) throw invalid('Open this action in your local planner.', 403);
       const body = await jsonInput(req);
       let result = { ok: true };
       const match = TASK_ROUTE.exec(pathname);
       const retry = ESTIMATE_ROUTE.exec(pathname);
+      const duration = DURATION_ROUTE.exec(pathname);
+      let status = 200;
       let syncAfter = true;
-      if (req.method === 'POST' && pathname === '/api/tasks') result.id = await service.run(() => service.createTask(body));
-      else if (req.method === 'POST' && retry) {
-        const taskId = retry[1];
-        if (!retrying.has(taskId)) {
-          const pending = service.run(() => service.retryEstimate(taskId)).finally(() => retrying.delete(taskId));
-          retrying.set(taskId, pending);
+      if (req.method === 'POST' && pathname === '/api/tasks') {
+        result.id = await service.run(() => service.enqueueTask(body));
+        status = 202;
+        syncAfter = false;
+      } else if (req.method === 'POST' && retry) {
+        result.id = await service.run(() => service.enqueueRetry(retry[1], body));
+        status = 202;
+        syncAfter = false;
+      } else if (req.method === 'POST' && duration) {
+        result = await service.run(() => service.adjustDuration(duration[1], body));
+        syncAfter = false;
+        if (service.data.accounts.length) {
+          clearTimeout(durationSyncTimer);
+          durationSyncTimer = setTimeout(background, 300);
+          durationSyncTimer.unref();
         }
-        await retrying.get(taskId);
       } else if (req.method === 'POST' && pathname === '/api/agent' && agents) {
         result = await service.run(() => agents.select(body));
         syncAfter = false;
       } else if (req.method === 'POST' && pathname === '/api/agent/login' && agents) {
         result = await agents.login(body);
         syncAfter = false;
-      } else if (req.method === 'PATCH' && match) await service.run(() => service.editTask(match[1], body));
-      else if (req.method === 'DELETE' && match) await service.run(() => service.deleteTask(match[1]));
+      } else if (req.method === 'PATCH' && match) {
+        result.id = await service.run(() => {
+          if (typeof body.text === 'string' && body.text.trim() !== service.findTask(match[1]).text) {
+            status = 202;
+            syncAfter = false;
+          }
+          return service.enqueueEdit(match[1], body);
+        });
+      } else if (req.method === 'DELETE' && match) await service.run(() => service.deleteTask(match[1]));
       else if (req.method === 'PATCH' && pathname === '/api/settings') await service.run(() => service.updateSettings(body));
       else if (req.method === 'POST' && pathname === '/api/connection/config') await service.run(() => service.configure(body));
       else if (req.method === 'POST' && pathname === '/api/connection/start') {
@@ -123,7 +142,7 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
         syncAfter = false;
       } else throw invalid('Unknown Dayline action.', 404);
       if (syncAfter) background();
-      return send(res, 200, 'application/json', JSON.stringify(result));
+      return send(res, status, 'application/json', JSON.stringify(result));
     }
 
     if (req.method !== 'GET' && req.method !== 'HEAD') throw invalid('Unknown request.', 405);
@@ -154,6 +173,7 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
   origin = 'http://127.0.0.1:' + server.address().port;
   cookieName = 'dayline_session_' + server.address().port;
   service.origin = origin;
+  service.startEstimateWorker();
   const timer = intervalMs ? setInterval(background, intervalMs) : null;
   timer?.unref();
   background();
@@ -169,6 +189,8 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
     async close() {
       closed = true;
       clearInterval(timer);
+      clearTimeout(durationSyncTimer);
+      service.stopEstimateWorker();
       await new Promise(resolve => server.close(resolve));
       await service.tail;
     }
