@@ -1,7 +1,7 @@
 // The Mac's side of the public booking page. It publishes free start times
 // to Antaia's receiver and answers the requests guests left there. Google
 // tokens, event details and tasks are never part of this protocol.
-import { bookingSnapshot, bookingState, settleBooking } from './booking-service.mjs';
+import { bookingSnapshot, bookingState, dropBookingPasses, settleBooking } from './booking-service.mjs';
 import { explicitStartFor } from './planner.mjs';
 
 const device = /^[A-Za-z0-9_-]{43}$/;
@@ -90,7 +90,7 @@ export class BookingDesk {
     const data = await response.json();
     if (typeof data.bookingToken !== 'string' || !ticket.test(data.bookingToken) || !handle.test(data.bookingHandle || '') ||
         !Number.isSafeInteger(data.expiresAt) || data.expiresAt <= this.now()) {
-      throw this.fail('unsupported', 'Booking pages are not available on the receiver yet. An Antaia administrator has to deploy it.');
+      throw this.fail('unsupported', 'Booking pages are not available on the receiver yet. Whoever hosts the receiver has to deploy the current version.');
     }
     this.session = { token: data.bookingToken, handle: data.bookingHandle, renewAt: data.expiresAt - DAY };
     return this.session;
@@ -101,7 +101,7 @@ export class BookingDesk {
     const response = await this.request(this.origin + '/v1/booking/sync', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(20000),
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + session.token }, body: JSON.stringify(body) });
     if (response.status === 401 && retry) { this.session = null; return this.send(body, false); }
-    if (response.status === 404) throw this.fail('unsupported', 'Booking pages are not available on the receiver yet. An Antaia administrator has to deploy it.');
+    if (response.status === 404) throw this.fail('unsupported', 'Booking pages are not available on the receiver yet. Whoever hosts the receiver has to deploy the current version.');
     if (!response.ok) throw this.fail('offline', 'The booking page receiver answered HTTP ' + response.status + '.');
     const reply = await response.json();
     if (!Array.isArray(reply?.requests)) throw this.fail('offline', 'The booking page receiver sent an unreadable answer.');
@@ -113,7 +113,7 @@ export class BookingDesk {
   fingerprint() {
     const { service } = this, { settings } = service.data, state = bookingState(service);
     const fixed = service.data.tasks.filter(t => t.start && !t.done && !t.deleting && explicitStartFor(t, settings.timeZone)).map(t => [t.start, t.end]);
-    return JSON.stringify([state.owner, state.calendarId, state.accountSub, state.calendars, state.types, settings.timeZone, settings.workDays, settings.startTime,
+    return JSON.stringify([state.owner, state.calendarId, state.accountSub, state.calendars, state.passes, state.types, settings.timeZone, settings.workDays, settings.startTime,
       settings.endTime, settings.calendarMode, settings.excludedCalendarIds, service.busy, fixed]);
   }
 
@@ -150,6 +150,8 @@ export class BookingDesk {
         Object.assign(this, { dirty: false, print, builtAt: this.now(), paused: snapshot.page.paused });
       }
       const reply = await this.send(body);
+      // Single-use links that were used are no longer published.
+      if (reply.spent?.length && await service.run(() => dropBookingPasses(service, reply.spent))) this.dirty = true;
       if (body.page) {
         this.publishedAt = reply.publishedAt ? new Date(reply.publishedAt).toISOString() : null;
         if (!state.published) await service.run(() => { state.published = true; service.store.save(); });

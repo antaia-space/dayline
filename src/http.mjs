@@ -7,7 +7,7 @@ import { durationNotes } from './task-learning.mjs';
 import { createCaptureHandler } from './capture.mjs';
 import { LiveCalendar } from './live-calendar.mjs';
 import { BookingDesk } from './booking-relay.mjs';
-import { dismissBookingNotice, publicBooking, updateBooking } from './booking-service.mjs';
+import { createBookingPass, dismissBookingNotice, publicBooking, updateBooking } from './booking-service.mjs';
 
 const POLICY = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.png': 'image/png' };
@@ -213,6 +213,16 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
         await Promise.race([desk.changed(), new Promise(resolve => { timer = setTimeout(resolve, 8000); })]);
         clearTimeout(timer);
         result = bookingView();
+        syncAfter = false;
+      } else if (req.method === 'POST' && pathname === '/api/booking/passes') {
+        // A single-use link exists once the receiver has it, so publish before answering.
+        const code = await service.run(() => createBookingPass(service, body.slug));
+        let timer;
+        await Promise.race([desk.changed(), new Promise(resolve => { timer = setTimeout(resolve, 8000); })]);
+        clearTimeout(timer);
+        const { url } = desk.status();
+        if (!url) throw invalid('Your booking page is not published yet. Try again in a moment.', 409);
+        result = { code, url: url + '/once/' + code };
         syncAfter = false;
       } else if (req.method === 'POST' && pathname === '/api/booking/notices') {
         await service.run(() => dismissBookingNotice(service, body.id));

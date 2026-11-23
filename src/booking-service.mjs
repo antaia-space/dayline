@@ -1,9 +1,11 @@
 // Booking links: which times a guest may book, and the calendar event a
 // booking becomes. Google Calendar is the only store of bookings. Rules ported
 // from antaia-space/meet (src/lib/booking.ts, booking.config.ts).
+import { randomBytes } from 'node:crypto';
 import { computeSlots, isValidTimeZone, WEEKDAYS } from './booking-slots.mjs';
 import { explicitStartFor } from './planner.mjs';
 import { invalid, withoutSlots } from './service.mjs';
+import { receiverAccount } from './receiver-choice.mjs';
 
 const MINUTE = 60_000, DAY = 86_400_000;
 const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
@@ -50,7 +52,7 @@ export function canWriteBookings(account) {
 function firstAddress(service) {
   const state = service.data.booking, accounts = service.data.accounts;
   if (accounts.some(a => a.sub === state?.accountSub)) return state.accountSub;
-  return (accounts.find(a => a.email?.toLowerCase().endsWith('@antaia.space')) ?? accounts[0])?.sub ?? null;
+  return (receiverAccount(accounts, service.relayAccount) ?? accounts[0])?.sub ?? null;
 }
 
 export function addressOf(service, type) {
@@ -170,8 +172,54 @@ export function publicBooking(service) {
     addresses: [...bookingTargets(service).values()].map(({ account, calendar }) => ({
       sub: account.sub, email: account.email, access: canWriteBookings(account), calendarId: calendar?.id ?? null,
       calendars: service.calendars.filter(c => c.sub === account.sub && c.writable).map(c => ({ id: c.id, name: c.name })),
+      page: addressPages(service).get(account.sub),
     })),
   };
+}
+
+/**
+ * Each address has its own public page that lists only its meeting types.
+ * The page is named after the mail domain ("antaia", "gmail"), so the link
+ * does not carry the address itself.
+ */
+export function addressPages(service) {
+  const pages = new Map(), taken = new Set();
+  for (const account of service.data.accounts) {
+    const domain = String(account.email || '').split('@')[1] || '';
+    const base = domain.split('.')[0].toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'page';
+    let name = base;
+    for (let n = 2; taken.has(name); n++) name = base + '-' + n;
+    taken.add(name);
+    pages.set(account.sub, name);
+  }
+  return pages;
+}
+
+const PASS_LIFE = 30 * DAY;
+const BASE32HEX = '0123456789abcdefghijklmnopqrstuv';
+const livePasses = (state, now) => (state.passes ?? []).filter(pass => now - Date.parse(pass.createdAt) < PASS_LIFE &&
+  state.types.some(type => type.slug === pass.slug && type.active !== false));
+
+/** A single-use link for one meeting type: it works for one booking, or for 30 days if nobody uses it. */
+export function createBookingPass(service, slug, now = service.clock().getTime()) {
+  const state = bookingState(service);
+  if (!state.enabled || !state.types.some(type => type.slug === slug && type.active !== false)) {
+    throw invalid('Switch on booking links and this meeting type before making a single-use link.', 409);
+  }
+  let code = '';
+  for (const byte of randomBytes(16)) code += BASE32HEX[byte % 32];
+  state.passes = [...livePasses(state, now), { code, slug, createdAt: iso(now) }].slice(-100);
+  service.store.save();
+  return code;
+}
+
+/** The receiver reports which single-use links were used; they are then no longer published. */
+export function dropBookingPasses(service, codes) {
+  const state = bookingState(service), kept = (state.passes ?? []).filter(pass => !codes.includes(pass.code));
+  if (kept.length === (state.passes ?? []).length) return false;
+  state.passes = kept;
+  service.store.save();
+  return true;
 }
 
 function bookingHours(settings) {
@@ -220,7 +268,10 @@ export async function bookingSnapshot(service, now = service.clock().getTime()) 
   const state = bookingState(service), settings = service.data.settings;
   // A meeting type that is switched off is not published at all: its link stops answering.
   const offered = state.types.filter(type => type.active !== false);
-  const page = { owner: { ...state.owner }, types: offered.map(publicType), slots: {}, paused: null };
+  const pages = addressPages(service);
+  const page = { owner: { ...state.owner }, slots: {}, paused: null,
+    types: offered.map(type => ({ ...publicType(type), group: pages.get(addressOf(service, type)) ?? null })),
+    passes: livePasses(state, now).map(({ code, slug }) => ({ code, slug })) };
   try {
     if (service.data.accounts.length && !service.calendars.length) await service.discover();
     const targets = bookingTargets(service);

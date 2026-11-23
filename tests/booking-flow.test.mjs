@@ -9,7 +9,7 @@ import { createRelay } from '../relay/receiver.mjs';
 import { BookingBoard } from '../relay/booking.mjs';
 import { BookingDesk } from '../src/booking-relay.mjs';
 import { DaylineService } from '../src/service.mjs';
-import { defaultBooking } from '../src/booking-service.mjs';
+import { createBookingPass, defaultBooking } from '../src/booking-service.mjs';
 import { defaultSettings } from '../src/store.mjs';
 import { zonedToUtcMs } from '../src/booking-slots.mjs';
 import { fakeGoogle } from './fake-google.mjs';
@@ -179,6 +179,36 @@ test('a guest books, reschedules and cancels while the Mac is awake', async t =>
   // The private account was only ever asked for free/busy.
   const home = w.google.requests.filter(r => r.body.includes('urs@example.test') || r.path.includes('urs%40example.test'));
   assert.ok(home.length > 0 && home.every(r => r.path.endsWith('/freeBusy')));
+});
+
+test('a single-use link books once, and the page of an address lists its own types', async t => {
+  const w = await world(t);
+  await w.wake();
+  // The work address's page is named after its mail domain.
+  assert.equal((await w.guest('GET', '/urs/with/antaia')).status, 200);
+  assert.deepEqual((await w.guest('GET', '/api/urs/group/antaia')).body.types.map(type => type.slug), ['intro', 'meeting', 'deep-dive']);
+  assert.equal((await w.guest('GET', '/api/urs/group/gmail')).status, 404);
+
+  const code = createBookingPass(w.service, 'private', w.now());
+  assert.equal((await w.guest('GET', '/api/urs/once/' + code)).status, 410, 'the link does not exist until the Mac has published it');
+  await w.desk.changed();
+  assert.equal((await w.guest('GET', '/urs/once/' + code)).status, 200);
+  const offered = (await w.guest('GET', '/api/urs/once/' + code)).body;
+  assert.deepEqual([offered.type.slug, offered.pass], ['private', code]);
+
+  const at = (hour, minute = 0) => monday(hour, minute, 25);
+  const booked = await w.book(at(10), 'private', { pass: code });
+  assert.equal(booked.status, 202);
+  assert.equal((await w.guest('GET', '/api/urs/booking/' + booked.body.token)).body.status, 'confirmed');
+  assert.ok(w.google.events.has('bkp' + booked.body.token.slice(0, 24)));
+  // Used: the link is dead for the next guest, and the Mac stops publishing it.
+  assert.equal((await w.guest('GET', '/api/urs/once/' + code)).status, 410);
+  assert.equal((await w.book(at(14), 'private', { pass: code, email: 'bob@example.test', name: 'Bob Guest' })).status, 410);
+  await w.wake();
+  assert.deepEqual(w.service.data.booking.passes, []);
+  await w.wake();
+  assert.deepEqual(w.stored.get('urs/page').passes, []);
+  assert.equal(w.stored.has('urs/spent'), false);
 });
 
 test('a request waits while the Mac sleeps and is confirmed when it wakes', async t => {

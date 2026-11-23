@@ -16,6 +16,9 @@ const RECENT = 2 * MINUTE;
 const BASE32HEX = '0123456789abcdefghijklmnopqrstuv';
 const ID = /^[0-9a-v]{24}$/;
 const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
+const PASS = /^[0-9a-v]{16}$/;
+export const MAX_PASSES = 400;
+const usedUp = 'This link has already been used or is no longer valid.';
 const DECLINES = new Set(['taken', 'expired', 'unavailable']);
 const encoder = new TextEncoder();
 
@@ -74,8 +77,10 @@ function checkedPage(input, now, streamId) {
         !whole(t.durationMin, 5, 480) || !whole(t.bufferMin, 0, 240) || !whole(t.minNoticeMin, 0, 43200) || !whole(t.maxDaysAhead, 1, 90)) {
       refuse(400, 'Invalid meeting type.');
     }
+    // `group` puts a type on one of the owner's pages, one page per address they are booked with.
     types.push({ slug: t.slug, title: clean(t.title, 80), description: clean(t.description, 300), durationMin: t.durationMin,
-      bufferMin: t.bufferMin, minNoticeMin: t.minNoticeMin, maxDaysAhead: t.maxDaysAhead, hidden: t.hidden === true });
+      bufferMin: t.bufferMin, minNoticeMin: t.minNoticeMin, maxDaysAhead: t.maxDaysAhead, hidden: t.hidden === true,
+      group: SLUG.test(t.group || '') ? t.group : null });
     const list = input.slots?.[t.slug] ?? [];
     if (!Array.isArray(list) || list.length > MAX_SLOTS || list.some((ms, i) => !Number.isSafeInteger(ms) || (i && ms <= list[i - 1]))) {
       refuse(400, 'Invalid times.');
@@ -83,7 +88,14 @@ function checkedPage(input, now, streamId) {
     slots[t.slug] = list;
   }
   const paused = input.paused == null ? null : clean(input.paused, 40) || 'paused';
-  return { owner, types, slots, paused, publishedAt: now, streamId };
+  // A single-use link: a code that lets one guest book one meeting of one type.
+  const passes = [];
+  for (const pass of Array.isArray(input.passes) ? input.passes.slice(0, MAX_PASSES) : []) {
+    if (pass && PASS.test(pass.code || '') && types.some(t => t.slug === pass.slug) && !passes.some(known => known.code === pass.code)) {
+      passes.push({ code: pass.code, slug: pass.slug });
+    }
+  }
+  return { owner, types, slots, passes, paused, publishedAt: now, streamId };
 }
 
 export class BookingBoard {
@@ -96,10 +108,19 @@ export class BookingBoard {
     if (this.loaded) return;
     this.page = await this.storage.get('page') ?? null;
     this.ledger = await this.storage.get('ledger') ?? {};
+    this.spent = await this.storage.get('spent') ?? {};
     this.loaded = true;
   }
 
   savePage() { return this.page ? this.storage.put('page', this.page) : this.storage.delete('page'); }
+  saveSpent() { return Object.keys(this.spent).length ? this.storage.put('spent', this.spent) : this.storage.delete('spent'); }
+
+  // A single-use link is gone once its meeting is confirmed, and held while a request made with it waits.
+  pass(code) { return PASS.test(code || '') ? this.page?.passes?.find(pass => pass.code === code) ?? null : null; }
+  passTaken(code, now) {
+    return Boolean(this.spent[code]) || Object.values(this.ledger).some(record => record.pass === code &&
+      (record.status === 'confirmed' || (record.status === 'pending' && !this.lapsed(record, now))));
+  }
   saveLedger() { return Object.keys(this.ledger).length ? this.storage.put('ledger', this.ledger) : this.storage.delete('ledger'); }
 
   type(slug) { return this.page?.types.find(t => t.slug === slug) ?? null; }
@@ -162,15 +183,23 @@ export class BookingBoard {
 
   // ------------------------------------------------------------ guest
 
-  viewPage(now) {
-    if (!this.page) refuse(404, 'There is no booking page at this address.');
-    return { owner: this.page.owner, open: this.open(now), types: this.page.types.filter(t => !t.hidden).map(t => this.publicType(t)) };
+  // The whole page, or the page of one address when `group` names it.
+  viewPage(now, group) {
+    if (!this.page || (group && !this.page.types.some(t => t.group === group))) refuse(404, 'There is no booking page at this address.');
+    return { owner: this.page.owner, open: this.open(now),
+      types: this.page.types.filter(t => !t.hidden && (!group || t.group === group)).map(t => this.publicType(t)) };
   }
 
   viewSlots(slug, now) {
     const type = this.type(slug);
     if (!type) refuse(404, 'There is no meeting type at this address.');
     return { owner: this.page.owner, open: this.open(now), type: this.publicType(type), slots: this.offered(type, now) };
+  }
+
+  viewPass(code, now) {
+    const pass = this.pass(code);
+    if (!pass || this.passTaken(code, now)) refuse(410, usedUp);
+    return { ...this.viewSlots(pass.slug, now), pass: code };
   }
 
   async book(input, handle, ip, now) {
@@ -190,10 +219,13 @@ export class BookingBoard {
     const waiting = Object.values(this.ledger).filter(r => r.status === 'pending' && !this.lapsed(r, now));
     let record = waiting.find(r => r.type === type.slug && r.start === start && r.guest?.email === email);
     if (!record) {
+      const code = input.pass === undefined ? null : clean(input.pass, 16);
+      if (code !== null && (this.pass(code)?.slug !== type.slug || this.passTaken(code, now))) refuse(410, usedUp);
       if (!this.offered(type, now).includes(start)) refuse(409, 'That time is no longer available. Pick another one.');
       if (waiting.length >= MAX_WAITING) refuse(503, 'Too many requests are waiting for an answer. Try again later.');
       record = { id: newRequestId(), type: type.slug, start, end: start + type.durationMin * MINUTE, status: 'pending',
-        createdAt: now, expiresAt: Math.min(start - EXPIRE_BEFORE_START, now + WAIT_LIMIT), guest: { name, email, timeZone, notes } };
+        createdAt: now, expiresAt: Math.min(start - EXPIRE_BEFORE_START, now + WAIT_LIMIT), guest: { name, email, timeZone, notes },
+        ...(code && { pass: code }) };
       this.ledger[record.id] = record;
       await this.saveLedger();
       this.wake();
@@ -249,8 +281,11 @@ export class BookingBoard {
         Object.assign(record, slot, { status: 'confirmed', confirmedAt: now, change: { kind: 'cancel' } });
         delete record.closedAt;
       } else if (record.status === 'pending') {
-        if (outcome.ok === true) Object.assign(record, slot, { status: 'confirmed', confirmedAt: now });
-        else Object.assign(record, { status: outcome.reason === 'expired' ? 'expired' : 'declined', closedAt: now,
+        if (outcome.ok === true) {
+          Object.assign(record, slot, { status: 'confirmed', confirmedAt: now });
+          // The meeting exists: its single-use link is spent for good, whatever happens to the meeting later.
+          if (record.pass) this.spent[record.pass] = now;
+        } else Object.assign(record, { status: outcome.reason === 'expired' ? 'expired' : 'declined', closedAt: now,
           note: DECLINES.has(outcome.reason) ? outcome.reason : 'unavailable' });
         delete record.guest;
         delete record.expiresAt;
@@ -299,13 +334,21 @@ export class BookingBoard {
       // Booking links were switched off: forget the page and every request.
       this.page = null;
       this.ledger = {};
+      this.spent = {};
       await this.savePage();
       await this.saveLedger();
-      return { requests: [], waiting: 0, publishedAt: null };
+      await this.saveSpent();
+      return { requests: [], waiting: 0, publishedAt: null, spent: [] };
     }
     const page = input.page === undefined ? undefined : checkedPage(input.page, now, streamId);
     for (const outcome of input.outcomes ?? []) this.settle(outcome, now);
-    if (page) { this.page = page; await this.savePage(); }
+    if (page) {
+      this.page = page;
+      await this.savePage();
+      // Once the Mac no longer publishes a spent link, nothing here needs to remember it.
+      for (const code of Object.keys(this.spent)) if (!page.passes.some(pass => pass.code === code)) delete this.spent[code];
+    }
+    await this.saveSpent();
     if (input.bookings) this.reconcile(input.bookings, now);
 
     const requests = [];
@@ -321,7 +364,7 @@ export class BookingBoard {
     }
     this.sweep(now);
     await this.saveLedger();
-    return { requests, waiting: requests.length, publishedAt: this.page?.publishedAt ?? null };
+    return { requests, waiting: requests.length, publishedAt: this.page?.publishedAt ?? null, spent: Object.keys(this.spent) };
   }
 
   // -------------------------------------------------------- retention
@@ -367,10 +410,11 @@ export class BookingBoard {
       const { op, handle, ip = 'unknown', input } = call;
       let body;
       if (op === 'sync') body = await this.sync(input, handle, call.streamId, now);
-      else if (op === 'page') body = this.viewPage(now);
+      else if (op === 'page') body = this.viewPage(now, call.group);
       else {
         if (!this.page) refuse(404, 'There is no booking page at this address.');
         if (op === 'slots') body = this.viewSlots(call.slug, now);
+        else if (op === 'pass') body = this.viewPass(call.code, now);
         else if (op === 'book') body = await this.book(input, handle, ip, now);
         else if (op === 'status') body = { token: call.token, ...this.describe(await this.find(call.token, handle), now) };
         else if (op === 'reschedule') body = await this.reschedule(call.token, input, handle, ip, now);

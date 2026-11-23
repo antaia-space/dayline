@@ -33,8 +33,8 @@ function demoPage() {
       slots.push(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 0, minute));
     }
   }
-  const type = (slug, title, description, durationMin, hidden = false) => ({ slug, title, description, durationMin, bufferMin: 15, minNoticeMin: 720, maxDaysAhead: 45, hidden });
-  return { owner: { name: 'Demo Owner', headline: 'Antaia' }, paused: null,
+  const type = (slug, title, description, durationMin, hidden = false) => ({ slug, title, description, durationMin, bufferMin: 15, minNoticeMin: 720, maxDaysAhead: 45, hidden, group: slug === 'private' ? 'home' : 'work' });
+  return { owner: { name: 'Demo Owner', headline: 'Antaia' }, paused: null, passes: [{ code: 'demo0single0use0', slug: 'meeting' }],
     types: [type('intro', 'Intro call', 'A short first conversation.', 15), type('meeting', 'Meeting', 'A regular working call.', 30),
       type('deep-dive', 'Deep dive', 'A longer session for technical or commercial detail.', 60), type('private', 'Private call', 'A confidential conversation.', 30, true)],
     slots: { intro: slots, meeting: slots, 'deep-dive': slots.filter(ms => ms % 3_600_000 === 0), private: slots } };

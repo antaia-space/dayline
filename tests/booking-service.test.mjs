@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DaylineService } from '../src/service.mjs';
-import { bookingSnapshot, bookingState, canWriteBookings, defaultBooking, publicBooking, settleBooking, updateBooking } from '../src/booking-service.mjs';
+import { addressPages, bookingSnapshot, bookingState, canWriteBookings, createBookingPass, defaultBooking, dropBookingPasses, publicBooking, settleBooking, updateBooking } from '../src/booking-service.mjs';
 import { defaultSettings } from '../src/store.mjs';
 
 const MINUTE = 60_000;
@@ -174,7 +174,7 @@ test('local tasks: a flexible task leaves its time bookable, a task pinned to a 
   // 12 h notice hides Monday. Gaps of 15 minutes surround the meeting, the private block and the pinned task.
   assert.deepEqual(tuesday(page.slots.meeting), ['09:00', '09:30', '10:00', '12:30', '13:00', '16:30']);
   assert.deepEqual(page.types.find(t => t.slug === 'meeting'), { slug: 'meeting', title: 'Meeting', description: 'A regular working call.',
-    durationMin: 30, bufferMin: 15, minNoticeMin: 720, maxDaysAhead: 45, hidden: false });
+    durationMin: 30, bufferMin: 15, minNoticeMin: 720, maxDaysAhead: 45, hidden: false, group: 'antaia' });
   assert.ok(!JSON.stringify(page).includes('proposal') && !JSON.stringify(page).includes('supplier') && !JSON.stringify(page).includes('notesToWiki'));
 
   // A booking over the flexible task is created; over the pinned task or a meeting it is refused.
@@ -273,6 +273,38 @@ test('each address has its own meeting types, and a booking lands in the calenda
   assert.deepEqual([partly.page.paused, partly.page.slots.meeting, partly.page.slots.intro.length > 0], [null, [], true]);
   await assert.rejects(settleBooking(service, request(at('16:00'), { id: 'c'.repeat(24), token: 'c'.repeat(24) + '.' + 'S'.repeat(27) }), { pageUrl, now }), /event access/);
   assert.equal(google.bookings.size, 1);
+});
+
+test('each address gets a page name from its mail domain, and single-use links are published until used', async () => {
+  const three = [{ sub: 'work', email: 'urs@antaia.space', secret: 'work', mode: 'availability', booking: true },
+    { sub: 'home', email: 'urs@gmail.example', secret: 'home', mode: 'availability', booking: true },
+    { sub: 'old', email: 'u.w@gmail.example', secret: 'old', mode: 'availability' }];
+  const { service } = await ready({ accounts: three });
+  assert.deepEqual([...addressPages(service)], [['work', 'antaia'], ['home', 'gmail'], ['old', 'gmail-2']]);
+  assert.deepEqual(publicBooking(service).addresses.map(a => a.page), ['antaia', 'gmail', 'gmail-2']);
+  const [intro, meeting] = defaultBooking().types;
+  updateBooking(service, { types: [intro, { ...meeting, accountSub: 'home' }, { ...meeting, slug: 'paused', title: 'Paused', active: false }] });
+
+  // A link needs booking switched on and a type that is on.
+  assert.throws(() => createBookingPass(service, 'missing'), /Switch on booking links and this meeting type/);
+  assert.throws(() => createBookingPass(service, 'paused'), /Switch on booking links and this meeting type/);
+  const first = createBookingPass(service, 'meeting'), second = createBookingPass(service, 'intro');
+  assert.match(first, /^[0-9a-v]{16}$/);
+  assert.notEqual(first, second);
+  const { page } = await bookingSnapshot(service, now);
+  assert.deepEqual(page.types.map(type => [type.slug, type.group]), [['intro', 'antaia'], ['meeting', 'gmail']]);
+  assert.deepEqual(page.passes, [{ code: first, slug: 'meeting' }, { code: second, slug: 'intro' }]);
+  // The published page names the page of an address, never the address.
+  assert.ok(!JSON.stringify(page).includes('@'));
+
+  // A used link is dropped, an unused one lapses after 30 days, and a link dies with its type.
+  assert.equal(dropBookingPasses(service, [first, 'unknown']), true);
+  assert.equal(dropBookingPasses(service, [first]), false);
+  assert.deepEqual((await bookingSnapshot(service, now)).page.passes, [{ code: second, slug: 'intro' }]);
+  assert.deepEqual((await bookingSnapshot(service, now + 31 * 24 * 60 * MINUTE)).page.passes, []);
+  const third = createBookingPass(service, 'meeting');
+  updateBooking(service, { types: [intro] });
+  assert.ok(!(await bookingSnapshot(service, now)).page.passes.some(pass => pass.code === third));
 });
 
 test('a meeting type that is switched off is not published and cannot be booked', async () => {

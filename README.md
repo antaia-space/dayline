@@ -13,10 +13,10 @@ Dayline was built for Antaia’s team. The code is public so others can run it, 
 | Part | Outside Antaia |
 | --- | --- |
 | Planner, task agents, Week and Day agenda | Work. Nothing to set up beyond the app. |
-| Reading Google calendars | Works with your own Google OAuth client. Create a Google Cloud project, enable the Google Calendar API and create an OAuth client of type **Desktop app**, as described under [Google Calendar setup](#google-calendar-setup). Choose its JSON file in **Settings → Calendars**. |
+| Reading Google calendars | Works with your own Google OAuth client; Antaia’s is not shared. Create a Google Cloud project, enable the Google Calendar API and create an OAuth client of type **Desktop app**: [Their own Google client](AGENTS.md#their-own-google-client) has the steps. Choose its JSON file in **Settings → Calendars**. |
 | Google’s sign-in warning | A client that Google has not verified shows “Google hasn’t verified this app”. Choose **Advanced**, then continue. A client in **Testing** also ends each sign-in after seven days. |
-| Live calendar updates | Antaia’s receiver accepts accounts in Antaia’s Google Workspace only. Without one, Dayline checks Google on a timer instead, so changes arrive a little later. |
-| Booking links | Not available yet. The public booking page runs on Antaia’s receiver, which serves Antaia accounts only. Running your own receiver needs changes in `relay/receiver.mjs`, where the Workspace domain is fixed. |
+| Live calendar updates | Need a receiver. Antaia’s serves Antaia’s Google Workspace only, so host your own on Cloudflare: [Their own receiver on Cloudflare](AGENTS.md#their-own-receiver-on-cloudflare). Without one, Dayline checks Google on a timer instead, so changes arrive a little later. |
+| Booking links | Need your own receiver too. The same steps set it up, and you decide which Google accounts it serves. |
 | Opening the Mac app | The build is not notarized by Apple. macOS blocks it on first open: allow it under **System Settings → Privacy & Security**, or [run from source](#run-from-source). |
 
 There is no licence file yet. Until one is added, all rights stay with Antaia: you may read the code, and you need Antaia’s permission to use or change it.
@@ -137,11 +137,12 @@ Closing the Mac window keeps Dayline listening for calendar changes. After quitt
 
 Give people a link where they pick a time with you. The meeting lands in your Google Calendar with a Google Meet link, and Google sends the invitation. Your Google Calendar is the only store of bookings: a booking is a calendar event.
 
-1. Connect your Google accounts under **Settings → Calendars**, your Antaia account among them. Then open the **Bookings** tab, beside **Week** and **Day agenda**. Under **Page settings**, enter the **Name guests see** and choose **Save page settings**.
+1. Connect your Google accounts under **Settings → Calendars**, among them the one your receiver accepts (at Antaia, your Antaia account). Then open the **Bookings** tab, beside **Week** and **Day agenda**. Under **Page settings**, enter the **Name guests see** and choose **Save page settings**.
 2. The tab has one section for each connected Google address, each with its own meeting types. A meeting booked through a type lands in that address’s calendar, and Google invites the guest from that address. So you choose which address people book you with by choosing which link you send.
 3. In the section of each address you want to be booked with, choose **Allow booked meetings** and approve event access in Google. This permission is separate from **Sync tasks as calendar events**: your tasks stay local unless you turn that on too. An address without it offers no times. If the address has several calendars, pick one under **Bookings go to**; otherwise its main calendar is used.
 4. Switch on **Offer booking links**.
-5. Each meeting type is a card with its own link. Choose **Copy link** on a card and send it. The link of your whole page, at the top, lists the types of every address that are not **Hidden**. Your page is at `https://dayline-calendar.antaia-space.workers.dev/` followed by the part of your Antaia address before the `@`.
+5. Each meeting type is a card with its own link. Choose **Copy link** on a card and send it. The link of your whole page, at the top, lists the types of every address that are not **Hidden**. Your page is at the receiver’s address, followed by the part of your address before the `@`. At Antaia that is `https://dayline-calendar.antaia-space.workers.dev/` and the part of your Antaia address before the `@`.
+6. Each address also has a page of its own, with only the types booked with that address: choose **Copy page link** in its section. The page is named after the address’s mail domain, for example `/with/gmail`. Send it when people should see one address’s meeting types and not the others.
 
 Each card carries the actions for its meeting type:
 
@@ -151,6 +152,7 @@ Each card carries the actions for its meeting type:
 | Arrow | **Share.** Shows the link and a short text with a few of your next free times, ready to paste into an email. |
 | **Copy link** | Copies the type’s link. |
 | Square with an arrow | **Preview.** Opens the public page as a guest sees it. |
+| Circle with a 1 | **Make a single-use link.** Creates a link for this type that works for one booking. It stops working once a meeting is booked with it, or after 30 days. Useful for a **Hidden** type you offer to one person, once. |
 | Three dots | **Edit**, **Duplicate**, **Turn off** or **Turn on**, and **Delete**. A type that is off is not published; its link stops answering until you turn it on. |
 
 These need **Offer booking links** switched on and a published page. Until then they are greyed out and say why.
@@ -182,12 +184,13 @@ Two guests cannot take the same time. The receiver handles one request at a time
 
 ### What leaves your Mac
 
-Antaia’s receiver on Cloudflare serves the page. It stores the following, per person:
+The receiver on Cloudflare serves the page: Antaia’s, or the one you host. It stores the following, per person:
 
 | Data | Fields | Kept until |
 | --- | --- | --- |
 | Page profile | The name guests see and the headline | Your next change. Deleted when you switch off **Offer booking links**, and after 30 days without contact from your Mac |
-| Meeting types | Title, link name, description, length, gap, minimum notice, days ahead, hidden or not | Same |
+| Meeting types | Title, link name, description, length, gap, minimum notice, days ahead, hidden or not, and the page name of the address it is booked with (the first part of the mail domain, such as `gmail`) | Same |
+| Single-use links | The random code of each link you made and its meeting type; for a used one, when it was used | Removed once used, or 30 days after you made it. A booking made with one keeps the code until its booking record is deleted |
 | Free times | For each type, the start times that are free, and when they were published | Replaced whenever your availability changes and at least every 5 minutes while Dayline runs. Not offered after 72 hours |
 | Waiting request | Request ID, meeting type, start, and the guest’s name, email address, time zone and notes | Deleted when your Mac has answered. If it never does, after 7 days |
 | Booking record | Request ID, meeting type, start, end, status | The end of the meeting. A declined, cancelled or lapsed request: 7 days, so the guest’s link can explain |
@@ -199,7 +202,7 @@ The receiver does not store guests’ IP addresses and writes no logs. The live 
 ### Limits
 
 - With an **External** Google client in **Testing**, Google ends Dayline’s access after seven days. The page then pauses and the **Bookings** tab asks you to reconnect.
-- Offer booking links from one Mac. Two Macs signed in to the same Antaia account would publish the same page in turn.
+- Offer booking links from one Mac. Two Macs signed in to the same account would publish the same page in turn.
 - The page limits how many requests one address can send and holds at most ten unanswered requests. It has no CAPTCHA.
 
 ## Run from source
@@ -226,4 +229,4 @@ The app and **File → Open in Browser** share the desktop profile on loopback p
 
 The Mac app uses the `dayline-calendar` Worker in Antaia’s Cloudflare account. Google delivers callbacks to its public HTTPS address. Each running Mac opens an authenticated outbound WebSocket. The Worker checks the Dayline client ID and the account’s verified Antaia Workspace membership before issuing separate, expiring receive and notification tickets. A Durable Object forwards signals to each connected Mac and can hibernate between messages. A second Durable Object per person holds their booking page; the page’s script and stylesheet are static assets in `relay/public`. The receiver names a booking page after the verified Antaia address of the Mac that publishes it, and signs the reschedule links with a key derived from `RELAY_SECRET`.
 
-For an update, run `npm ci`, sign in to Wrangler as an Antaia administrator, and run `npx wrangler@4.167.0 deploy --config relay/wrangler.jsonc`. Cloudflare holds the existing `RELAY_SECRET`. A new installation of the receiver needs a cryptographically random secret with at least 32 bytes and the public Dayline Desktop OAuth client ID. The Mac app reads `DAYLINE_PUSH_RELAY` as an optional HTTPS origin override. The browser-only development server enables the hosted receiver only when this variable is set. [Receiver health](https://dayline-calendar.antaia-space.workers.dev/health)
+For an update, run `npm ci`, sign in to Wrangler as an Antaia administrator, and run `npx wrangler@4.167.0 deploy --config relay/wrangler.jsonc`. Cloudflare holds the existing `RELAY_SECRET`. A new installation of the receiver needs a cryptographically random secret with at least 32 bytes, the public ID of its own Desktop OAuth client, and the accounts it serves: `ALLOWED_DOMAIN` for one Google Workspace, `ALLOWED_EMAILS` for named addresses. [AGENTS.md](AGENTS.md#their-own-receiver-on-cloudflare) has the steps for hosting one outside Antaia. The Mac app reads `DAYLINE_PUSH_RELAY` as an optional HTTPS origin override, and `DAYLINE_RELAY_ACCOUNT` as the connected account that signs in to it; a build made with them set carries both. The browser-only development server enables the hosted receiver only when this variable is set. [Receiver health](https://dayline-calendar.antaia-space.workers.dev/health)

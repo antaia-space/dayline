@@ -27,11 +27,125 @@ Do the steps you can do yourself. Stop and ask the person only for the steps mar
    - From source, with a window: `npm start`
    - Browser only, on a separate development profile: `npm run dev`, then open the single-use link it prints.
    - As an installed app: see [Build and install](#build-and-install).
-5. **Person:** Google sign-in. Dayline needs a Google OAuth client of type **Desktop app**. You cannot create one for them without their Google account. Tell them to follow “Google Calendar setup” in the README, download the client JSON, then choose it in **Settings → Calendars** and sign in. Never ask them to paste a password, token or client secret into the chat.
+5. **Person:** Google sign-in. Dayline needs a Google OAuth client of type **Desktop app**, and each person or organization uses their own. Follow [Their own Google client](#their-own-google-client) below. Never ask them to paste a password, token or client secret into the chat.
 6. **Person:** macOS may ask for access to **Dayline Safe Storage** in Keychain, and may block an unsigned app on first open. Only they can approve these.
 7. Task agent. Estimates use an AI client the person already has (`codex`, `claude`, `agy` or `gemini` on `PATH`), with their own subscription. Without one, choose **Local on this Mac** in **Settings → Task agent**. Do not create accounts for them.
 
-What does not work outside Antaia is listed in the README under “Using Dayline outside Antaia”. Read that before promising booking links or live calendar updates to anyone without an `antaia.space` Google account.
+Steps 1 to 7 give a working planner that reads Google calendars. Live calendar updates and booking links need a receiver as well. Antaia’s receiver serves Antaia’s Google Workspace only, and only with Antaia’s Google client. For anyone else, set up [their own receiver](#their-own-receiver-on-cloudflare) before you promise either.
+
+## Host it yourself: Google and Cloudflare
+
+Two things live outside the Mac, and each person or organization has their own of both:
+
+| Thing | What it is for | Needed for |
+| --- | --- | --- |
+| A Google OAuth client | Lets Dayline ask Google for calendar access. | Any use of Google calendars. |
+| A receiver on Cloudflare | Passes Google’s “a calendar changed” signals to the Mac, and serves the public booking pages. | Live calendar updates and booking links. Without one, Dayline checks Google on a timer and has no booking page. |
+
+Do not use Antaia’s Google client or Antaia’s receiver for someone outside Antaia. Antaia’s client file is not in this repository and must not be asked for. The client ID in `relay/wrangler.jsonc` is Antaia’s public identifier; replace it at deploy time as shown below.
+
+### Their own Google client
+
+Everything here happens in the person’s Google account, in their browser. **Person**, unless they tell you to drive their browser, and even then they sign in themselves.
+
+1. Open <https://console.cloud.google.com/>, create a project (any name, for example `dayline`).
+2. **APIs & Services → Library**: enable **Google Calendar API**.
+3. **Google Auth Platform → Branding**: app name `Dayline`, their address as support and developer contact.
+4. **Google Auth Platform → Audience**. Pick by the accounts they will connect:
+
+   | Their accounts | Choose | What they get |
+   | --- | --- | --- |
+   | All in one Google Workspace | **Internal** | No warning, no expiry. Accounts outside that Workspace cannot sign in. |
+   | A personal Gmail account, or accounts in several organizations | **External**, then **Publish app** so the status is **In production** | Sign-in shows “Google hasn’t verified this app”: choose **Advanced**, then **Go to Dayline**. Access does not expire. |
+   | Just trying it | **External**, left in **Testing**, with each address added under **Test users** | The same warning, and Google ends every sign-in after seven days. |
+
+   The warning goes away only when Google verifies the app. That needs a public home page and privacy policy on a domain they own, and a review by Google. It is their decision; do not submit it for them.
+5. **Google Auth Platform → Clients → Create client**: application type **Desktop app**. Download the JSON. No redirect address is needed: a Desktop client may use `http://127.0.0.1`.
+6. Keep the JSON out of the repository and out of the chat. In Dayline: **Settings → Calendars → Choose client file**, select it, then **Connect Google account**. Or bundle it into a build with `DAYLINE_GOOGLE_CLIENT_FILE` (see [Build and install](#build-and-install)).
+
+Dayline asks Google for these permissions, and only when a feature needs them. Nothing has to be listed in the console for an Internal or unverified client.
+
+| Feature | Scopes |
+| --- | --- |
+| Always | `openid`, `email`, `calendar.calendarlist.readonly`, `calendar.events.freebusy` |
+| **Show meeting details** | also `calendar.events.readonly` |
+| **Sync tasks as calendar events**, or **Allow booked meetings** | also `calendar.events` |
+
+You may read `installed.client_id` from the JSON: it is public and the receiver needs it. Never print `client_secret`.
+
+```bash
+node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).installed.client_id)" /path/to/client.json
+```
+
+### Their own receiver on Cloudflare
+
+The receiver is the Worker in `relay/`. It keeps what the README lists under “What leaves your Mac”, for the people it serves. A free Cloudflare account is enough for a few people; the Worker uses SQLite-backed Durable Objects, which the free plan includes.
+
+Deploying creates a public service in their Cloudflare account. Get their yes first.
+
+1. **Person:** a Cloudflare account, and a sign-in for Wrangler. Either they run this and approve in the browser:
+
+   ```bash
+   npx wrangler@4.167.0 login
+   ```
+
+   or they create an API token with the **Edit Cloudflare Workers** template and export it as `CLOUDFLARE_API_TOKEN` in the shell you use. They never paste it into the chat. A new account must also pick its `workers.dev` subdomain once, under **Workers & Pages** in the dashboard.
+2. Decide who the receiver serves. Use one or both:
+   - `ALLOWED_DOMAIN`: a Google Workspace domain, for example `example.org`. Every account of that Workspace may use it.
+   - `ALLOWED_EMAILS`: addresses separated by commas, for personal Google accounts, for example `ada@gmail.com`.
+
+   The part of an address before the `@` becomes that person’s booking page name. Do not allow two addresses with the same part before the `@`: they would share one page.
+3. Deploy. Pass all three values every time, also for a later update, because the file in the repository holds Antaia’s. Leave one of the two lists empty by writing nothing after the colon.
+
+   ```bash
+   npx wrangler@4.167.0 deploy --config relay/wrangler.jsonc --var GOOGLE_CLIENT_ID:THEIR_CLIENT_ID --var ALLOWED_DOMAIN:example.org --var ALLOWED_EMAILS:
+   ```
+
+   Wrangler prints the address, of the form `https://dayline-calendar.<their-subdomain>.workers.dev`. That is the receiver’s origin. To use another Worker name, add `--name <name>` to this command and to the next one.
+4. Give it its secret. It signs the tickets for each Mac and the reschedule links for guests. Create it once; replacing it later breaks every link already sent.
+
+   ```bash
+   openssl rand -base64 48 | npx wrangler@4.167.0 secret put RELAY_SECRET --config relay/wrangler.jsonc
+   ```
+
+5. Check it. The first must answer `{"ok":true}`. The second must answer 401: it means the secret is in place and the receiver wants a Google identity. 503 means the secret or the client ID is missing.
+
+   ```bash
+   curl -s https://dayline-calendar.<their-subdomain>.workers.dev/health
+   ```
+
+   ```bash
+   curl -s -o /dev/null -w '%{http_code}\n' -X POST https://dayline-calendar.<their-subdomain>.workers.dev/v1/session
+   ```
+
+6. Point the Mac at it. `DAYLINE_PUSH_RELAY` is the receiver’s origin. `DAYLINE_RELAY_ACCOUNT` names the connected account that signs in to it: a full address, or `@` and a domain. Leave it out when only one account is connected; with several, Dayline otherwise takes a Workspace account before a Gmail one.
+   - From source:
+
+     ```bash
+     DAYLINE_PUSH_RELAY=https://dayline-calendar.<their-subdomain>.workers.dev npm start
+     ```
+
+   - As an installed app. An app opened from Finder does not see shell variables, so build them in. The build then carries the origin, the account rule and, if given, the Google client:
+
+     ```bash
+     DAYLINE_PUSH_RELAY=https://dayline-calendar.<their-subdomain>.workers.dev DAYLINE_RELAY_ACCOUNT=ada@gmail.com DAYLINE_GOOGLE_CLIENT_FILE=/path/to/client.json npm run package:mac
+     ```
+
+     Then follow [Build and install](#build-and-install) from step 2.
+7. In Dayline, connect the Google account. **Settings → Calendars** then says “Google push is live for …”. For booking links, open **Bookings**, choose **Allow booked meetings** for the address, enter the name guests see, and switch on **Offer booking links**. The page is at the receiver’s origin, then `/`, then the part of the address before the `@`.
+
+If something fails:
+
+| Sign | Cause |
+| --- | --- |
+| Session answers 401 with a Google identity | The Mac’s Google client is not the one in `GOOGLE_CLIENT_ID`. Both must be the same client. |
+| Session answers 403 | The account is not in `ALLOWED_DOMAIN` or `ALLOWED_EMAILS`, or a Workspace domain was given for a personal account. Deploy again with the right values. |
+| Session answers 503 | `RELAY_SECRET` is missing or shorter than 32 bytes, or `GOOGLE_CLIENT_ID` is empty. |
+| Bookings says the receiver did not accept this Mac | One of the three above. Ask the receiver directly as in step 5. |
+| Bookings says booking pages are not available on the receiver | The deployed receiver is older than the app. Deploy again from the same checkout. |
+| **Settings → Calendars** keeps saying “Dayline is checking Google for changes automatically.” | The Mac was started without `DAYLINE_PUSH_RELAY`, or the build does not carry it. |
+
+To take the receiver down: `npx wrangler@4.167.0 delete --config relay/wrangler.jsonc`. That deletes every stored booking page and waiting request. Ask first.
 
 ## The person's data: do not lose it
 
@@ -59,7 +173,8 @@ Environment variables:
 | --- | --- |
 | `DAYLINE_DATA_DIR` | Folder for `planner.json`. Use it for a throwaway profile. |
 | `DAYLINE_PORT` | Port of the local server (default 43127 for the app, 43128 for `npm run dev`). |
-| `DAYLINE_PUSH_RELAY` | HTTPS origin of the receiver. Empty string switches the receiver off. |
+| `DAYLINE_PUSH_RELAY` | HTTPS origin of the receiver. Empty string switches the receiver off. Set at packaging time, the build carries it. |
+| `DAYLINE_RELAY_ACCOUNT` | Which connected Google account signs in to the receiver: a full address, or `@` and a domain. Set at packaging time, the build carries it. |
 | `DAYLINE_GOOGLE_CLIENT_FILE` | At packaging time only: path of a Desktop OAuth client JSON to bundle into the app. |
 | `DAYLINE_ARCH` | At packaging time only: `universal` (default), `arm64` or `x64`. |
 
@@ -87,6 +202,7 @@ Follow this order. It keeps the person's data and leaves a way back.
 | `src/http.mjs` | Local HTTP API and static files for the UI. |
 | `src/store.mjs` | `planner.json` and the Keychain-backed vault. |
 | `src/booking-*.mjs` | Booking links on the Mac: rules, free times, the receiver client. |
+| `src/receiver-choice.mjs` | Which receiver the Mac uses and which account it signs in with. |
 | `src/agents/` | Adapters for the task-agent CLIs. |
 | `web/` | The UI: plain ES modules and CSS, no build step. |
 | `relay/` | The Cloudflare Worker (“receiver”): live calendar signals and public booking pages. |

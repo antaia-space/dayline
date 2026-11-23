@@ -65,6 +65,16 @@ if (process.env.DAYLINE_GOOGLE_CLIENT_FILE) {
   writeFileSync(client, JSON.stringify({ installed: { client_id: config.installed.client_id, client_secret: config.installed.client_secret || '' } }), { mode: 0o600 });
   extras.push(client);
 }
+// A build for someone who hosts their own receiver carries its address, so the app needs no environment variable.
+if (process.env.DAYLINE_PUSH_RELAY !== undefined || process.env.DAYLINE_RELAY_ACCOUNT !== undefined) {
+  const { checkedReceiverFile } = await import('../src/receiver-choice.mjs');
+  const receiver = path.join(build, 'receiver.json');
+  const carried = checkedReceiverFile({ origin: process.env.DAYLINE_PUSH_RELAY, account: process.env.DAYLINE_RELAY_ACCOUNT });
+  // Only what was named is carried; the rest keeps its default in the app.
+  writeFileSync(receiver, JSON.stringify({ ...(process.env.DAYLINE_PUSH_RELAY !== undefined && { origin: carried.origin }),
+    ...(process.env.DAYLINE_RELAY_ACCOUNT !== undefined && { account: carried.account }) }));
+  extras.push(receiver);
+}
 const [directory] = await packager({
   dir: stage, out, name: 'Dayline', arch, platform: 'darwin', icon, electronVersion: metadata.devDependencies.electron,
   appBundleId: 'space.antaia.dayline', appCategoryType: 'public.app-category.productivity',
