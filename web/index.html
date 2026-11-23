@@ -46,11 +46,15 @@
       <span class="composer-symbol" data-icon="pencil" aria-hidden="true"></span>
       <label for="quick-text" class="sr-only">Task to schedule</label>
       <input id="quick-text" name="text" type="text" required maxlength="1000" placeholder="Add a task, e.g. review the deck for 45 minutes tomorrow" aria-describedby="quick-error">
-      <button id="quick-day" type="button" class="day-chip" title="Clear the preferred day" hidden><span></span><span data-icon="x"></span></button>
       <kbd id="entry-shortcut" title="Focus task entry">/</kbd>
-      <button id="add-button" class="primary" type="submit"><span data-icon="plus"></span>Add task</button>
+      <label class="composer-day"><span class="sr-only">Schedule this task on</span><select id="quick-day" title="Choose a date, or let Dayline find the next opening"><option value="">Auto-schedule</option></select></label>
+      <button id="add-button" class="primary" type="submit"><span data-icon="plus"></span><span id="add-label">Add task</span></button>
     </form>
     <p id="quick-error" class="field-error" role="alert" hidden></p>
+    <div class="entry-meta">
+      <div id="entry-feedback" class="entry-feedback" hidden><span id="entry-status" role="status" aria-live="polite"></span><button id="view-added" type="button" class="summary-link" hidden>View task</button></div>
+      <button id="entry-agent" type="button" class="agent-link" hidden>Task agent</button>
+    </div>
 
     <section id="week-section" aria-label="Weekly task board">
       <div class="section-bar">
@@ -124,10 +128,10 @@
       <section id="agent-settings" class="form-body" aria-label="Task agent" hidden>
         <form id="agent-form">
           <label>Estimate tasks with<select id="agent-provider">
+            <optgroup label="Subscriptions"><option value="codex">OpenAI via Codex</option>
+              <option value="gemini">Google Gemini</option>
+              <option value="claude">Anthropic via Claude Code</option></optgroup>
             <option value="local">Local on this Mac</option>
-            <option value="codex">OpenAI via Codex</option>
-            <option value="gemini">Google Gemini</option>
-            <option value="claude">Anthropic via Claude Code</option>
           </select></label>
           <p id="agent-current" class="hint" hidden></p>
           <div id="agent-account" class="agent-account" aria-live="polite">

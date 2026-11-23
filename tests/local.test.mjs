@@ -27,6 +27,8 @@ test('paired app and browser share one planner; visiting a calendar link require
     method, headers: { cookie, Origin: app.origin, 'Content-Type': 'application/json' }, body: JSON.stringify(data)
   });
   assert.equal((await fetch(app.origin + '/api/state')).status, 401);
+  assert.deepEqual((await state(desktop)).selectedAgent, { provider: 'local', model: '' });
+  assert.match(await (await fetch(app.origin)).text(), /href="dayline:\/\/browser"/);
   await write('/api/settings', 'PATCH', { timeZone: 'UTC' }, desktop);
   const input = { text: 'Write notes for 25 minutes', requestId: 'a'.repeat(32) };
   await Promise.all([write('/api/tasks', 'POST', input, desktop), write('/api/tasks', 'POST', input, desktop)]);

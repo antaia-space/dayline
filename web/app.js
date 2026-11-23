@@ -1,9 +1,10 @@
 import {
-  addDays, button, dayIndex, displayTime, duration, element, formatDay,
+  addDays, button, dayIndex, displayTime, element, formatDay,
   hhmmMinutes, icon, instantTime, isoWeek, navigationLabel, startOfWeek, weekdayNames, weekLabel, workdaysLabel, zonedDay
 } from "./ui.js";
 import { renderAgenda, renderBacklog, renderKey, renderWeek } from "./views.js";
 import { createAgentSettings, estimateSource } from "./agent.js";
+import { createComposer } from "./composer.js";
 
 const byId = (id) => document.getElementById(id);
 const pref = {
@@ -19,9 +20,6 @@ let today;
 let lastToday;
 let view = pref.get("view") === "day" ? "day" : "week";
 let weekends;
-let quickDay = null;
-let pendingCreate = null;
-let pendingPlacement = null;
 let syncRefreshTimer;
 const compact = matchMedia("(max-width: 720px)");
 let editingTask = null;
@@ -35,6 +33,12 @@ let lastPaint = "";
 let lastConnection = "";
 let noticeTimer;
 let actionDone;
+let loadingPairing = false;
+
+const composer = createComposer({
+  api, refresh, openTask: openEditor, showLocation: showTaskLocation,
+  context:() => ({state,view,monday,selectedDay,compact:compact.matches})
+});
 
 for (const holder of document.querySelectorAll("[data-icon]")) holder.append(icon(holder.dataset.icon));
 for (const [index,name] of weekdayNames.entries()) {
@@ -72,6 +76,7 @@ function refreshLabel(inProgress) {
 }
 
 async function api(path, method = "GET", body) {
+  if (loadingPairing) throw new Error("Reconnect this browser to Dayline on this Mac.");
   let response;
   try {
     response = await fetch(path,{
@@ -83,8 +88,20 @@ async function api(path, method = "GET", body) {
     if (error.name === "TimeoutError") throw new Error("Dayline took too long to respond. Refresh before trying again.");
     throw new Error("The local planner is unavailable. Open Dayline on this Mac, then try again.");
   }
+  if (response.status === 401) {
+    let recentlyTried = false;
+    try {
+      recentlyTried = Date.now() - Number(sessionStorage.getItem("dayline.pairingReload")) < 30000;
+      sessionStorage.setItem("dayline.pairingReload",String(Date.now()));
+    } catch {}
+    if (!loadingPairing && !recentlyTried) { loadingPairing = true; location.reload(); }
+    throw new Error("Reconnect this browser to Dayline on this Mac.");
+  }
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(typeof data.error === "string" ? data.error : "Dayline could not finish this action.");
+  if (path === "/api/state") {
+    try { sessionStorage.removeItem("dayline.pairingReload"); } catch {}
+  }
   return data;
 }
 
@@ -102,22 +119,6 @@ async function refresh(force = false) {
     today = day;
     window.clearTimeout(syncRefreshTimer);
     if (next.connection.syncing) syncRefreshTimer = window.setTimeout(() => refresh(),1500);
-    if (pendingPlacement) {
-      const placed = next.tasks.find((task) => task.id === pendingPlacement);
-      if (placed?.start) {
-        pendingPlacement = null;
-        const date = zonedDay(placed.start,zone);
-        if (!document.querySelector("dialog[open]") && !byId("quick-text").value.trim()) {
-          selectedDay = date;
-          monday = startOfWeek(date);
-          if (dayIndex(date) > 5) weekends = true;
-        }
-        toast("Scheduled " + formatDay(date,{weekday:"short",month:"short",day:"numeric"}) + " at " + instantTime(placed.start,zone) + ".");
-      } else if (placed && placed.syncStatus === "attention" && !next.connection.syncing) {
-        pendingPlacement = null;
-        toast("Task is in Unscheduled. " + (placed.issue || "Try a different day or duration."));
-      }
-    }
     if (!selectedDay || (lastToday && day !== lastToday && selectedDay === lastToday)) {
       selectedDay = day;
       monday = startOfWeek(day);
@@ -128,7 +129,7 @@ async function refresh(force = false) {
       weekends = saved === "true" || (saved === null && (dayIndex(day) > 5 || next.settings.workDays.some((d) => d > 5)));
     }
     if (!weekends && view === "week" && dayIndex(selectedDay) > 5) selectedDay = addDays(monday,4);
-    const paint = JSON.stringify([state.tasks,state.categories,state.settings,state.busy,state.busyStart,state.busyEnd,state.connection,day,selectedDay]);
+    const paint = JSON.stringify([state.tasks,state.categories,state.settings,state.selectedAgent,state.busy,state.busyStart,state.busyEnd,state.connection,day,selectedDay]);
     if (force || lastPaint !== paint) {
       render();
       lastPaint = paint;
@@ -177,6 +178,7 @@ function render() {
   if (weekView) renderWeek(state,context);
   else renderAgenda(state,context);
   renderBacklog(state);
+  composer.update();
   renderKey(state.categories);
   const account = state.connection;
   const readOnly = calendarMode() === "availability";
@@ -228,48 +230,40 @@ function renderPlanningNote() {
 
 function switchView(next) {
   if (!state) return;
-  pendingPlacement = null;
   view = next;
   pref.set("view",view);
   if (view === "week" && dayIndex(selectedDay) > 5 && !weekends) {
     weekends = true;
     pref.set("weekends",true);
   }
-  setQuickDay(null);
   render();
 }
 
 function navigateTo(day) {
   if (!state) return;
-  pendingPlacement = null;
   selectedDay = day;
   monday = startOfWeek(day);
   if (view === "week" && dayIndex(day) > 5 && !weekends) {
     weekends = true;
     pref.set("weekends",true);
   }
-  setQuickDay(null);
   render();
 }
 
-function setQuickDay(day) {
-  quickDay = day;
-  byId("quick-day").firstElementChild.textContent = day ? formatDay(day,{month:"short",day:"numeric"}) : "";
-  byId("quick-day").hidden = !day;
-  byId("quick-text").placeholder = day ? "What do you need to do?" : compact.matches ? "e.g. Review deck, 45m" : "Add a task, e.g. review the deck for 45 minutes tomorrow";
+function showTaskLocation(task) {
+  if (task.start && !task.pendingEstimate) {
+    navigateTo(zonedDay(task.start,state.settings.timeZone));
+  } else {
+    byId("backlog-content").hidden = false;
+    byId("backlog-toggle").setAttribute("aria-expanded","true");
+  }
 }
-compact.addEventListener("change",() => setQuickDay(quickDay));
-setQuickDay(null);
-
-function selectComposerDay(day) {
-  setQuickDay(day);
-  byId("quick-text").focus();
-}
+compact.addEventListener("change",() => composer.update());
 
 byId("view-week").addEventListener("click",() => switchView("week"));
 byId("view-day").addEventListener("click",() => switchView("day"));
-byId("quick-day").addEventListener("click",() => { setQuickDay(null); byId("quick-text").focus(); });
-byId("agenda-add").addEventListener("click",() => selectComposerDay(selectedDay));
+byId("entry-agent").addEventListener("click",() => openSettings("agent"));
+byId("agenda-add").addEventListener("click",() => composer.choose(selectedDay));
 byId("previous").addEventListener("click",() => { if (state) navigateTo(addDays(selectedDay,view === "week" ? -7 : -1)); });
 byId("next").addEventListener("click",() => { if (state) navigateTo(addDays(selectedDay,view === "week" ? 7 : 1)); });
 byId("today").addEventListener("click",() => { if (state) navigateTo(today); });
@@ -288,51 +282,12 @@ byId("backlog-toggle").addEventListener("click",() => {
   pref.set("tray",open);
 });
 
-byId("quick-add").addEventListener("submit",async (event) => {
-  event.preventDefault();
-  const input = byId("quick-text");
-  const text = input.value.trim();
-  if (!text) { input.focus(); return; }
-  if (!state || byId("add-button").disabled) return;
-  errorAt("quick-error");
-  byId("add-button").disabled = true;
-  const day = quickDay;
-  try {
-    const previousIds = new Set(state.tasks.map((task) => task.id));
-    const draft = JSON.stringify([text,day]);
-    if (pendingCreate?.draft !== draft) pendingCreate = {draft,requestId:crypto.randomUUID().replaceAll("-","")};
-    const result = await api("/api/tasks","POST",{text,requestId:pendingCreate.requestId,...(day ? {day} : {})});
-    pendingCreate = null;
-    if (input.value.trim() === text) input.value = "";
-    if (quickDay === day) setQuickDay(null);
-    await refresh(true);
-    const added = state.tasks.find((task) => task.id === (result.task?.id || result.id)) || state.tasks.find((task) => !previousIds.has(task.id) && task.text === text);
-    if (added?.start && !added.pendingEstimate) {
-      const date = zonedDay(added.start,state.settings.timeZone);
-      navigateTo(date);
-      toast("Scheduled " + formatDay(date,{weekday:"short",month:"short",day:"numeric"}) + " at " + instantTime(added.start,state.settings.timeZone) + " · " + duration(added.minutes));
-    } else if (added) {
-      byId("backlog-content").hidden = false;
-      byId("backlog-toggle").setAttribute("aria-expanded","true");
-      if (added.pendingEstimate) {
-        toast("Added to Unscheduled. Awaiting an estimate from your task agent.");
-      } else if (state.connection.connected && added.syncStatus === "pending") {
-        pendingPlacement = added.id;
-        window.clearTimeout(syncRefreshTimer);
-        syncRefreshTimer = window.setTimeout(() => refresh(),1000);
-        toast("Finding a slot across your calendars…");
-      } else toast("Added to Unscheduled.");
-    } else toast("Task added.");
-    input.focus();
-  } catch (error) { errorAt("quick-error",error.message); }
-  finally { byId("add-button").disabled = false; }
-});
 
 byId("planner").addEventListener("click",async (event) => {
   const target = event.target.closest("button[data-action]");
   if (!target || !state) return;
   const action = target.dataset.action;
-  if (action === "add-day") return selectComposerDay(target.dataset.day);
+  if (action === "add-day") return composer.choose(target.dataset.day);
   if (action === "open-day") {
     switchView("day");
     return navigateTo(target.dataset.day);
@@ -363,7 +318,7 @@ document.addEventListener("keydown",(event) => {
     event.preventDefault();
     byId("quick-text").focus();
   }
-  if (event.key === "Escape" && event.target === byId("quick-text") && quickDay) setQuickDay(null);
+  if (event.key === "Escape" && event.target === byId("quick-text")) composer.choose(null);
 });
 
 for (const closer of document.querySelectorAll(".close-dialog")) closer.addEventListener("click",() => closer.closest("dialog").close());
@@ -402,7 +357,7 @@ function settingsTab(tab) {
   if (tab === "agent") openAgentSettings();
 }
 
-const openAgentSettings = createAgentSettings({api,toast,errorAt});
+const openAgentSettings = createAgentSettings({api,toast,errorAt,onSaved:() => refresh(true)});
 byId("settings-open").addEventListener("click",() => openSettings("work"));
 byId("hours-open").addEventListener("click",() => openSettings("work"));
 byId("connection-status").addEventListener("click",() => openSettings("calendars"));
@@ -690,7 +645,8 @@ function openEditor(task) {
   const info = [];
   if (task.start && !task.pendingEstimate) {
     const date = zonedDay(task.start,state.settings.timeZone);
-    info.push(element("span","",formatDay(date,{weekday:"long",month:"short",day:"numeric"}) + " · " + instantTime(task.start,state.settings.timeZone) + "–" + instantTime(task.end,state.settings.timeZone)));
+    const time = task.allDay ? "All day" : instantTime(task.start,state.settings.timeZone) + "–" + instantTime(task.end,state.settings.timeZone);
+    info.push(element("span","",formatDay(date,{weekday:"long",month:"short",day:"numeric"}) + " · " + time));
   } else info.push(element("span","","Unscheduled"));
   const status = taskStatus(task);
   const source = estimateSource(task.agent);

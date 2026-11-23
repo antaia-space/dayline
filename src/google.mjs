@@ -1,6 +1,7 @@
 // Google Calendar v3 and installed-app OAuth. The renderer never receives an access token.
 // https://developers.google.com/identity/protocols/oauth2/native-app
 // https://developers.google.com/workspace/calendar/api/guides/version-resources
+import { DateTime } from 'luxon';
 import { CATEGORIES } from './planner.mjs';
 
 const API = 'https://www.googleapis.com/calendar/v3';
@@ -175,6 +176,7 @@ export async function listCalendars(accessToken) {
       id: item.id,
       name: item.summaryOverride || item.summary || item.id,
       canCheckAvailability: canCheckAvailability(item.id),
+      canInspectReservations: item.accessRole === 'owner' || item.accessRole === 'writer',
       writable: canCheckAvailability(item.id) && WRITABLE.has(item.accessRole),
       primary: item.primary === true,
       color: item.backgroundColor ?? null,
@@ -243,13 +245,21 @@ function splitTitle(summary) {
   return { text, done: text !== original };
 }
 
+function eventTime(endpoint) {
+  if (!endpoint?.dateTime) return endpoint?.date ?? null;
+  if (/(?:Z|[+-]\d\d:\d\d)$/i.test(endpoint.dateTime)) return endpoint.dateTime;
+  // Google permits a local dateTime when the endpoint supplies its IANA zone.
+  if (!endpoint.timeZone) return null;
+  return DateTime.fromISO(endpoint.dateTime, { zone: endpoint.timeZone }).toUTC().toISO();
+}
+
 function normalizeEvent(event, expectedTaskId) {
   const properties = event.extendedProperties?.private;
   const taskId = properties?.daylineTaskId ?? null;
   const owned = properties?.dayline === '1' && typeof taskId === 'string' && Boolean(taskId)
     && (expectedTaskId === undefined || taskId === expectedTaskId);
-  const start = event.start?.dateTime ?? event.start?.date ?? null;
-  const end = event.end?.dateTime ?? event.end?.date ?? null;
+  const start = eventTime(event.start);
+  const end = eventTime(event.end);
   if (!event.id || !event.etag || (owned && !validInterval(start, end))) {
     throw invalidResponse('Google returned an incomplete event. Sync again to check it.');
   }
@@ -297,6 +307,22 @@ export async function listTaskEvents(accessToken, { calendarId }) {
   url.searchParams.set('fields', 'kind,nextPageToken,items(' + EVENT_FIELDS + ')');
   const entries = await paginatedItems(accessToken, url, 'calendar#events');
   return entries.filter(event => event.status !== 'cancelled').map(event => normalizeEvent(event)).filter(event => event.owned);
+}
+
+// Used only on a fully visible sync destination to test an edited reservation.
+// Basic identifiers and visibility are sufficient to detect another busy event.
+export async function hasOtherBusyEvent(accessToken, { calendarId, eventId, start, end }) {
+  checkEventId(eventId);
+  if (!validInterval(start, end)) throw new GoogleError(400, 'invalidInterval', 'Choose a valid time range.');
+  const url = new URL(eventCollection(calendarId));
+  url.searchParams.set('timeMin', start);
+  url.searchParams.set('timeMax', end);
+  url.searchParams.set('singleEvents', 'true');
+  url.searchParams.set('maxResults', '2500');
+  url.searchParams.set('fields', 'kind,nextPageToken,items(id,status,transparency)');
+  const events = await paginatedItems(accessToken, url, 'calendar#events');
+  const live = events.filter(event => event?.status !== 'cancelled');
+  return !live.some(event => event?.id === eventId) || live.some(event => event?.id !== eventId && event?.transparency !== 'transparent');
 }
 
 function actionLink(actionUrl, done) {
@@ -374,8 +400,14 @@ export async function putTaskEvent(accessToken, { calendarId, eventId, task, act
   if (color !== current.colorId) patch.colorId = color;
   const description = eventDescription(actionUrl, task.done, current.description);
   if (description !== current.description) patch.description = description;
-  if (Date.parse(task.start) !== Date.parse(previous.start)) patch.start = { dateTime: task.start };
-  if (Date.parse(task.end) !== Date.parse(previous.end)) patch.end = { dateTime: task.end };
+  if (current.start?.date && task.start.includes('T')) {
+    // Both dates must be cleared together when rescheduling an all-day block.
+    patch.start = { date: null, dateTime: task.start };
+    patch.end = { date: null, dateTime: task.end };
+  } else {
+    if (Date.parse(task.start) !== Date.parse(previous.start)) patch.start = { dateTime: task.start };
+    if (Date.parse(task.end) !== Date.parse(previous.end)) patch.end = { dateTime: task.end };
+  }
   if (!Object.keys(patch).length) return previous;
 
   const url = new URL(collection + '/' + id);

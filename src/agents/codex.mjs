@@ -7,7 +7,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { cliEnv, findCli, runCli } from './cli.mjs';
 
 const provider = 'model_provider="openai"';
-const preferredModel = 'gpt-6.2-sol';
+export const codexModel = 'gpt-6.2-sol';
 const effort = 'low';
 const metadataFlags = [
   '-c', provider,
@@ -219,7 +219,7 @@ export function createCodexAdapter(locate = findCli) {
   async function codexEstimate({ model, instructions, input, schema }) {
     const binary = locate('codex');
     if (!binary) throw new Error('Install the official Codex CLI to estimate with ChatGPT.');
-    const id = model || preferredModel;
+    const id = model || codexModel;
     return temporaryDirectory(async cwd => {
       const status = await discover(binary, cwd, { preparingEstimate: true });
       if (!status.signedIn) throw new Error(status.detail);

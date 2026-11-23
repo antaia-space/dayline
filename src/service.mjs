@@ -13,7 +13,7 @@ const messageOf = error => error?.message || 'Google Calendar could not be reach
 const recordKey = (sub, calendarId) => Buffer.from(JSON.stringify([sub, calendarId])).toString('base64url');
 const scheduleFields = ['minutes', 'earliestDay', 'latestDay', 'windowStart', 'windowEnd', 'deadlineTime'];
 const noSlot = 'No open work period fits. Change the day, duration, or working hours.';
-const publicCalendar = ({ providerId, sub, ...visible }) => visible;
+const publicCalendar = ({ providerId, sub, canInspectReservations, ...visible }) => visible;
 
 export function invalid(message, status = 400) {
   return Object.assign(new Error(message), { status });
@@ -34,7 +34,7 @@ function requestedDay(day) {
 
 function safeTask(task) {
   const { remote, dirty, intent, pausedSync, lastLocalSlot, held, deleting, estimateOverrides, estimateRequestedAt, ...visible } = task;
-  return visible;
+  return { ...visible, allDay: Boolean(remote?.allDay) };
 }
 
 function isRemoteFallback(task) {
@@ -68,6 +68,8 @@ function applyEstimate(task, estimate, overrides) {
   if (overrides.dates) Object.assign(task, overrides.dates);
   if (owns(overrides, 'day')) {
     Object.assign(task, { earliestDay: overrides.day, latestDay: overrides.day, deadlineTime: null });
+  } else if (overrides.viewDay && !task.earliestDay && !task.latestDay) {
+    task.earliestDay = task.latestDay = overrides.viewDay;
   }
 }
 
@@ -228,6 +230,7 @@ export class DaylineService {
     if (input.requestId != null && (typeof input.requestId !== 'string' || !/^[a-f0-9]{32}$/.test(input.requestId))) throw invalid('Invalid task request identifier.');
     if (input.requestId && this.data.tasks.some(t => t.id === input.requestId)) return input.requestId;
     const day = requestedDay(input.day);
+    const viewDay = requestedDay(input.viewDay);
     const now = this.clock();
     const estimate = await this.estimate(text, { now, timeZone: this.data.settings.timeZone });
     const task = {
@@ -235,7 +238,10 @@ export class DaylineService {
       start: null, end: null, done: false, syncStatus: 'pending', issue: null,
       createdAt: now.toISOString(), dirty: this.data.settings.calendarMode === 'sync' ? { schedule: true } : {}, remote: null, intent: null, held: false
     };
-    applyEstimate(task, estimate, day ? { day } : {});
+    const overrides = {};
+    if (day) overrides.day = day;
+    else if (viewDay) overrides.viewDay = viewDay;
+    applyEstimate(task, estimate, overrides);
     if (task.pendingEstimate) waitForEstimate(task);
     else if (!this.data.accounts.length) this.planLocal(task);
     this.data.tasks.push(task);
@@ -390,7 +396,8 @@ export class DaylineService {
     const hoursChanged = ['timeZone', 'workDays', 'startTime', 'endTime'].some(k => JSON.stringify(old[k]) !== JSON.stringify(next[k]));
     if (hoursChanged) {
       for (const task of this.data.tasks) {
-        if (task.pendingEstimate || task.done || task.held || task.deleting || (task.end && Date.parse(task.end) <= this.clock().getTime())) continue;
+        if (task.pendingEstimate || task.done || task.held || task.deleting || task.remote?.allDay ||
+            (task.end && Date.parse(task.end) <= this.clock().getTime())) continue;
         if (task.start && this.fitsHours(task.start, task.end)) continue;
         if (next.calendarMode === 'availability') {
           if (task.start) task.lastLocalSlot = { start: task.start, end: task.end };
@@ -540,23 +547,33 @@ export class DaylineService {
     return result;
   }
 
-  async availability(range) {
+  async availability(range, destinationId, reservation) {
+    if (reservation) this.syncPermission(reservation.sub);
     const excluded = new Set(this.data.settings.excludedCalendarIds);
     const target = this.data.settings.calendarMode === 'sync' ? this.selectedTarget() : null;
-    const chosen = this.calendars.filter(c => c.canCheckAvailability !== false && (c.id === target?.id || !excluded.has(c.id)));
+    const chosen = this.calendars.filter(c => c.canCheckAvailability !== false &&
+      (c.id === target?.id || c.id === destinationId || !excluded.has(c.id)));
     if (!chosen.length) throw invalid('Select at least one calendar to check availability.', 409);
     const groups = await Promise.all(this.data.accounts.map(async account => {
       const calendars = chosen.filter(c => c.sub === account.sub);
       if (!calendars.length) return [];
       try {
-        return await this.google.getBusy(await this.token(account.sub), { ...range, calendarIds: calendars.map(c => c.providerId) });
+        const access = await this.token(account.sub);
+        const ownCalendar = reservation && account.sub === reservation.sub &&
+          calendars.find(c => c.providerId === reservation.calendarId && c.canInspectReservations === true);
+        const calendarIds = calendars.filter(c => c !== ownCalendar).map(c => c.providerId);
+        const busy = calendarIds.length ? await this.google.getBusy(access, { ...range, calendarIds }) : [];
+        if (ownCalendar && await this.google.hasOtherBusyEvent(access, { ...range, calendarId: ownCalendar.providerId, eventId: reservation.eventId })) {
+          busy.push(range);
+        }
+        return busy;
       } catch (error) {
         const source = calendars.find(c => c.providerId === error.calendarId);
         if (!source) throw error;
         const label = source.name && source.name !== source.providerId ? '“' + source.name + '”' : 'one selected calendar';
-        const action = source.id === target?.id
-          ? 'Choose another calendar for new tasks in Settings, then uncheck this one under “Check for conflicts on”.'
-          : 'Retry, or uncheck this calendar under “Check for conflicts on” in Settings.';
+        let action = 'Retry, or uncheck this calendar under “Check for conflicts on” in Settings.';
+        if (source.id === target?.id) action = 'Choose another calendar for new tasks in Settings, then uncheck this one under “Check for conflicts on”.';
+        else if (source.id === destinationId) action = 'Restore access to the calendar containing this task, then retry.';
         error.message = 'Google could not read availability for ' + label + '. ' + action;
         throw error;
       }
@@ -569,14 +586,19 @@ export class DaylineService {
     if (!event.start || !event.end) throw invalid('The linked event needs a timed start and end in Google Calendar.', 409);
     if (!task.dirty.text) task.text = event.text;
     if (!task.dirty.done) task.done = event.done;
-    if (!task.dirty.schedule) {
-      const length = Math.round((Date.parse(event.end) - Date.parse(event.start)) / 60000);
+    // Google all-day dates float with the calendar day. The board groups by local
+    // instants, and a day-long reservation should preserve the task’s estimated effort.
+    const allDay = DAY.test(event.start) && DAY.test(event.end);
+    const instant = value => allDay ? DateTime.fromISO(value, { zone: this.data.settings.timeZone }).toUTC().toISO() : value;
+    task.start = instant(event.start);
+    task.end = instant(event.end);
+    if (!allDay && !task.dirty.schedule) {
+      const length = Math.round((Date.parse(task.end) - Date.parse(task.start)) / 60000);
       if (length > 0) task.minutes = length;
     }
     if (task.remote && task.remote.done !== event.done && !task.dirty.done) task.dirty.link = true;
-    task.start = event.start;
-    task.end = event.end;
     task.remote = { sub: ref.sub, calendarId: ref.calendarId, eventId: event.eventId, etag: event.etag, done: event.done };
+    if (allDay) task.remote.allDay = { start: event.start, end: event.end };
     task.intent = null;
     task.issue = null;
     task.syncStatus = Object.keys(task.dirty).length ? 'pending' : 'synced';
@@ -664,23 +686,22 @@ export class DaylineService {
       }
     }
 
-    let slot = { start: task.start, end: task.end };
+    let slot = task.remote?.allDay || { start: task.start, end: task.end };
     let waitingForSlot = false;
     if (task.dirty.schedule || !ref) {
       const now = this.clock();
       const range = planningRange({ task, settings, now });
       let placement = null;
       if (range) {
-        const cacheKey = range.start + '|' + range.end;
-        if (!rangeCache.has(cacheKey)) rangeCache.set(cacheKey, await this.availability(range));
-        // A shorter edit can reuse time this event already holds. Test the proposed
-        // slice against every work/day constraint; it cannot introduce a new conflict.
-        if (task.remote && Date.parse(task.start) >= now.getTime()) {
-          const end = Date.parse(task.start) + task.minutes * 60000;
-          if (end < Date.parse(task.end)) {
-            const candidate = findSlot({ task, settings, now: new Date(task.start), busy: this.localBusy(task.id) });
-            if (candidate && Date.parse(candidate.start) === Date.parse(task.start)) placement = candidate;
-          }
+        const destinationId = ref ? recordKey(ref.sub, ref.calendarId) : this.target().id;
+        const cacheKey = destinationId + '|' + range.start + '|' + range.end;
+        if (!rangeCache.has(cacheKey)) rangeCache.set(cacheKey, await this.availability(range, destinationId));
+        // Free/busy merges simultaneous meetings. Reuse the original time only
+        // after excluding this one verified event and checking every other source.
+        if (task.remote && !task.remote.allDay && Date.parse(task.start) >= now.getTime()) {
+          const candidate = findSlot({ task, settings, now: new Date(task.start), busy: this.localBusy(task.id) });
+          if (candidate && Date.parse(candidate.start) === Date.parse(task.start) &&
+              !(await this.availability(candidate, destinationId, task.remote)).length) placement = candidate;
         }
         placement ||= findSlot({ task, settings, now, busy: [...rangeCache.get(cacheKey), ...this.localBusy(task.id)] });
       }

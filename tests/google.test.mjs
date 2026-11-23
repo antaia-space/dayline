@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   authorizationUrl, exchangeCode, refreshToken, getProfile, listCalendars, getBusy,
-  getTaskEvent, listTaskEvents, putTaskEvent, deleteTaskEvent,
+  getTaskEvent, listTaskEvents, putTaskEvent, deleteTaskEvent, hasOtherBusyEvent,
 } from '../src/google.mjs';
 
 const token = 'test-access';
@@ -245,6 +245,49 @@ test('a completion patch preserves calendar notes, guests, and time-zone represe
   });
   const updated = await putTaskEvent(token, { ...write, task: { ...task, done: true }, expectedEtag: '"v1"' });
   assert.equal(updated.done, true);
+});
+
+test('timed events using separate IANA zones do not depend on the Mac’s current zone', async t => {
+  simulate(t, reply(event({ start: { dateTime: '2026-11-24T10:00:00', timeZone: 'Europe/Zurich' },
+    end: { dateTime: '2026-11-24T11:00:00', timeZone: 'Europe/Zurich' } })),
+  reply(event({ start: { dateTime: '2026-11-24T10:00:00' } })));
+  const found = await getTaskEvent(token, { calendarId, eventId });
+  assert.deepEqual([found.start, found.end], [start, end]);
+  await assert.rejects(getTaskEvent(token, { calendarId, eventId }), { reason: 'invalidResponse' });
+});
+
+test('checking an owned time slice sees concurrent recurring instances without requesting their titles', async t => {
+  const own = { id: eventId, status: 'confirmed' };
+  simulate(t, url => {
+    assert.equal(url.searchParams.get('timeMin'), start);
+    assert.equal(url.searchParams.get('timeMax'), end);
+    assert.equal(url.searchParams.get('singleEvents'), 'true');
+    assert.equal(url.searchParams.get('fields'), 'kind,nextPageToken,items(id,status,transparency)');
+    return reply({ items: [own], nextPageToken: 'next' });
+  }, reply({ items: [{ id: 'other-instance', status: 'tentative' }] }),
+  reply({ items: [own, { id: 'cancelled', status: 'cancelled' }, { id: 'free', transparency: 'transparent' }] }),
+  reply({ kind: 'calendar#events' }));
+  const slice = { calendarId, eventId, start, end };
+  assert.equal(await hasOtherBusyEvent(token, slice), true);
+  assert.equal(await hasOtherBusyEvent(token, slice), false);
+  assert.equal(await hasOtherBusyEvent(token, slice), true);
+});
+
+test('an all-day event stays all-day on completion and clears date-only endpoints on an explicit move', async t => {
+  const allDay = event({ start: { date: '2026-11-24' }, end: { date: '2026-11-25' } });
+  simulate(t, reply(allDay), (_, init) => {
+    const patch = JSON.parse(init.body);
+    assert.deepEqual(Object.keys(patch).sort(), ['description', 'summary']);
+    return reply({ ...allDay, ...patch });
+  }, reply(allDay), (_, init) => {
+    const patch = JSON.parse(init.body);
+    assert.deepEqual(patch.start, { date: null, dateTime: start });
+    assert.deepEqual(patch.end, { date: null, dateTime: end });
+    return reply({ ...allDay, ...patch });
+  });
+  const done = { ...task, done: true, start: allDay.start.date, end: allDay.end.date };
+  assert.equal((await putTaskEvent(token, { ...write, task: done, expectedEtag: allDay.etag })).start, allDay.start.date);
+  assert.equal((await putTaskEvent(token, { ...write, expectedEtag: allDay.etag })).start, start);
 });
 
 test('concurrent calendar edits survive app writes and deletions', async t => {

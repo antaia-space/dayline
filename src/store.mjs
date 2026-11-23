@@ -35,7 +35,7 @@ export function openStore(directory) {
   const file = path.join(directory, 'planner.json');
   const state = existsSync(file)
     ? JSON.parse(readFileSync(file, 'utf8'))
-    : { version: 1, settings: defaultSettings(), tasks: [], accounts: [], client: null, lastSync: null };
+    : { version: 1, settings: defaultSettings(), tasks: [], accounts: [], client: null, lastSync: null, agent: { provider: 'codex' } };
   if (state.version !== 1 || !Array.isArray(state.tasks) || !Array.isArray(state.accounts)) {
     throw new Error('This Dayline data file is unreadable or belongs to a newer version.');
   }

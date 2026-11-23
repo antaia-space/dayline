@@ -9,12 +9,22 @@ let window;
 let local;
 let service;
 let requestedPage = '/';
+let browserRequested = false;
 const windowBackground = () => nativeTheme.shouldUseDarkColors ? '#1c1f1d' : '#fbfbf8';
+
+function openBrowserPlanner() {
+  if (local) return shell.openExternal(local.launchUrl());
+  browserRequested = true;
+}
 
 function nativeLink(value) {
   try {
     const url = new URL(value);
     if (url.protocol !== 'dayline:' || url.username || url.password) return;
+    if (url.href === 'dayline://browser' || url.href === 'dayline://browser/') {
+      void openBrowserPlanner();
+      return;
+    }
     if (url.hostname === 'open') requestedPage = '/';
     else if (url.hostname === 'action' && /^\/[a-f0-9]{32}$/.test(url.pathname)) {
       requestedPage = '/action' + url.pathname + (url.searchParams.get('done') === '0' ? '?done=0' : '?done=1');
@@ -52,7 +62,11 @@ function showPlanner(destination = '/') {
       event.preventDefault();
       external(url);
     });
-  } else { window.show(); window.focus(); }
+  } else {
+    window.show();
+    window.focus();
+    if (destination === '/' && window.webContents.getURL() === local.origin + '/') return;
+  }
   void window.loadURL(local.launchUrl(destination));
 }
 
@@ -61,7 +75,7 @@ function installMenu() {
     { label: 'Dayline', submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] },
     { label: 'File', submenu: [
       { label: 'Show Planner', accelerator: 'CmdOrCtrl+1', click: () => showPlanner() },
-      { label: 'Open in Browser', accelerator: 'CmdOrCtrl+Shift+B', click: () => shell.openExternal(local.launchUrl()) },
+      { label: 'Open in Browser', accelerator: 'CmdOrCtrl+Shift+B', click: openBrowserPlanner },
       { type: 'separator' }, { role: 'close' }
     ] },
     { role: 'editMenu' },
@@ -107,6 +121,7 @@ else {
     powerMonitor.on('resume', () => { if (service.data.accounts.length) void service.queueSync().catch(() => {}); });
     installMenu();
     showPlanner(requestedPage);
+    if (browserRequested) void openBrowserPlanner();
   }).catch(error => {
     dialog.showErrorBox('Dayline could not open', error.code === 'EADDRINUSE' ? 'Another process is using the local planner port. Close that process and open Dayline again.' : error.message);
     app.quit();

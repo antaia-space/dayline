@@ -3,11 +3,11 @@ import { DateTime } from 'luxon';
 import { CATEGORIES, estimateTask } from '../planner.mjs';
 import { localStatus, makeEstimator } from '../estimate.mjs';
 import { findCli, openProviderLogin } from './cli.mjs';
-import { codexEstimate, codexStatus } from './codex.mjs';
+import { codexEstimate, codexModel, codexStatus } from './codex.mjs';
 import { googleAgent } from './google.mjs';
 import { claudeEstimate, claudeStatus } from './claude.mjs';
 
-export const codexModel = 'gpt-6.2-sol';
+export { codexModel };
 const instructions = readFileSync(new URL('./instructions.md', import.meta.url), 'utf8');
 const providers = {
   codex: { status: codexStatus, estimate: codexEstimate },

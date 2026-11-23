@@ -6,7 +6,7 @@ Dayline finds time for your to-do list. Write a task in plain English and it est
 
 ## Install on a Mac
 
-1. Sign in to GitHub with access to the Antaia repository. For an Apple silicon or Intel Mac running macOS 13 or later, download the universal Mac ZIP, **Dayline-1.1.1-mac-universal.zip** for this version. [Latest Mac release](https://github.com/antaia-space/dayline/releases/latest)
+1. Sign in to GitHub with access to the Antaia repository. For an Apple silicon or Intel Mac running macOS 13 or later, download **Dayline-1.2.0-mac-universal.zip**. [Latest Mac release](https://github.com/antaia-space/dayline/releases/latest)
 2. Unzip the download, drag **Dayline.app** to **Applications**, and open it. To use the same planner in your browser, choose **File → Open in Browser** in the Mac app. Both views follow your system’s light or dark appearance.
 
 The internal build uses an ad hoc signature and has not been notarized by Apple. If your Mac’s launch policy requires approval, follow Antaia’s approved procedure or run the app from source below.
@@ -33,14 +33,15 @@ To distribute a build with the company’s Desktop client already configured, se
 ## Plan a task
 
 - **“Draft a proposal by Friday”** lets Dayline estimate the duration and choose an opening before the deadline. **“Call Morgan for 20 minutes tomorrow afternoon”** sets the duration and narrows the search to tomorrow afternoon.
+- In **Day agenda**, a task without a date in its text uses the day you are viewing. Choose a date in the entry field to pin the task to that day, or choose **Auto-schedule** to let Dayline find the next opening. The date and text stay with your draft if you reload while the estimate is running.
 - Each task type has a consistent color. Select a task to see how its duration was estimated or edit its text, duration, type, or preferred day. If there is no opening long enough, the task appears under **Unscheduled**.
 - You can start using the planner before connecting a calendar. It finds time within your work hours and around your other tasks. After you connect, it also checks for conflicts with meetings.
 
 ### Choose a task agent
 
-**Settings → Task agent** starts with **Local on this Mac**. On compatible Apple silicon Macs running macOS 26 or later with Apple Intelligence available, Dayline uses Apple Foundation Models. Built-in rules provide offline estimates on every supported Mac.
+New planners start with **OpenAI via Codex**, set to **gpt-6.2-sol** with **low** reasoning effort. Select the agent shown beside task entry to change it. Existing planners keep their saved choice. For offline planning, choose **Local on this Mac**. It uses Apple Foundation Models on compatible Macs with Apple Intelligence available, or built-in rules.
 
-To use a subscription, select a provider. Install its official client if prompted, choose **Sign in in Terminal**, then **Check sign-in**. If the client is already signed in on this Mac, Dayline can use that session.
+To connect a subscription, select a provider. Install its official client if prompted, choose **Sign in in Terminal**, then **Check sign-in**. If the client is already signed in on this Mac, Dayline can use that session.
 
 | Agent | Account to use in the official client |
 | --- | --- |

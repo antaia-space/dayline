@@ -61,7 +61,7 @@ class GoogleCalendars {
   }
 
   listCalendars(account) {
-    return structuredClone(this.catalogs[account]);
+    return this.catalogs[account].map(c => ({ canInspectReservations: c.writable === true, ...c }));
   }
 
   checkAccess(account, calendarId, write = false) {
@@ -90,6 +90,14 @@ class GoogleCalendars {
     this.checkAccess(account, calendarId);
     const found = this.events.get(eventId);
     return found?.calendarId === calendarId ? structuredClone(found) : null;
+  }
+
+  hasOtherBusyEvent(account, { calendarId, eventId, start, end }) {
+    this.eventCalls.push({ method: 'hasOtherBusyEvent', account });
+    this.checkAccess(account, calendarId, true);
+    assert.equal(this.events.get(eventId)?.calendarId, calendarId);
+    return [...this.meetings, ...this.events.values()].some(e => e.calendarId === calendarId && e.eventId !== eventId &&
+      Date.parse(e.end) > Date.parse(start) && Date.parse(e.start) < Date.parse(end));
   }
 
   putTaskEvent(account, { calendarId, eventId, task, expectedEtag, actionUrl }) {
@@ -343,6 +351,54 @@ test('shortening a reserved block can keep its exact time even when Google repor
   assert.equal(shortened.end, at('09:15'));
   assert.equal(h.store.saved.tasks[0].syncStatus, 'synced');
   assert.equal(h.google.insertRequests, 1);
+});
+
+test('shortening a flexible reservation avoids meetings that now overlap its old time', async () => {
+  for (const calendarId of ['home-primary', 'work-primary']) {
+    const h = fixture();
+    const task = await create(h);
+    h.google.meetings.push({ calendarId, start: at('09:00'), end: at('09:15') });
+    await h.service.editTask(task.id, { minutes: 15 });
+    await successfulSync(h.service);
+    const changed = h.google.events.get(task.remote.eventId);
+    assert.ok(Date.parse(changed.start) >= Date.parse(at('09:15')), calendarId);
+    assert.equal(Date.parse(changed.end) - Date.parse(changed.start), 15 * 60000);
+    assert.equal(h.google.insertRequests, 1);
+  }
+});
+
+test('rescheduling checks the original destination even when it is unchecked for new tasks', async () => {
+  const h = fixture();
+  const task = await create(h);
+  const calendars = h.service.snapshot().calendars;
+  const home = calendars.find(c => c.name === 'Home');
+  const work = calendars.find(c => c.name === 'Work');
+  h.service.updateSettings({ targetCalendarId: home.id, excludedCalendarIds: [work.id] });
+  h.google.meetings.push({ calendarId: 'work-primary', start: at('09:30'), end: at('10:00') });
+  await h.service.editTask(task.id, { minutes: 60 });
+  await successfulSync(h.service);
+  const changed = h.google.events.get(task.remote.eventId);
+  assert.deepEqual([changed.calendarId, changed.start, changed.end], ['work-primary', at('10:00'), at('11:00')]);
+});
+
+test('an all-day Google edit stays on its calendar date in a western planning time zone', async () => {
+  const h = fixture();
+  h.service.updateSettings({ timeZone: 'America/Los_Angeles' });
+  const task = await create(h);
+  h.google.change(task.remote.eventId, { start: day, end: '2026-11-24' });
+  await successfulSync(h.service);
+  const changed = h.store.saved.tasks[0];
+  assert.deepEqual([changed.start, changed.end], ['2026-11-23T08:00:00.000Z', '2026-11-24T08:00:00.000Z']);
+  assert.equal(changed.minutes, 30);
+  assert.equal(h.service.snapshot().tasks[0].allDay, true);
+  h.service.updateSettings({ timeZone: 'Pacific/Honolulu' });
+  await successfulSync(h.service);
+  assert.equal(h.store.saved.tasks[0].start, '2026-11-23T10:00:00.000Z');
+  assert.equal(h.google.events.get(task.remote.eventId).start, day);
+  await h.service.editTask(task.id, { done: true });
+  await successfulSync(h.service);
+  const remote = h.google.events.get(task.remote.eventId);
+  assert.deepEqual([remote.start, remote.end, remote.done], [day, '2026-11-24', true]);
 });
 
 function availabilityFixture() {
@@ -634,6 +690,32 @@ function modelEstimate(pending = false) {
       : { outcome: 'model', provider: 'codex', model: 'test-model' },
   };
 }
+
+test('a model estimate skips a read-only all-day block in local time and retains its slot after restart', async () => {
+  const h = availabilityFixture();
+  h.service.updateSettings({ timeZone: 'America/Los_Angeles' });
+  h.google.catalogs.home[0].writable = false;
+  h.google.catalogs.work = [{ id: 'weeks', name: 'Week Numbers', canCheckAvailability: false, writable: false }];
+  h.google.meetings.push({ calendarId: 'home-primary', start: at('08:00'), end: '2026-11-24T08:00:00.000Z' });
+  await connect(h, 'work');
+  await connect(h, 'home');
+  h.service.estimate = () => modelEstimate();
+  const id = await createLocal(h, 'Review the project outline');
+  const expected = ['2026-11-24T17:00:00.000Z', '2026-11-24T17:45:00.000Z'];
+  const check = context => {
+    const task = savedTask(context, id);
+    assert.equal(task.agent.outcome, 'model');
+    assert.deepEqual([task.start, task.end], expected);
+  };
+  check(h);
+  const restarted = fixture(h.google, h.store.saved);
+  restarted.service.estimate = () => { throw new Error('Reopening must not re-estimate'); };
+  await successfulSync(restarted.service);
+  check(restarted);
+  assert.ok(h.google.busyQueries.length);
+  assert.ok(h.google.busyQueries.every(q => q.account === 'home'));
+  assert.deepEqual(h.google.eventCalls, []);
+});
 
 test('a failed model leaves a durable unscheduled task through refresh, edits, mode changes, and completion', async () => {
   const h = availabilityFixture();

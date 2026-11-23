@@ -34,8 +34,9 @@ test('the paired app saves a subscription choice, sends only one task, and repor
     return { output: { ...suggestion, earliestDay: '2026-11-27' }, model: 'test-model', effort: 'low',
       usage: { inputTokens: 77, outputTokens: 35, cachedInputTokens: 4 } };
   });
+  assert.deepEqual(agents.selected, { provider: 'codex', model: 'gpt-6.2-sol', effort: 'low' });
+  agents.select({ provider: 'local' });
   await service.createTask({ text: 'A private earlier task' });
-  assert.equal(agents.selected.provider, 'local');
   const webRoot = fileURLToPath(new URL('../web/', import.meta.url));
   const app = await startServer({ service, agents, port: 0, webRoot, intervalMs: 0 });
   t.after(() => app.close());
@@ -50,6 +51,9 @@ test('the paired app saves a subscription choice, sends only one task, and repor
   assert.equal((await post('/api/agent/login', { provider: 'codex' })).status, 200);
   assert.deepEqual(loginRequests, ['codex']);
   assert.equal((await post('/api/agent', { provider: 'codex', model: 'test-model' })).status, 200);
+  const state = await (await fetch(app.origin + '/api/state', { headers })).json();
+  assert.deepEqual(state.selectedAgent, { provider: 'codex', model: 'test-model', effort: 'low' });
+  assert.equal(requests.length, 0);
   const text = 'Write a two-paragraph update by Friday';
   const input = { text, requestId: 'f'.repeat(32) };
   await Promise.all([post('/api/tasks', input), post('/api/tasks', input)]);
@@ -82,6 +86,37 @@ test('explicit durations, chosen day, and local exact-time constraints survive a
   await service.editTask(task.id, { text: 'Write notes tomorrow at 3pm' });
   const edited = service.snapshot().tasks[0];
   assert.deepEqual([edited.minutes, edited.windowStart, edited.windowEnd, edited.agent.model], [35, '15:00', '15:35', 'test-model']);
+});
+
+test('an agenda day fills an unspecified date and yields to dates in the task text, including on retry', async t => {
+  let firstAttempt = true;
+  const { service } = await planner(t, async ({ input, model }) => {
+    let output = suggestion;
+    if (input.task.includes('after the exhibition')) {
+      if (firstAttempt) {
+        firstAttempt = false;
+        throw new Error('Codex is unavailable.');
+      }
+      output = { ...suggestion, earliestDay: '2026-11-30' };
+    }
+    return { model, effort: 'low', output };
+  });
+  const viewDay = '2026-11-24';
+  const add = async (text, options = {}) => {
+    const id = await service.createTask({ text, viewDay, ...options });
+    return service.snapshot().tasks.find(task => task.id === id);
+  };
+  const unqualified = await add('Draft the club agenda');
+  assert.deepEqual([unqualified.earliestDay, unqualified.latestDay], [viewDay, viewDay]);
+  const tomorrow = await add('Draft the club agenda tomorrow');
+  assert.deepEqual([tomorrow.earliestDay, tomorrow.latestDay], ['2026-11-25', '2026-11-25']);
+  const chosen = await add('Draft the club agenda tomorrow', { day: '2026-11-27' });
+  assert.deepEqual([chosen.earliestDay, chosen.latestDay], ['2026-11-27', '2026-11-27']);
+  const pending = await add('Draft the club agenda after the exhibition');
+  assert.equal(pending.pendingEstimate, true);
+  await service.retryEstimate(pending.id);
+  const retried = service.snapshot().tasks.find(task => task.id === pending.id);
+  assert.deepEqual([retried.earliestDay, retried.latestDay], ['2026-11-30', null]);
 });
 
 test('provider errors or malformed estimates stay pending and preserve the selected account', async t => {

@@ -44,7 +44,7 @@ function paintUsage(run) {
   shown(id("agent-run-notice"),run.notice);
 }
 
-export function createAgentSettings({api,toast,errorAt}) {
+export function createAgentSettings({api,toast,errorAt,onSaved}) {
   let information = null;
   let sequence = 0;
   let busy = false;
@@ -193,6 +193,7 @@ export function createAgentSettings({api,toast,errorAt}) {
     try {
       await api("/api/agent","POST",{provider:picked,model:choice});
       if (active()) await load(picked);
+      if (onSaved) await onSaved();
       toast("Task agent saved.");
     } catch (error) { if (active()) errorAt("settings-error",error.message); }
     finally { busy = false; provider.disabled = false; model.disabled = false; allowSave(); }

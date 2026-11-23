@@ -25,14 +25,15 @@ export function renderKey(categories) {
 }
 
 export function summary(container, tasks) {
-  const total = tasks.reduce((n,t) => n + Number(t.minutes || 0),0);
+  const timed = tasks.filter(task => !task.allDay);
+  const total = timed.reduce((n,t) => n + Number(t.minutes || 0),0);
+  const allDay = tasks.length - timed.length;
   const completed = tasks.filter((t) => t.done).length;
   const text = tasks.length + (tasks.length === 1 ? " task" : " tasks");
   const items = [element("strong","",text)];
-  if (tasks.length) {
-    items.push(element("span","middle-dot","·"),element("span","",duration(total) + " planned"));
-    if (completed) items.push(element("span","middle-dot","·"),element("span","",completed + " complete"));
-  }
+  if (timed.length) items.push(element("span","middle-dot","·"),element("span","",duration(total) + " planned"));
+  if (allDay) items.push(element("span","middle-dot","·"),element("span","",allDay + " all-day"));
+  if (completed) items.push(element("span","middle-dot","·"),element("span","",completed + " complete"));
   container.replaceChildren(...items);
 }
 
@@ -53,6 +54,9 @@ function taskControls(task, state, agenda = false) {
   const meta = element("span","task-meta");
   if (task.pendingEstimate) {
     meta.textContent = "Awaiting estimate";
+  } else if (task.allDay) {
+    if (agenda) meta.textContent = category.name;
+    else meta.append(categoryDot(category),document.createTextNode("All day · " + category.name));
   } else if (agenda) {
     const endTime = task.end ? "Until " + instantTime(task.end,state.settings.timeZone) + " · " : "";
     meta.textContent = endTime + duration(task.minutes) + " · " + category.name;
@@ -77,6 +81,16 @@ function taskDay(task, zone) {
   return !task.pendingEstimate && task.start && zonedDay(task.start,zone);
 }
 
+function groupWeek(tasks,days,zone) {
+  const grouped = new Map(days.map(day => [day,[]]));
+  for (const task of tasks) {
+    if (task.allDay && !task.pendingEstimate) {
+      for (const day of days) if (wallRange(task,day,zone)) grouped.get(day).push(task);
+    } else grouped.get(taskDay(task,zone))?.push(task);
+  }
+  return grouped;
+}
+
 function ordered(tasks) {
   return [...tasks].sort((a,b) => String(a.start || a.createdAt).localeCompare(String(b.start || b.createdAt)) || a.text.localeCompare(b.text));
 }
@@ -99,17 +113,12 @@ function dayStrip(container, days, selected, today, tasksByDay) {
 
 export function renderWeek(state,{monday,selected,today,weekends}) {
   const zone = state.settings.timeZone;
-  const days = Array.from({length:weekends ? 7 : 5},(_,i) => addDays(monday,i));
-  const tasksByDay = new Map(days.map((day) => [day,[]]));
-  const end = addDays(monday,6);
-  let hiddenWeekendTasks = 0;
-  for (const task of ordered(state.tasks)) {
-    const day = taskDay(task,zone);
-    if (!day) continue;
-    if (tasksByDay.has(day)) tasksByDay.get(day).push(task);
-    else if (day >= monday && day <= end) hiddenWeekendTasks++;
-  }
-  summary(id("week-summary"),[...tasksByDay.values()].flat());
+  const fullWeek = Array.from({length:7},(_,i) => addDays(monday,i));
+  const days = weekends ? fullWeek : fullWeek.slice(0,5);
+  const tasksByDay = groupWeek(ordered(state.tasks),fullWeek,zone);
+  const visible = new Set(days.flatMap(day => tasksByDay.get(day)));
+  const hiddenWeekendTasks = new Set(fullWeek.slice(days.length).flatMap(day => tasksByDay.get(day)).filter(task => !visible.has(task))).size;
+  summary(id("week-summary"),[...visible]);
   if (hiddenWeekendTasks) {
     const showWeekends = button("summary-link","show-weekends","Show weekend tasks",hiddenWeekendTasks + (hiddenWeekendTasks === 1 ? " weekend task" : " weekend tasks"));
     id("week-summary").append(element("span","middle-dot","·"),showWeekends);
@@ -193,8 +202,7 @@ function agendaTask(entry,state) {
 export function renderAgenda(state,{monday,selected,today}) {
   const zone = state.settings.timeZone;
   const days = Array.from({length:7},(_,i) => addDays(monday,i));
-  const tasksByDay = new Map(days.map((day) => [day,[]]));
-  for (const task of state.tasks) tasksByDay.get(taskDay(task,zone))?.push(task);
+  const tasksByDay = groupWeek(state.tasks,days,zone);
   dayStrip(id("agenda-strip"),days,selected,today,tasksByDay);
   const taskEntries = state.tasks.flatMap((task) => {
     const range = !task.pendingEstimate && wallRange(task,selected,zone);
@@ -207,6 +215,7 @@ export function renderAgenda(state,{monday,selected,today}) {
     for (const range of subtractRanges(busy,booked)) entries.push({...range,kind:"busy"});
   }
   const workday = state.settings.workDays.includes(dayIndex(selected));
+  const coverage = !state.connection.error && wallRange({start:state.busyStart,end:state.busyEnd},selected,zone);
   if (workday) {
     const hours = {start:hhmmMinutes(state.settings.startTime),end:hhmmMinutes(state.settings.endTime)};
     for (const range of subtractRanges(hours,mergeRanges([...booked,...busyRanges]))) entries.push({...range,kind:"available"});
@@ -219,12 +228,13 @@ export function renderAgenda(state,{monday,selected,today}) {
   }
   const rows = entries.map((entry) => {
     const row = element("div","agenda-slot");
-    row.append(element("span","agenda-start",displayTime(entry.start)));
+    row.append(element("span","agenda-start",entry.task?.allDay ? "All day" : displayTime(entry.start)));
     if (entry.kind === "task") row.append(agendaTask(entry,state));
     else {
       const isBusy = entry.kind === "busy";
       const block = element("div","agenda-block " + (isBusy ? "agenda-busy" : "agenda-free"));
-      const title = isBusy ? "Calendar busy" : "Unallocated work time";
+      const verified = !state.connection.connected || (coverage && coverage.start <= entry.start && entry.end <= coverage.end);
+      const title = isBusy ? "Calendar busy" : verified ? "Unallocated work time" : "Availability unconfirmed";
       block.append(element("span","slot-title",title),element("span","slot-detail","Until " + displayTime(entry.end) + " · " + duration(entry.end - entry.start)));
       row.append(block);
     }

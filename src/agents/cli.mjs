@@ -14,6 +14,9 @@ const binPaths = () => [...new Set([...(process.env.PATH || '').split(path.delim
 export function findCli(provider) {
   if (!Object.hasOwn(loginArgs, provider)) return null;
   const candidates = binPaths().map(dir => path.join(dir, provider));
+  if (provider === 'agy' && process.platform === 'darwin') {
+    candidates.unshift(path.join(homedir(), 'Library', 'Application Support', 'Dayline', 'bin', 'agy'));
+  }
   if (provider === 'codex') candidates.push(bundledCodex, '/Applications/Codex.app/Contents/Resources/codex');
   for (const file of candidates) {
     try {

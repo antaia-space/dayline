@@ -62,7 +62,7 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
     if (req.method === 'GET' && pathname === '/open') {
       const request = invitations.get(url.searchParams.get('ticket'));
       invitations.delete(url.searchParams.get('ticket'));
-      if (!request || request.expires < Date.now()) return send(res, 403, 'text/html', page('Open Dayline on this Mac', 'Choose File → Open in Browser to start a browser session.', 'dayline://open', 'Open Dayline'));
+      if (!request || request.expires < Date.now()) return send(res, 403, 'text/html', page('This browser link has expired', 'Open a fresh browser tab paired with Dayline on this Mac.', 'dayline://browser', 'Reopen planner in browser'));
       res.writeHead(303, { ...headers, Location: request.destination, 'Set-Cookie': sessionCookie() }); res.end(); return;
     }
     if (req.method === 'GET' && pathname === '/oauth/callback') {
@@ -81,7 +81,10 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
 
     if (pathname.startsWith('/api/')) {
       if (!hasSession) throw invalid('Open Dayline on this Mac and choose File → Open in Browser.', 401);
-      if (req.method === 'GET' && pathname === '/api/state') return send(res, 200, 'application/json', JSON.stringify(service.snapshot()));
+      if (req.method === 'GET' && pathname === '/api/state') {
+        const selectedAgent = agents?.selected ?? { provider: 'local', model: '' };
+        return send(res, 200, 'application/json', JSON.stringify({ ...service.snapshot(), selectedAgent }));
+      }
       if (req.method === 'GET' && pathname === '/api/agent' && agents) {
         const details = await agents.status(url.searchParams.get('provider') ?? undefined);
         return send(res, 200, 'application/json', JSON.stringify(details));
@@ -126,8 +129,11 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
     if (req.method !== 'GET' && req.method !== 'HEAD') throw invalid('Unknown request.', 405);
     const action = ACTION_ROUTE.exec(pathname);
     if (!hasSession && (pathname === '/' || action)) {
-      const deepLink = action ? 'dayline://action/' + action[1] + (url.searchParams.get('done') === '0' ? '?done=0' : '?done=1') : 'dayline://open';
-      return send(res, 200, 'text/html', page('Open Dayline on this Mac', action ? 'Open the linked task in Dayline to confirm the change.' : 'For a paired browser tab, choose File → Open in Browser in the Mac app.', deepLink, action ? 'Open task in Dayline' : 'Open Dayline'));
+      if (action) {
+        const deepLink = 'dayline://action/' + action[1] + (url.searchParams.get('done') === '0' ? '?done=0' : '?done=1');
+        return send(res, 200, 'text/html', page('Open the task in Dayline', 'Review the task in the Mac app to confirm the change.', deepLink, 'Open task in Dayline'));
+      }
+      return send(res, 200, 'text/html', page('Open your browser planner', 'Dayline will open a paired tab in your default browser. You can also choose File → Open in Browser in the Mac app.', 'dayline://browser', 'Open planner in browser'));
     }
     const asset = (pathname === '/' || action) ? 'index.html' : pathname.slice(1);
     if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(asset) || asset.split('/').some(part => !part || part.startsWith('.')) || !MIME[path.extname(asset)]) throw invalid('Page not found.', 404);
