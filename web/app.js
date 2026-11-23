@@ -29,6 +29,7 @@ let monday;
 let today;
 let lastToday;
 let view = pref.get("view") === "day" ? "day" : "week";
+let bookingsOpen = false;
 let weekends;
 let syncRefreshTimer;
 let moveEndTimer;
@@ -242,8 +243,12 @@ function render() {
   const restoreMeetingScroll = retainMeetingScroll(byId("planner"));
   const weekView = view === "week";
   const context = {monday,selected:selectedDay,today,weekends,events:meetings.update(state,monday).events};
-  byId("view-week").setAttribute("aria-pressed",String(weekView));
-  byId("view-day").setAttribute("aria-pressed",String(!weekView));
+  // Bookings is a third tab beside the two planner views; the planner keeps its own view underneath.
+  byId("view-week").setAttribute("aria-pressed",String(weekView && !bookingsOpen));
+  byId("view-day").setAttribute("aria-pressed",String(!weekView && !bookingsOpen));
+  byId("view-bookings").setAttribute("aria-pressed",String(bookingsOpen));
+  byId("planner").dataset.view = bookingsOpen ? "bookings" : view;
+  byId("bookings-section").hidden = !bookingsOpen;
   byId("week-section").hidden = !weekView;
   byId("day-section").hidden = weekView;
   byId("show-weekends").checked = weekends;
@@ -326,7 +331,7 @@ function renderPlanningNote() {
   }
   if (state.booking?.notices) {
     add(state.booking.notices === 1 ? "A booking request was not booked. " : state.booking.notices + " booking requests were not booked. ",
-      button("","booking-settings","Open booking settings","See who asked"));
+      button("","booking-settings","Open the Bookings tab","See who asked"));
   }
   for (const warning of meetings.current.warnings) add(warning);
   if (state.connection.accounts?.some(account => !account.meetingDetails)) {
@@ -341,6 +346,12 @@ function renderPlanningNote() {
 
 function switchView(next) {
   if (!state) return;
+  if (next === "bookings") {
+    if (!bookingsOpen) void bookingSettings.open();
+    bookingsOpen = true;
+    return render();
+  }
+  bookingsOpen = false;
   const changed = view !== next;
   view = next;
   pref.set("view",view);
@@ -380,6 +391,7 @@ compact.addEventListener("change",() => composer.update());
 
 byId("view-week").addEventListener("click",() => switchView("week"));
 byId("view-day").addEventListener("click",() => switchView("day"));
+byId("view-bookings").addEventListener("click",() => switchView("bookings"));
 byId("entry-agent").addEventListener("click",() => openSettings("agent"));
 byId("agenda-add").addEventListener("click",() => composer.choose(selectedDay));
 byId("previous").addEventListener("click",() => { if (state) navigateTo(addDays(selectedDay,view === "week" ? -7 : -1)); });
@@ -417,7 +429,7 @@ byId("planner").addEventListener("click",async (event) => {
     return render();
   }
   if (action === "calendar-settings") return openSettings("calendars");
-  if (action === "booking-settings") return openSettings("booking");
+  if (action === "booking-settings") return switchView("bookings");
   const task = state.tasks.find(({id}) => id === target.dataset.id);
   if (!task) return;
   if (action === "move-later") return movePicker.open(task);
@@ -487,16 +499,30 @@ function settingsTab(tab) {
   byId("work-form").hidden = tab !== "work";
   byId("calendar-settings").hidden = tab !== "calendars";
   byId("agent-settings").hidden = tab !== "agent";
-  byId("tab-booking").setAttribute("aria-pressed",String(tab === "booking"));
-  byId("booking-settings").hidden = tab !== "booking";
   errorAt("settings-error");
   if (tab === "calendars") fillCalendarSettings();
   if (tab === "agent") agentSettings.open(state);
-  if (tab === "booking") void bookingSettings.open();
 }
-const bookingSettings = createBookingSettings({api,toast,errorAt,connect:(control,options) => startConnection(control,options)});
-byId("tab-booking").addEventListener("click",() => settingsTab("booking"));
-window.addEventListener("focus",() => { if (byId("settings").open && settingTab === "booking") void bookingSettings.refresh(); });
+
+// The Bookings tab asks Google for event access on one account. Tasks stay local.
+async function allowBookedMeetings(control,options) {
+  const link = byId("booking-google");
+  errorAt("booking-error");
+  control.disabled = true;
+  try {
+    const {url} = await api("/api/connection/start","POST",{expectedMode:calendarMode(),...options});
+    const destination = new URL(url);
+    if (destination.protocol !== "https:" || destination.hostname !== "accounts.google.com") throw new Error("The sign-in address was unavailable. Try again.");
+    link.href = destination.href;
+    link.hidden = false;
+    link.click();
+  } catch (error) { errorAt("booking-error",error.message); }
+  finally { control.disabled = false; }
+}
+const bookingSettings = createBookingSettings({api,toast,connect:allowBookedMeetings,zone:() => state?.settings.timeZone,
+  fail:message => errorAt("booking-error",message),
+  onChange:() => { byId("booking-google").hidden = true; void refresh(true); }});
+window.addEventListener("focus",() => { if (bookingsOpen) void bookingSettings.refresh(); });
 
 const agentSettings = createAgentSettings({api,toast,errorAt,onSaved:selected => {
   if (state) state.selectedAgent = selected;

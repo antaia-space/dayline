@@ -32,6 +32,7 @@ export class BookingDesk {
     this.waiting = 0;
     this.publishedAt = null;
     this.dirty = true;
+    this.upcoming = [];
   }
 
   status() {
@@ -121,7 +122,7 @@ export class BookingDesk {
         await this.send({ page: null });
         await service.run(() => { state.published = false; service.store.save(); });
       }
-      Object.assign(this, { paused: null, waiting: 0, publishedAt: null, dirty: true });
+      Object.assign(this, { paused: null, waiting: 0, publishedAt: null, dirty: true, upcoming: [] });
       return;
     }
     let outcomes = [];
@@ -132,6 +133,7 @@ export class BookingDesk {
       if (this.dirty || print !== this.print || this.now() - (this.builtAt ?? 0) >= this.rebuildMs) {
         const snapshot = await service.run(() => bookingSnapshot(service, this.now()));
         body.page = snapshot.page;
+        if (snapshot.upcoming) this.upcoming = snapshot.upcoming; // Shown on this Mac; never sent.
         if (snapshot.bookings) {
           // A meeting created a moment ago may be missing from Google's list for a few seconds.
           const listed = new Map(snapshot.bookings.map(b => [b.id, b]));

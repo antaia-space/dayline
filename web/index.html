@@ -20,6 +20,7 @@
       <nav class="views" aria-label="Planner view">
         <button id="view-week" type="button" aria-pressed="true"><span data-icon="week"></span>Week</button>
         <button id="view-day" type="button" aria-pressed="false"><span data-icon="agenda"></span>Day agenda</button>
+        <button id="view-bookings" type="button" aria-pressed="false"><span data-icon="link"></span>Bookings</button>
       </nav>
       <div class="toolbar-end">
         <button id="connection-status" class="connection" title="Calendar connections"><span data-icon="device"></span><span id="connection-text">Local planner</span></button>
@@ -75,6 +76,13 @@
       <div id="agenda" class="agenda"></div>
     </section>
 
+    <section id="bookings-section" class="bookings" aria-labelledby="bookings-title" hidden>
+      <div class="period"><div class="period-label"><p class="eyebrow">Booking links</p><h1 id="bookings-title">Bookings</h1></div></div>
+      <div id="booking-settings" class="form-body booking-view"></div>
+      <p id="booking-error" class="field-error booking-view" role="alert" hidden></p>
+      <a id="booking-google" class="outside-link" target="_blank" rel="noopener noreferrer" hidden>Continue in your browser</a>
+    </section>
+
     <div id="category-key" class="category-key" aria-label="Task colors"></div>
     <div id="planning-note" class="planning-note" hidden></div>
     <section id="backlog" class="backlog" aria-labelledby="backlog-title">
@@ -92,7 +100,7 @@
 
   <dialog id="settings" aria-labelledby="settings-title" class="panel">
     <div class="dialog-heading"><div><p class="eyebrow">Dayline</p><h2 id="settings-title">Settings</h2></div><button class="icon-button close-dialog" aria-label="Close settings"><span data-icon="x"></span></button></div>
-    <div class="settings-tabs" role="group" aria-label="Settings section"><button id="tab-work" type="button" aria-pressed="true">Working hours</button><button id="tab-calendars" type="button" aria-pressed="false">Calendars</button><button id="tab-agent" type="button" aria-pressed="false">Task agent</button><button id="tab-booking" type="button" aria-pressed="false">Booking</button></div>
+    <div class="settings-tabs" role="group" aria-label="Settings section"><button id="tab-work" type="button" aria-pressed="true">Working hours</button><button id="tab-calendars" type="button" aria-pressed="false">Calendars</button><button id="tab-agent" type="button" aria-pressed="false">Task agent</button></div>
     <div class="dialog-scroll">
       <form id="work-form" class="form-body">
         <fieldset><legend>Working days</legend><div id="work-days" class="work-days"></div></fieldset>
@@ -174,7 +182,6 @@
           <h3 id="duration-notes-title">Your duration notes</h3><ul id="duration-note-list" class="hint"></ul>
         </section>
       </section>
-      <section id="booking-settings" class="form-body" aria-label="Booking links" hidden></section>
       <p id="settings-error" class="field-error dialog-error" role="alert" hidden></p>
     </div>
   </dialog>

@@ -114,7 +114,7 @@ Closing the Mac window keeps Dayline listening for calendar changes. After quitt
 
 Give people a link where they pick a time with you. The meeting lands in your Google Calendar with a Google Meet link, and Google sends the invitation. Your Google Calendar is the only store of bookings: a booking is a calendar event.
 
-1. Connect your Antaia Google account under **Settings → Calendars**. Then open **Settings → Booking**, enter the **Name guests see** and choose a calendar under **Bookings go to**.
+1. Connect your Antaia Google account under **Settings → Calendars**. Then open the **Bookings** tab, beside **Week** and **Day agenda**, and enter the **Name guests see** and choose a calendar under **Bookings go to**.
 2. Tick **Offer booking links** and choose **Save booking**. If Dayline may not yet add events to that account, choose **Allow booked meetings** and approve event access in Google. This permission is separate from **Sync tasks as calendar events**: your tasks stay local unless you turn that on too.
 3. Copy the link of your page, or of one meeting type, and send it. Your page is at `https://dayline-calendar.antaia-space.workers.dev/` followed by the part of your Antaia address before the `@`.
 
@@ -133,7 +133,7 @@ The guest picks a meeting type, a day and a time, and enters a name, an email ad
 - **Your Mac is awake and Dayline is running.** Dayline checks your calendar again and creates the event. Within seconds the page says **You are booked**, and Google emails the invitation with the Meet link.
 - **Your Mac is asleep or Dayline is closed.** The page still shows your free times as of the last time Dayline published them. The guest’s time is held, so nobody else can take it, and the page says **Request received**: the Google Calendar invitation is the confirmation, and without one the meeting is not booked. When Dayline next runs, it checks your calendar and creates the event.
 
-A request that waits lapses 30 minutes before its start, or after 72 hours. If your calendar took the time in the meantime, the request is declined. In both cases the guest’s link says so, and Dayline shows you who asked under **Settings → Booking** so you can write to them. Dayline does not send email itself. After 72 hours without contact from your Mac, the page stops offering times.
+A request that waits lapses 30 minutes before its start, or after 72 hours. If your calendar took the time in the meantime, the request is declined. In both cases the guest’s link says so, and Dayline shows you who asked under the **Bookings** tab so you can write to them. Dayline does not send email itself. After 72 hours without contact from your Mac, the page stops offering times.
 
 Every invitation and confirmation carries a **Reschedule or cancel** link. A change made there reaches your calendar the same way, and Google emails the update. If you move or delete a booked meeting in Google Calendar yourself, the guest’s link follows.
 
@@ -157,7 +157,7 @@ The receiver does not store guests’ IP addresses and writes no logs. The live 
 
 ### Limits
 
-- With an **External** Google client in **Testing**, Google ends Dayline’s access after seven days. The page then pauses and **Settings → Booking** asks you to reconnect.
+- With an **External** Google client in **Testing**, Google ends Dayline’s access after seven days. The page then pauses and the **Bookings** tab asks you to reconnect.
 - Offer booking links from one Mac. Two Macs signed in to the same Antaia account would publish the same page in turn.
 - The page limits how many requests one address can send and holds at most ten unanswered requests. It has no CAPTCHA.
 

@@ -70,7 +70,7 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
     monitor: calendarMonitorOptions, push: calendarPushOptions, booking: desk,
     enabled: Boolean(intervalMs || calendarMonitorOptions || calendarPushOptions)
   });
-  const bookingView = () => ({ ...publicBooking(service), status: desk.status() });
+  const bookingView = () => ({ ...publicBooking(service), status: desk.status(), upcoming: desk.upcoming });
   const headers = {
     'Cache-Control': 'no-store', 'Content-Security-Policy': POLICY, 'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY', 'Cross-Origin-Resource-Policy': 'same-origin'
