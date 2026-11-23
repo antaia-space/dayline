@@ -156,10 +156,12 @@
           <div class="dialog-actions"><button type="button" class="secondary close-dialog">Close</button><button id="agent-save" type="submit" class="primary" disabled>Save agent</button></div>
         </form>
         <section id="last-estimate" class="agent-usage" aria-labelledby="last-estimate-title">
-          <h3 id="last-estimate-title">Last estimate</h3>
+          <h3 id="last-estimate-title">Latest estimate attempt across agents</h3>
           <p id="agent-run" class="hint">Checking recent usage…</p>
+          <p id="agent-run-context" class="hint" hidden></p>
           <p id="agent-run-usage" class="hint" hidden></p>
           <p id="agent-run-notice" class="hint" hidden></p>
+          <p id="agent-activity" class="hint" role="status" hidden></p>
         </section>
         <section id="duration-notes" class="agent-usage" aria-labelledby="duration-notes-title" hidden>
           <h3 id="duration-notes-title">Your duration notes</h3><ul id="duration-note-list" class="hint"></ul>
@@ -174,6 +176,7 @@
     <div class="dialog-scroll"><form id="task-form" class="form-body">
       <label>Title<input id="task-title-input" type="text" maxlength="120" placeholder="Dayline will suggest a title"></label>
       <label>Original task<textarea id="task-text" required maxlength="1000" rows="2"></textarea></label>
+      <div id="editor-checklist" hidden></div>
       <div id="task-estimate-fields" class="field-pair"><label>Duration in minutes<input id="task-minutes" type="number" min="1" step="1" required></label><label>Type<select id="task-category" required></select></label></div>
       <label>Schedule on a day <span class="optional">Optional</span><input id="task-day" type="date"></label>
       <p id="estimate-reason" class="hint"></p>

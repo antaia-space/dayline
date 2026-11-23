@@ -165,8 +165,12 @@ export function recordDurationFeedback(state, before, after) {
   after.baseMinutes = base;
   after.estimatedMinutes = shown;
   const examples = samples.filter(sample => sample.taskId !== after.id);
-  if (after.minutes !== shown) examples.push({ taskId: after.id, ...activityFor(after.text || before.text || '', after.category || before.category),
-    baseMinutes: base, estimatedMinutes: shown, correctedMinutes: after.minutes });
+  // When a meeting interrupted a block, the stepper edits its remaining time.
+  // Compare total effort to the original estimate before learning a correction.
+  const prior = Number.isSafeInteger(after.calendarProgressMinutes) ? after.calendarProgressMinutes : 0;
+  const corrected = after.minutes + prior;
+  if (minutesValid(corrected) && corrected !== shown) examples.push({ taskId: after.id, ...activityFor(after.text || before.text || '', after.category || before.category),
+    baseMinutes: base, estimatedMinutes: shown, correctedMinutes: corrected });
   state.durationLearning = { examples, notes: summarize(examples) };
   return true;
 }

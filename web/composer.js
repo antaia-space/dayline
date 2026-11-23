@@ -153,7 +153,7 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
       const client = [clients[agent.provider],agent.model].filter(Boolean).join(" · ");
       if (task.estimateState === "queued") message = "Queued " + title + (client ? " for " + client : "") + ".";
       else if (task.estimateState === "estimating") message = "Estimating " + title + (client ? " with " + client : "") + "…";
-      else if (task.pendingEstimate) message = title + " needs an estimate. Open it to retry.";
+      else if (task.pendingEstimate) message = (client ? "Estimate unavailable for " + title + " with " + client : title + " needs an estimate") + ". Open it to retry.";
       else if (task.start) {
         const zone = ctx.state.settings.timeZone;
         const day = formatDay(zonedDay(task.start,zone),{weekday:"short",month:"short",day:"numeric"});

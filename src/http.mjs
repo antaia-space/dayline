@@ -11,6 +11,8 @@ const escape = v => String(v).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;
 const TASK_ROUTE = /^\/api\/tasks\/([a-f0-9]{32})$/;
 const ESTIMATE_ROUTE = /^\/api\/tasks\/([a-f0-9]{32})\/estimate$/;
 const DURATION_ROUTE = /^\/api\/tasks\/([a-f0-9]{32})\/duration$/;
+const ORDER_ROUTE = /^\/api\/tasks\/([a-f0-9]{32})\/order$/;
+const SUBTASK_ROUTE = /^\/api\/tasks\/([a-f0-9]{32})\/subtasks\/([a-f0-9]{32})$/;
 const ACTION_ROUTE = /^\/action\/([a-f0-9]{32})$/;
 
 async function jsonInput(req) {
@@ -85,7 +87,8 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
       if (!hasSession) throw invalid('Open Dayline on this Mac and choose File → Open in Browser.', 401);
       if (req.method === 'GET' && pathname === '/api/state') {
         const selectedAgent = agents?.selected ?? { provider: 'local', model: '' };
-        return send(res, 200, 'application/json', JSON.stringify({ ...service.snapshot(), selectedAgent }));
+        return send(res, 200, 'application/json', JSON.stringify({ ...service.snapshot(), selectedAgent,
+          lastAgentRun: service.data.agent?.lastRun || null }));
       }
       if (req.method === 'GET' && pathname === '/api/meetings') {
         const week = await service.meetings({ from: url.searchParams.get('from'), to: url.searchParams.get('to') });
@@ -101,6 +104,8 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
       const match = TASK_ROUTE.exec(pathname);
       const retry = ESTIMATE_ROUTE.exec(pathname);
       const duration = DURATION_ROUTE.exec(pathname);
+      const order = ORDER_ROUTE.exec(pathname);
+      const subtask = SUBTASK_ROUTE.exec(pathname);
       let status = 200;
       let syncAfter = true;
       if (req.method === 'POST' && pathname === '/api/tasks') {
@@ -110,6 +115,15 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
       } else if (req.method === 'POST' && retry) {
         result.id = await service.run(() => service.enqueueRetry(retry[1], body));
         status = 202;
+        syncAfter = false;
+      } else if (req.method === 'PATCH' && subtask) {
+        if (Object.keys(body).some(key => key !== 'done')) throw invalid('Unknown subtask change.');
+        result = await service.run(() => service.setSubtaskDone(subtask[1], subtask[2], body.done));
+        syncAfter = result.completionChanged;
+      } else if (req.method === 'POST' && order) {
+        result = await service.run(() => service.reorderTask(order[1], body));
+        if (service.data.accounts.length) await service.queueSync();
+        if (service.error) result.notice = 'Order saved. ' + service.error;
         syncAfter = false;
       } else if (req.method === 'POST' && duration) {
         result = await service.run(() => service.adjustDuration(duration[1], body));
@@ -179,7 +193,10 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
   cookieName = 'dayline_session_' + server.address().port;
   service.origin = origin;
   service.startEstimateWorker();
-  const timer = intervalMs ? setInterval(background, intervalMs) : null;
+  // Local planners also need the clock to advance active work at its scheduled end.
+  const timer = intervalMs ? setInterval(() => {
+    if (!closed) service.queueSync().catch(() => {});
+  }, intervalMs) : null;
   timer?.unref();
   background();
   return {

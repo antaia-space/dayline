@@ -131,15 +131,20 @@ function readCatalog(result) {
     defaultModel: models.find(m => m.id === 'auto')?.id || models[0].id };
 }
 
+export function parseGeminiEstimate(text) {
+  const content = text.trim().replace(/^\x60\x60\x60(?:json)?\s*([\s\S]*?)\x60\x60\x60$/i, '$1');
+  const output = JSON.parse(content);
+  if (!output || typeof output !== 'object' || Array.isArray(output)) throw new Error('Gemini returned an invalid JSON estimate.');
+  return output;
+}
+
 function estimateResponse(run, requested) {
   if (run.code !== 0) throw new Error('Gemini CLI could not finish. Check Google sign-in and your plan’s usage limit.');
   let result, output;
   try {
     result = JSON.parse(run.stdout);
     if (result.error || typeof result.response !== 'string') throw new Error();
-    const content = result.response.trim().replace(/^\x60\x60\x60(?:json)?\s*([\s\S]*?)\x60\x60\x60$/i, '$1');
-    output = JSON.parse(content);
-    if (!output || typeof output !== 'object' || Array.isArray(output)) throw new Error();
+    output = parseGeminiEstimate(result.response);
   } catch { throw new Error('Gemini CLI returned an invalid JSON estimate.'); }
   if (result.stats?.tools?.totalCalls > 0) throw new Error('Gemini requested a tool while estimating this task.');
   const usage = {};

@@ -6,7 +6,7 @@ Dayline finds time for your to-do list. Write a task in plain English and it est
 
 ## Install on a Mac
 
-1. Sign in to GitHub with access to the Antaia repository. For an Apple silicon or Intel Mac running macOS 13 or later, download **Dayline-1.4.0-mac-universal.zip**. [Latest Mac release](https://github.com/antaia-space/dayline/releases/latest)
+1. Sign in to GitHub with access to the Antaia repository. For an Apple silicon or Intel Mac running macOS 13 or later, download **Dayline-1.5.0-mac-universal.zip**. [Latest Mac release](https://github.com/antaia-space/dayline/releases/latest)
 2. Unzip the download, drag **Dayline.app** to **Applications**, and open it. To use the same planner in your browser, choose **File → Open in Browser** in the Mac app. Both views follow your system’s light or dark appearance.
 
 The internal build uses an ad hoc signature and has not been notarized by Apple. If your Mac’s launch policy requires approval, follow Antaia’s approved procedure or run the app from source below.
@@ -36,18 +36,33 @@ To distribute a build with the company’s Desktop client already configured, se
 
 - Press **Enter** to capture a task and keep typing. Dayline saves each entry on your Mac, then creates a short title and estimates the work in the background. Open the task to see your original wording or edit the title. Changing just the title uses no model quota.
 - **“Draft a proposal by Friday”** lets Dayline estimate the duration and choose an opening before the deadline. **“Call Morgan for 20 minutes tomorrow afternoon”** sets the duration and narrows the search to tomorrow afternoon.
-- **“Eat breakfast for 30 minutes at 10:15”** reserves 10:15–10:45 on the requested day. Dayline moves flexible tasks out of the way and keeps the other bookings in place wherever possible. An overlapping meeting, an existing fixed task, or working hours can prevent the booking. The task shows the conflict in **Unscheduled**.
+- **“Eat breakfast for 30 minutes at 10:15”** reserves 10:15–10:45 on the requested day. Two queued thirty-minute tasks can then start at 10:45 and 11:15, leaving fifteen minutes before a noon meeting. An overlapping meeting, an existing fixed task, or working hours can prevent an exact booking. The task shows the conflict in **Unscheduled**.
 - In **Day agenda**, a task without a date in its text uses the day you are viewing. Choose a date in the entry field to pin the task to that day, or choose **Auto-schedule** to let Dayline find the next opening. Queued tasks keep their dates across reloads and restarts.
+- A task with several named items gets a checklist automatically. For example, **“Review access in Docs, Slack, and GitHub”** gets three checkboxes in a single scheduled block. Check the last item to complete the task, or reopen an individual item to resume just that work. Checking the parent completes the whole list.
 - Each task type has a consistent color. Select a task to see how its duration was estimated or edit its text, duration, type, or preferred day. If there is no opening long enough, the task appears under **Unscheduled**.
 - You can start using the planner before connecting a calendar. It finds time within your work hours and around your other tasks. After you connect, it also checks for conflicts with meetings.
 
+### Reorder the day
+
+Drag the grip on a flexible task above or below another task in its day. You can also click or tap the grip and choose **Move earlier** or **Move later**, or focus it and use the up and down arrow keys. The same controls let you prioritize tasks in **Unscheduled**. The desktop and browser save one order. Working hours, time windows, fixed tasks and Google meetings determine where that order fits.
+
+Dayline packs flexible work into the earliest available slots and checks Google about once a minute while the app runs. When a meeting appears, moves, or disappears, the next check replans your tasks. Already-queued work can start at the end of the preceding block when a refresh comes a few minutes later and that task would still be underway. A newly entered task starts from its capture time or later. Short blocks in the day agenda take less vertical space than long ones.
+
+Checking off a task before its scheduled start frees the whole slot. The day agenda shows the checked item beside the block that takes its place, or below it on a narrow screen. Items without a matching time appear under **Completed** on their original day. Finishing a task during its slot releases the unused portion. Reopen it to schedule the unfinished work again.
+
 ### Adjust a duration
 
+While Dayline is running, an active task that reaches its end unchecked automatically gets another five minutes. Other flexible tasks move to make room. A fixed meeting, a written cutoff or the end of working hours can shorten or stop the extension. The agenda shows the extra time separately from the estimate. Completing an active task releases the remaining time on the next plan.
+
 Use **−** or **+** at the right of a task to subtract or add five minutes per click. Dayline keeps the start time when the resized block fits. Otherwise it looks for another opening within the task’s constraints. On a completed task or an all-day event, the controls adjust the effort estimate while preserving the original calendar block.
+
+When a meeting crowds a day, Dayline first tries each task’s full estimate. If a shorter reservation keeps more work on its planned day, an eligible estimate can shrink by up to 25%, capped at 15 minutes. The task shows the planned length alongside the estimate. Future blocks return to their full length when room opens. An explicit duration in the task, a manual duration, or an exact start takes priority. Automatic adjustments do not teach the task agent a new duration.
 
 Dayline keeps a personal duration note on this Mac. For each activity, it uses the median difference between estimates and your corrections to personalize later estimates. Repeated clicks update a single example. Restoring the original suggestion removes that example. A duration you type into a new task takes precedence. Read your notes in **Settings → Task agent → Your duration notes**.
 
 ### Choose a task agent
+
+Saving a new agent or model applies the choice to new tasks in both the desktop and browser views. The settings show which model will take new tasks and which model actually handled the last estimate. Tasks already queued keep the selection they had when you entered them.
 
 New planners start with **OpenAI via Codex**, set to **gpt-6.2-sol** with **low** reasoning effort. Select the agent shown beside task entry to change it. Existing planners keep their saved choice. For offline planning, choose **Local on this Mac**. It uses Apple Foundation Models on compatible Macs with Apple Intelligence available, or built-in rules.
 

@@ -118,9 +118,10 @@ test('manual steps can exceed a day, preserve positive durations, and record com
   await step(tiny, -5);
   assert.equal(service.findTask(tiny).minutes, 1);
   await assert.rejects(step(tiny, -5), /positive/);
-  const originalEnd = service.findTask(tiny).end;
+  assert.equal(service.findTask(tiny).end, at('09:01'));
   await service.editTask(tiny, { done: true });
   await step(tiny, 5);
-  assert.equal(service.findTask(tiny).end, originalEnd);
+  assert.equal(service.findTask(tiny).end, null);
+  assert.equal(service.findTask(tiny).completedDay, '2026-11-23');
   assert.equal(service.findTask(tiny).minutes, 6);
 });

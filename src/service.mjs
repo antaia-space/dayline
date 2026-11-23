@@ -6,7 +6,11 @@ import * as googleCalendar from './google.mjs';
 import { readCalendarMeetings } from './meetings.mjs';
 import { MeetingAgenda, meetingRange } from './meeting-agenda.mjs';
 import { CATEGORIES, estimateTask, explicitStartFor, findSlot, planningRange } from './planner.mjs';
-import { canMoveLocalTask, explicitSchedulingIssue, nextFlexibleSlot, planTaskSlots } from './priority.mjs';
+import { canMoveLocalTask, explicitSchedulingIssue, nextFlexibleSlot, planFlexibleSlots, planTaskSlots } from './priority.mjs';
+import { fullTaskMinutes } from './calendar-fit.mjs';
+import { releaseCompletedTime, reopenCompletedTask } from './completion.mjs';
+import { setChecklistCompletion, updateSubtasks } from './subtasks.mjs';
+import { capOverrun, observeOverrun, proposeOverrun } from './overrun.mjs';
 import { localTaskTitle, recordDurationFeedback } from './task-learning.mjs';
 import { adjustTaskDuration, previewAdjustedSlot, setManualDuration } from './duration.mjs';
 import { agentSelection } from './agents/manager.mjs';
@@ -50,12 +54,15 @@ function capturedAt(value, fallback) {
   return date > fallback ? fallback : date;
 }
 
+const completedBesideMeeting = task => task.done && task.remote?.calendarAppointment && task.completedPlannedSlot;
+
 function safeTask(task) {
-  const { remote, dirty, intent, pausedSync, lastLocalSlot, held, deleting, estimateJob, estimateOverrides,
-    estimateRequestedAt, estimateRetryIds, estimateRemoteTitle, durationRequests, durationCheckPending, ...visible } = task;
+  const { remote, dirty, intent, pausedSync, lastLocalSlot, held, deleting, estimateJob, estimateOverrides, orderRequestedAt,
+    estimateRequestedAt, estimateRetryIds, estimateRemoteTitle, durationRequests, durationCheckPending, overrunWatchStart, ...visible } = task;
   const text = estimateJob?.text ?? task.text;
   const active = task.estimateState === 'queued' || task.estimateState === 'estimating';
-  return { ...visible, text, title: task.title || localTaskTitle(text), allDay: Boolean(remote?.allDay), hasCalendarEvent: Boolean(remote),
+  return { ...visible, ...(completedBesideMeeting(task) && { start: null, end: null }),
+    text, title: task.title || localTaskTitle(text), allDay: Boolean(remote?.allDay), hasCalendarEvent: Boolean(remote),
     estimateState: task.estimateState ?? (task.pendingEstimate ? 'failed' : null),
     ...(active && estimateJob && { estimateAgent: { ...estimateJob.selection } }) };
 }
@@ -80,7 +87,11 @@ function estimateOverrides(task, timeZone) {
 }
 
 function applyEstimate(task, estimate, overrides) {
+  if (!estimate.pendingEstimate) updateSubtasks(task, estimate.subtasks);
   if (!estimate.pendingEstimate) {
+    delete task.calendarFit;
+    delete task.calendarProgressMinutes;
+    delete task.calendarInterruptedAt;
     if (overrides.title || estimate.title) task.title = overrides.title || estimate.title;
     task.baseMinutes = estimate.baseMinutes ?? estimate.minutes;
     task.estimatedMinutes = estimate.estimatedMinutes ?? estimate.minutes;
@@ -137,8 +148,26 @@ function combinedRanges(ranges) {
   return combined.map(({ start, end }) => ({ start: new Date(start).toISOString(), end: new Date(end).toISOString() }));
 }
 
+function uncoveredRanges(requested, checked) {
+  const gaps = [];
+  for (const range of combinedRanges(requested)) {
+    let cursor = range.start;
+    for (const known of checked) {
+      if (known.end <= cursor) continue;
+      if (known.start >= range.end) break;
+      if (cursor < known.start) gaps.push({ start: cursor, end: known.start });
+      if (cursor < known.end) cursor = known.end;
+      if (cursor >= range.end) break;
+    }
+    if (cursor < range.end) gaps.push({ start: cursor, end: range.end });
+  }
+  return gaps;
+}
+
 const overlaps = (a, b) => Date.parse(a.start) < Date.parse(b.end) && Date.parse(b.start) < Date.parse(a.end);
 const sameSlot = (a, b) => a && b && Date.parse(a.start) === Date.parse(b.start) && Date.parse(a.end) === Date.parse(b.end);
+const slotOf = ({ start, end }) => ({ start, end });
+const reservationOf = task => ({ ...task.remote, taskId: task.id, ...slotOf(task) });
 
 // Produce possible gaps for the planner. Google can merge an owned reservation
 // with an unrelated meeting, so a proposed gap is always verified by event ID.
@@ -189,12 +218,24 @@ export class DaylineService {
     this.refreshes = new Map();
     this.discovery = null;
     this.discoveryErrors = new Set();
-    const migrated = migrateCalendarModes(this.data);
+    let migrated = migrateCalendarModes(this.data);
     if (this.data.settings.calendarMode === 'availability' && this.data.tasks.some(t =>
       t.remote || t.intent || t.deleting || Object.keys(t.dirty || {}).length)) {
       this.pauseEventSync();
-      this.store.save();
-    } else if (migrated) this.store.save();
+      migrated = true;
+    }
+    // Release checked-off local blocks before the first network request or
+    // Keychain prompt, including when opening an older planner offline.
+    const now = this.clock();
+    for (const task of this.data.tasks) {
+      if (!Array.isArray(task.subtasks)) { updateSubtasks(task); migrated = true; }
+      if (task.done && this.releaseCompletion(task, now)) migrated = true;
+    }
+    if (this.data.accounts.length && this.data.settings.calendarMode === 'availability' && !this.data.tasks.some(task => task.overrunWatchStart)) {
+      const observed = observeOverrun(this.data.tasks, now);
+      if (observed.some((task, i) => task !== this.data.tasks[i])) { this.data.tasks = observed; migrated = true; }
+    }
+    if (migrated) this.store.save();
     if (!this.data.accounts.length) this.persistLocalPlan(this.data.tasks);
   }
 
@@ -249,11 +290,12 @@ export class DaylineService {
   }
 
   snapshot() {
+    const now = this.clock();
     const accounts = this.data.accounts.map(account => ({
       sub: account.sub, email: account.email, mode: account.mode, meetingDetails: this.canReadMeetings(account)
     }));
     return {
-      tasks: this.data.tasks.map(safeTask),
+      tasks: this.data.tasks.map(task => ({ ...safeTask(task), canReorder: this.canReorderTask(task, now) })),
       settings: structuredClone(this.data.settings),
       categories: CATEGORIES,
       calendars: this.calendars.map(publicCalendar),
@@ -264,7 +306,7 @@ export class DaylineService {
         syncing: this.syncing, lastSync: this.data.lastSync, error: this.error
       },
       busy: this.busy, busyStart: this.busyRange?.start || null, busyEnd: this.busyRange?.end || null,
-      now: this.clock().toISOString(),
+      now: now.toISOString(),
       appVersion: metadata.version
     };
   }
@@ -287,35 +329,121 @@ export class DaylineService {
     return task;
   }
 
+  canReorderTask(task, now) {
+    if (task.done || task.deleting || task.held || task.pendingEstimate || task.estimateJob || task.intent ||
+        (task.end && Date.parse(task.end) <= now.getTime()) || explicitStartFor(task, this.data.settings.timeZone)) return false;
+    return !task.remote || this.movableFlexibleEvent(task, now);
+  }
+
+  reorderTask(taskId, { targetId, placement, day }) {
+    if (!['before', 'after'].includes(placement) || typeof targetId !== 'string' || !/^[a-f0-9]{32}$/.test(targetId) || taskId === targetId) {
+      throw invalid('Choose another task to move this one before or after.');
+    }
+    const task = this.findTask(taskId);
+    const target = this.findTask(targetId);
+    const now = this.clock();
+    const taskDay = item => item.start ? DateTime.fromISO(item.start, { zone: this.data.settings.timeZone }).toISODate() : 'unscheduled';
+    const group = taskDay(task);
+    if ((day != null && day !== group) || taskDay(target) !== group) throw invalid('The schedule changed. Choose two tasks in the same day or in Unscheduled.', 409);
+    if (!this.canReorderTask(task, now) || !this.canReorderTask(target, now)) throw invalid('These tasks can no longer be rearranged. Refresh your plan.', 409);
+
+    // Only reorder members of the displayed group. Requests from the desktop
+    // and browser share this serialized list, including tasks captured meanwhile.
+    const members = this.data.tasks.filter(item => taskDay(item) === group && this.canReorderTask(item, now));
+    const reordered = members.filter(item => item !== task);
+    reordered.splice(reordered.indexOf(target) + (placement === 'after' ? 1 : 0), 0, task);
+    const later = placement === 'after' ? task : target;
+    const displaced = later.start && Date.parse(later.start) < now.getTime() && !later.remote ? later : null;
+    if (reordered.every((item, i) => members[i] === item) && !displaced) return { id: task.id };
+    const indices = new Map(members.map((item, i) => [item, i]));
+    const proposed = this.data.tasks.map(original => {
+      if (!indices.has(original)) return original;
+      const item = reordered[indices.get(original)];
+      if (item !== task && item !== displaced) return item;
+      const changed = { ...item, orderRequestedAt: now.toISOString() };
+      if (item === displaced) {
+        // The user explicitly deferred an unfinished block. Its full remaining
+        // estimate returns to the queue and will start in a new verified slot.
+        changed.start = changed.end = null;
+        changed.syncStatus = 'pending';
+        delete changed.lastLocalSlot;
+        delete changed.durationCheckPending;
+      }
+      return changed;
+    });
+    if (this.data.accounts.length) this.commitTaskList(proposed);
+    else this.persistLocalPlan(proposed, true);
+    return { id: task.id };
+  }
+
   localBusy(except) {
     return this.data.tasks.filter(t => t.id !== except && t.start && t.end && !t.deleting && (!t.pendingEstimate || t.estimateJob?.protected))
       .map(({ start, end }) => ({ start, end }));
   }
 
-  plannedTasks(tasks, busy, now) {
-    const context = { tasks, busy, now, settings: this.data.settings };
-    const placements = planTaskSlots(context);
-    return tasks.map(task => {
+  releaseCompletion(task, now) {
+    if (task.remote && this.data.settings.calendarMode === 'sync') return this.projectCalendarCompletion(task, now);
+    return releaseCompletedTime(task, now, this.data.settings.timeZone);
+  }
+
+  plannedTasks(tasks, busy, now, { canMove, overruns = false } = {}) {
+    if (overruns) {
+      tasks = tasks.map(task => {
+        const cap = capOverrun({ task, tasks, busy, now, settings: this.data.settings });
+        if (!cap) return task;
+        const next = { ...task, end: cap.end, overrunMinutes: cap.overrunMinutes };
+        if (!cap.overrunMinutes) delete next.overrunMinutes;
+        return next;
+      });
+      const proposal = proposeOverrun({ tasks, busy, now, settings: this.data.settings });
+      if (proposal) {
+        const displaced = new Set(proposal.displaced);
+        tasks = tasks.map(task => {
+          if (task === proposal.task) return { ...task, end: proposal.end, overrunMinutes: proposal.overrunMinutes };
+          if (displaced.has(task)) return { ...task, start: null, end: null };
+          return task;
+        });
+      }
+    }
+    const context = { tasks, busy, now, settings: this.data.settings, canMove };
+    const { placements, remainingWork } = planTaskSlots(context);
+    const planned = tasks.map(task => {
       if (!placements.has(task.id)) return task;
       const slot = placements.get(task.id);
+      const progress = remainingWork.get(task.id);
+      const normal = progress?.minutes ?? fullTaskMinutes(task);
+      const minutes = slot ? slot.minutes ?? task.minutes : normal;
       const start = slot?.start ?? null, end = slot?.end ?? null;
       const syncStatus = slot ? 'local' : 'attention';
       const issue = slot ? null : explicitSchedulingIssue({ ...context, task, placements }) || noSlot;
-      if (task.start === start && task.end === end && task.syncStatus === syncStatus && task.issue === issue &&
+      if (!progress && task.minutes === minutes && task.start === start && task.end === end && task.syncStatus === syncStatus && task.issue === issue &&
           !task.lastLocalSlot && !(slot && task.durationCheckPending)) return task;
-      const next = { ...task, start, end, syncStatus, issue };
+      const next = { ...task, start, end, minutes, syncStatus, issue };
+      if (task.overrunMinutes && (start !== task.start || progress)) delete next.overrunMinutes;
+      if (minutes < normal) next.calendarFit = { originalMinutes: normal };
+      else delete next.calendarFit;
+      if (progress) {
+        next.calendarInterruptedAt = now.toISOString();
+        if (progress.credited) next.calendarProgressMinutes = (task.calendarProgressMinutes || 0) + progress.credited;
+      }
       delete next.lastLocalSlot;
       if (slot) delete next.durationCheckPending;
       return next;
     });
+    return overruns ? observeOverrun(planned, now) : planned;
   }
 
   // Persist the entire local rearrangement together. Failed writes cannot move a
   // sibling while leaving the edited task (or its new duration) uncommitted.
   persistLocalPlan(tasks, forceSave = false) {
     const previous = this.data.tasks;
-    const proposed = this.plannedTasks(tasks, [], this.clock());
+    const proposed = this.plannedTasks(tasks, [], this.clock(), { overruns: true });
     if (!forceSave && previous.length === proposed.length && proposed.every((task, i) => task === previous[i])) return;
+    this.commitTaskList(proposed);
+  }
+
+  commitTaskList(proposed) {
+    const previous = this.data.tasks;
     const byId = new Map(previous.map(task => [task.id, task]));
     this.data.tasks = proposed;
     try { this.store.save(); }
@@ -345,14 +473,25 @@ export class DaylineService {
     if (day) overrides.day = day;
     else if (viewDay) overrides.viewDay = viewDay;
     task.estimateOverrides = overrides;
+    updateSubtasks(task);
     return task;
+  }
+
+  captureSelection(clientAgent, createdAt) {
+    if (clientAgent == null) return undefined;
+    const captured = agentSelection(clientAgent);
+    const saved = this.data.agent;
+    // An old browser tab may still display the former provider. Preserve
+    // offline entries captured before the switch and use the new choice after it.
+    if (Number.isSafeInteger(saved?.selectedAt) && Date.parse(createdAt) >= saved.selectedAt) return agentSelection(saved);
+    return captured;
   }
 
   async createTask(input) {
     const task = this.captureDraft(input);
     if (!task) return input.requestId;
     const estimate = await this.estimate(task.text, { now: new Date(task.createdAt), timeZone: input.captureTimeZone || this.data.settings.timeZone,
-      taskId: task.id, ...(input.captureAgent != null && { selection: agentSelection(input.captureAgent) }) });
+      taskId: task.id, ...(input.captureAgent != null && { selection: this.captureSelection(input.captureAgent, task.createdAt) }) });
     applyEstimate(task, estimate, task.estimateOverrides);
     if (task.pendingEstimate) waitForEstimate(task);
     if (!this.data.accounts.length) {
@@ -369,7 +508,7 @@ export class DaylineService {
     if (!task) return input.requestId;
     task.title = localTaskTitle(task.text);
     task.earliestDay = task.latestDay = task.estimateOverrides.day || task.estimateOverrides.viewDay || null;
-    this.stageEstimate(task, task.text, false, { at: task.createdAt, timeZone: input.captureTimeZone, agent: input.captureAgent });
+    this.stageEstimate(task, task.text, false, { at: task.createdAt, timeZone: input.captureTimeZone, agent: this.captureSelection(input.captureAgent, task.createdAt) });
     this.data.tasks.push(task);
     try { this.store.save(); }
     catch (error) {
@@ -397,7 +536,9 @@ export class DaylineService {
     task.pendingEstimate = true;
     task.estimateState = 'queued';
     if (!protectedTask) {
+      const wordingChanged = task.text !== text;
       task.text = text;
+      if (wordingChanged) updateSubtasks(task);
       task.title = task.estimateOverrides?.title || localTaskTitle(text);
     }
     waitForEstimate(task);
@@ -522,8 +663,8 @@ export class DaylineService {
     const overrides = estimateOverrides(task, zone);
     const previous = captureTask(task);
     const wasPending = task.pendingEstimate;
-    applyEstimate(task, estimate, overrides);
     task.text = text;
+    applyEstimate(task, estimate, overrides);
     task.estimateRequestedAt = requested.toISOString();
     if (previous.text !== text || previous.title !== task.title) task.dirty.text = true;
     if (previous.category !== task.category) task.dirty.category = true;
@@ -551,6 +692,54 @@ export class DaylineService {
   adjustDuration(taskId, input) {
     const task = this.findTask(taskId);
     return adjustTaskDuration(this, task, input, estimateOverrides(task, this.data.settings.timeZone));
+  }
+
+  setTaskCompletion(changed, done, propagate = true) {
+    if (typeof done !== 'boolean') throw invalid('Choose complete or open.');
+    if (changed.done === done) return;
+    changed.done = done;
+    if (propagate) setChecklistCompletion(changed, done);
+    changed.dirty.done = true;
+    const now = this.clock();
+    if (changed.done) {
+      changed.completedAt = now.toISOString();
+      this.releaseCompletion(changed, now);
+    } else if (changed.remote?.calendarAppointment && this.data.settings.calendarMode === 'sync') {
+      delete changed.completedAt;
+      delete changed.completedDay;
+      delete changed.completedPlannedSlot;
+    } else {
+      reopenCompletedTask(changed, now);
+      if (!changed.pendingEstimate) changed.dirty.schedule = true;
+    }
+    if (changed.done && changed.estimateJob) {
+      if (changed.estimateJob.protected) {
+        keepRevisionWording(changed);
+      } else {
+        changed.estimateState = 'failed';
+        changed.estimateJob.notice = 'Estimation stopped when you completed this task. Reopen and retry to schedule it.';
+      }
+    }
+  }
+
+  setSubtaskDone(taskId, subtaskId, done) {
+    const task = this.findTask(taskId);
+    if (typeof done !== 'boolean') throw invalid('Choose complete or open for this subtask.');
+    if (task.deleting) throw invalid('This task is waiting for its calendar entry to be removed.', 409);
+    const changed = structuredClone(task);
+    const item = changed.subtasks?.find(child => child.id === subtaskId);
+    if (!item) throw invalid('This subtask is no longer on the task.', 404);
+    if (item.done === done) return { id: task.id, done: task.done, completionChanged: false };
+    item.done = done;
+    const complete = changed.subtasks.every(child => child.done);
+    const completionChanged = complete !== task.done;
+    if (completionChanged) {
+      this.setTaskCompletion(changed, complete, false);
+      this.saveEdit(task, changed);
+    } else {
+      this.commitEdit(task, changed);
+    }
+    return { id: task.id, done: complete, completionChanged };
   }
 
   async editTask(taskId, input, queueEstimate = false) {
@@ -596,21 +785,7 @@ export class DaylineService {
         changed.dirty.schedule = true;
       }
     }
-    if (owns(input, 'done')) {
-      if (typeof input.done !== 'boolean') throw invalid('Choose complete or open.');
-      if (changed.done !== input.done) {
-        changed.done = input.done;
-        changed.dirty.done = true;
-        if (changed.done && changed.estimateJob) {
-          if (changed.estimateJob.protected) {
-            keepRevisionWording(changed);
-          } else {
-            changed.estimateState = 'failed';
-            changed.estimateJob.notice = 'Estimation stopped when you completed this task. Reopen and retry to schedule it.';
-          }
-        }
-      }
-    }
+    if (owns(input, 'done')) this.setTaskCompletion(changed, input.done);
     const learning = this.data.durationLearning;
     if (owns(input, 'minutes') && task.minutes !== changed.minutes) recordDurationFeedback(this.data, task, changed);
     try { this.saveEdit(task, changed, { durationOnly: Object.keys(input).length === 1 && owns(input, 'minutes') }); }
@@ -660,6 +835,15 @@ export class DaylineService {
 
   commitEdit(task, changed) {
     if (!this.data.accounts.length) return this.persistLocalPlan(this.data.tasks.map(t => t === task ? changed : t));
+    if (changed.done !== task.done && this.data.settings.calendarMode === 'availability' && this.busyRange && !this.error) {
+      const now = this.clock();
+      const proposed = this.data.tasks.map(t => t === task ? changed : t);
+      const covers = range => range && Date.parse(range.start) >= Date.parse(this.busyRange.start) && Date.parse(range.end) <= Date.parse(this.busyRange.end);
+      const verified = new Set(proposed.filter(t => covers(planningRange({ task: t, settings: this.data.settings, now })) &&
+        (!t.start || covers(t)) && (!t.lastLocalSlot || covers(t.lastLocalSlot))));
+      const canMove = (t, at) => verified.has(t) && canMoveLocalTask(t, at);
+      return this.commitTaskList(this.plannedTasks(proposed, this.busy, now, { canMove }));
+    }
     // Persist the candidate first. On disk failure the original record, including
     // its in-flight model claim or retry identifier, remains live in this process.
     const index = this.data.tasks.indexOf(task);
@@ -701,6 +885,8 @@ export class DaylineService {
     this.data.settings = next;
     if (['excludedCalendarIds', 'timeZone', 'calendarMode', 'targetCalendarId'].some(key => JSON.stringify(old[key]) !== JSON.stringify(next[key]))) {
       this.meetingAgenda.clear();
+      this.busy = [];
+      this.busyRange = null;
     }
     if (next.calendarMode !== old.calendarMode) {
       this.auth.clear();
@@ -718,6 +904,7 @@ export class DaylineService {
         if (!this.data.accounts.length && !task.remote && !task.intent) continue;
         if (task.pendingEstimate || task.done || task.held || task.deleting || task.remote?.allDay ||
             (task.end && Date.parse(task.end) <= this.clock().getTime())) continue;
+        if (next.calendarMode === 'availability' && task.start && Date.parse(task.start) < this.clock().getTime()) continue;
         if (task.start && this.fitsHours(task.start, task.end)) continue;
         if (next.calendarMode === 'availability') {
           if (task.start) task.lastLocalSlot = { start: task.start, end: task.end };
@@ -800,6 +987,8 @@ export class DaylineService {
     else this.data.accounts.push(account);
     this.discovery = null;
     this.meetingAgenda.clear();
+    this.busy = [];
+    this.busyRange = null;
     this.refreshes.delete(profile.sub);
     this.cacheToken(profile.sub, tokens, request.mode);
     this.error = null;
@@ -894,8 +1083,8 @@ export class DaylineService {
     const target = calendarMode === 'sync' ? this.selectedTarget()?.id : null;
     const calendars = this.calendars.filter(c => enabled.has(c.sub) && c.canCheckAvailability !== false &&
       c.accessRole !== 'freeBusyReader' && (!excludedCalendarIds.includes(c.id) || c.id === target));
-    const representedTaskIds = new Set(this.data.tasks.filter(task => task.remote || task.intent ||
-      (task.pausedSync?.original?.start && task.start === task.pausedSync.original.start && task.end === task.pausedSync.original.end))
+    const representedTaskIds = new Set(this.data.tasks.filter(task => !completedBesideMeeting(task) &&
+      (task.remote || task.intent || (task.pausedSync?.original?.start && task.start === task.pausedSync.original.start && task.end === task.pausedSync.original.end)))
       .map(task => task.id));
     const week = await this.meetingAgenda.read(calendars, range, async (calendar, interval) =>
       this.readMeetings(await this.token(calendar.sub), { ...calendar, representedTaskIds }, interval));
@@ -935,30 +1124,48 @@ export class DaylineService {
     return result;
   }
 
-  async availability(range, destinationId, reservations = []) {
+  async availability(range, destinationId, reservations = [], precise = false) {
     if (!Array.isArray(reservations)) reservations = [reservations];
     const byCalendar = new Map();
     for (const ref of reservations) {
       this.syncPermission(ref.sub);
       const key = recordKey(ref.sub, ref.calendarId);
       if (!byCalendar.has(key)) byCalendar.set(key, []);
-      byCalendar.get(key).push(ref.eventId);
+      byCalendar.get(key).push(ref);
     }
     const excluded = new Set(this.data.settings.excludedCalendarIds);
     const target = this.data.settings.calendarMode === 'sync' ? this.selectedTarget() : null;
-    const chosen = this.calendars.filter(c => c.canCheckAvailability !== false &&
-      (c.id === target?.id || c.id === destinationId || byCalendar.has(c.id) || !excluded.has(c.id)));
+    const selected = this.calendars.filter(c => c.canCheckAvailability !== false &&
+      (c.id === target?.id || c.id === destinationId || (!precise && byCalendar.has(c.id)) || !excluded.has(c.id)));
+    // A shared calendar can be listed by more than one Google identity. Read
+    // the physical source once through the grant that can verify our event IDs.
+    const physicalId = calendar => calendar.providerId === 'primary' ? calendar.id : calendar.providerId;
+    const inspectors = new Map();
+    for (const calendar of selected) {
+      if (byCalendar.has(calendar.id) && calendar.canInspectReservations === true) {
+        const source = physicalId(calendar);
+        if (!inspectors.has(source)) inspectors.set(source,{ calendar, reservations:[] });
+        inspectors.get(source).reservations.push(...byCalendar.get(calendar.id));
+      }
+    }
+    const chosen = selected.filter(c => !inspectors.has(physicalId(c)) || inspectors.get(physicalId(c)).calendar === c);
     if (!chosen.length) throw invalid('Select at least one calendar to check availability.', 409);
     const groups = await Promise.all(this.data.accounts.map(async account => {
       const calendars = chosen.filter(c => c.sub === account.sub);
       if (!calendars.length) return [];
       try {
         const access = await this.token(account.sub);
-        const inspect = calendars.filter(c => byCalendar.has(c.id) && c.canInspectReservations === true);
+        const inspect = calendars.filter(c => inspectors.has(physicalId(c)));
         const calendarIds = calendars.filter(c => !inspect.includes(c)).map(c => c.providerId);
         const busy = calendarIds.length ? await this.google.getBusy(access, { ...range, calendarIds }) : [];
         for (const calendar of inspect) {
-          const eventIds = byCalendar.get(calendar.id);
+          const matching = inspectors.get(physicalId(calendar)).reservations;
+          if (precise) {
+            busy.push(...await this.google.busyWithoutReservations(access, { ...range, calendarId: calendar.providerId,
+              timeZone: calendar.timeZone, reservations: matching, confirm: precise === 'confirm' }));
+            continue;
+          }
+          const eventIds = matching.map(ref => ref.eventId);
           if (await this.google.hasOtherBusyEvent(access, { ...range, calendarId: calendar.providerId, eventId: eventIds[0], eventIds })) {
             busy.push(range);
           }
@@ -976,6 +1183,42 @@ export class DaylineService {
       }
     }));
     return groups.flat();
+  }
+
+  projectCalendarCompletion(task, now = this.clock()) {
+    const { remote } = task, zone = this.data.settings.timeZone;
+    if (!remote || !task.done) return false;
+    const changedFields = () => JSON.stringify([task.start,task.end,task.completedDay,task.completedPlannedSlot,task.overrunMinutes,task.overrunWatchStart,
+      task.lastLocalSlot,task.durationCheckPending,remote,task.dirty]);
+    const before = changedFields();
+    if (!remote.providerSlot && task.start && task.end) remote.providerSlot = slotOf(task);
+    const physical = remote.providerSlot;
+    if (remote.calendarAppointment) {
+      const projection = { ...task };
+      releaseCompletedTime(projection,now,zone);
+      if (projection.completedDay) task.completedDay = projection.completedDay;
+      if (projection.completedPlannedSlot) task.completedPlannedSlot = projection.completedPlannedSlot;
+      delete remote.releasedSlot;
+      delete task.dirty.release;
+    } else {
+      const known = Date.parse(task.completedAt);
+      const cutoff = Number.isFinite(known) ? Math.min(known,now.getTime()) : now.getTime();
+      if (!remote.releasedSlot && physical && Date.parse(physical.end) > cutoff) {
+        const partial = !remote.allDay && Number.isFinite(known) && Date.parse(physical.start) < cutoff;
+        remote.releasedSlot = { ...physical, cutoff: new Date(cutoff).toISOString(), kind: partial ? 'trim' : 'free' };
+        if (partial) remote.releasedSlot.providerEnd = new Date(Math.min(Date.parse(physical.end),Math.ceil(cutoff / 1000) * 1000)).toISOString();
+      }
+      const release = remote.releasedSlot;
+      if (release) {
+        Object.assign(task,slotOf(release));
+        releaseCompletedTime(task,new Date(release.cutoff),zone);
+        const changed = release.kind === 'free' ? !remote.transparent : Date.parse(physical?.end) !== Date.parse(release.providerEnd || release.cutoff);
+        if (changed) task.dirty.release = true;
+        else delete task.dirty.release;
+      } else releaseCompletedTime(task,now,zone);
+      delete task.dirty.schedule;
+    }
+    return before !== changedFields();
   }
 
   acceptRemote(task, event, ref, { pulled = false } = {}) {
@@ -996,24 +1239,71 @@ export class DaylineService {
       }
       else task.text = event.text;
     }
+    const wasDone = Boolean(task.done);
     if (!task.dirty.done) task.done = event.done;
+    if (pulled && wasDone !== task.done) setChecklistCompletion(task,task.done);
+    const now = this.clock();
+    if (task.done && !wasDone && !task.completedAt) {
+      const updated = Date.parse(event.updated);
+      task.completedAt = Number.isFinite(updated) && updated <= now.getTime() ? new Date(updated).toISOString() : now.toISOString();
+    }
     // Google all-day dates float with the calendar day. The board groups by local
     // instants, and a day-long reservation should preserve the task’s estimated effort.
     const allDay = DAY.test(event.start) && DAY.test(event.end);
     const instant = value => allDay ? DateTime.fromISO(value, { zone: this.data.settings.timeZone }).toUTC().toISO() : value;
     const slot = { start: instant(event.start), end: instant(event.end) };
-    const manualTime = ref.manualTime || (pulled && task.start && !sameSlot(task, slot) && !sameSlot(ref.proposedSlot, slot));
+    const priorSlot = ref.providerSlot || (task.start && task.end ? task : null);
+    const manualChange = pulled && priorSlot && !sameSlot(priorSlot, slot) && !sameSlot(ref.proposedSlot, slot);
+    const manualTime = ref.manualTime || manualChange;
+    const rebooked = !task.done && !event.done && !event.transparent && ref.proposedSlot?.rebook && sameSlot(ref.proposedSlot,slot);
+    const released = ref.proposedSlot?.completion && ref.proposedSlot.completionDone === task.done && event.done === task.done &&
+      sameSlot(ref.proposedSlot,slot) && (ref.proposedSlot.completion === 'trim' || event.transparent);
+    if (released) delete task.dirty.done;
+    if (rebooked) {
+      delete task.dirty.done;
+      if (scheduleFields.every(key => task[key] === ref.proposedSlot.rebook[key])) delete task.dirty.schedule;
+    }
+    if (manualChange) {
+      delete task.calendarFit;
+      delete task.overrunMinutes;
+      delete task.overrunWatchStart;
+    }
+    if (sameSlot(ref.proposedSlot,slot) && Number.isSafeInteger(ref.proposedSlot?.overrunMinutes)) {
+      task.overrunMinutes = ref.proposedSlot.overrunMinutes;
+    }
+    if (sameSlot(ref.proposedSlot, slot) && owns(ref.proposedSlot, 'originalMinutes') && task.estimateOverrides?.minutes == null) {
+      if (ref.proposedSlot.originalMinutes) task.calendarFit = { originalMinutes: ref.proposedSlot.originalMinutes };
+      else delete task.calendarFit;
+    }
     Object.assign(task, slot);
-    if (!allDay && !task.dirty.schedule && !(task.done && task.estimateOverrides?.minutes != null)) {
+    if (!allDay && !task.overrunMinutes && !task.dirty.schedule && !ref.releasedSlot && !(task.done && (task.estimateOverrides?.minutes != null || ref.proposedSlot?.completion))) {
       const length = Math.round((Date.parse(task.end) - Date.parse(task.start)) / 60000);
       if (length > 0) task.minutes = length;
     }
-    if (task.remote && task.remote.done !== event.done && !task.dirty.done) task.dirty.link = true;
-    task.remote = { sub: ref.sub, calendarId: ref.calendarId, eventId: event.eventId, etag: event.etag, done: event.done };
+    if (task.remote && task.remote.done !== event.done && !task.dirty.done && !rebooked && !released) task.dirty.link = true;
+    task.remote = { sub: ref.sub, calendarId: ref.calendarId, eventId: event.eventId, etag: event.etag, done: event.done, providerSlot:slot };
+    if (event.transparent) task.remote.transparent = true;
+    if (ref.releasedSlot && !rebooked && !event.calendarAppointment) task.remote.releasedSlot = ref.releasedSlot;
     if (manualTime) task.remote.manualTime = true;
     if (event.calendarAppointment) task.remote.calendarAppointment = true;
     if (allDay) task.remote.allDay = { start: event.start, end: event.end };
     task.intent = null;
+    if (task.done) {
+      if (manualChange && task.remote.releasedSlot?.kind === 'trim') {
+        // Respect a later manual placement while keeping a completed task free.
+        task.remote.releasedSlot = { ...task.remote.releasedSlot, kind: 'free' };
+      }
+      this.projectCalendarCompletion(task,now);
+    } else if (!event.calendarAppointment && !rebooked && (ref.releasedSlot || ref.done || wasDone)) {
+      task.remote.releasedSlot ||= { ...slot, kind: 'free', cutoff: now.toISOString() };
+      if (!task.reopenedAt || wasDone) reopenCompletedTask(task,now);
+      task.start = task.end = null;
+      task.dirty.schedule = true;
+    } else if (!task.done && event.calendarAppointment) {
+      delete task.completedAt;
+      delete task.completedDay;
+      delete task.completedPlannedSlot;
+    }
     task.issue = null;
     task.syncStatus = Object.keys(task.dirty).length ? 'pending' : 'synced';
   }
@@ -1078,7 +1368,15 @@ export class DaylineService {
     return cache.get(key);
   }
 
-  movableFlexibleEvent(task, now) {
+  async bookingAvailability(task,range,destination,cache) {
+    const ref = task.remote;
+    if (ref?.releasedSlot && !ref.transparent && !ref.allDay && overlaps(ref.providerSlot,range)) {
+      return this.availability(range,destination,[{...ref,taskId:task.id,...ref.providerSlot}],true);
+    }
+    return this.cachedAvailability(range,destination,cache);
+  }
+
+  movableFlexibleEvent(task, now = this.clock()) {
     if (!task.start || !task.end || Date.parse(task.start) <= now.getTime() || task.done || task.held ||
         task.deleting || task.pendingEstimate || task.intent || explicitStartFor(task, this.data.settings.timeZone)) return false;
     if (!task.remote) return true; // A local preview has no event to move.
@@ -1104,16 +1402,209 @@ export class DaylineService {
     }
   }
 
-  async writeEvent(task, ref, slot, rangeCache) {
+  async writeEvent(task, ref, slot, rangeCache, completionAction) {
     // Keep the old confirmed time until the PATCH returns. After an interrupted
     // write, the next pull can distinguish our move from a person's calendar edit.
-    if (task.remote && !sameSlot(task, slot)) {
-      ref.proposedSlot = { start: slot.start, end: slot.end };
+    const plannedEffort = Number.isSafeInteger(slot.minutes);
+    if ((task.remote && !sameSlot(task, slot)) || plannedEffort || completionAction) {
+      ref.proposedSlot = task.remote?.allDay && DAY.test(slot.start) ? { ...task.remote.providerSlot } : slotOf(slot);
+      if (completionAction === 'book') {
+        ref.proposedSlot.rebook = Object.fromEntries(scheduleFields.map(key => [key,task[key]]));
+      } else if (completionAction) {
+        ref.proposedSlot.completion = completionAction;
+        ref.proposedSlot.completionDone = task.done;
+      }
+      if (Number.isSafeInteger(slot.overrunMinutes)) ref.proposedSlot.overrunMinutes = slot.overrunMinutes;
+      if (plannedEffort) {
+        const full = fullTaskMinutes(task);
+        ref.proposedSlot.originalMinutes = slot.minutes < full ? full : null;
+      }
+      if (task.intent) task.intent.proposedSlot = ref.proposedSlot;
       this.store.save();
     }
     rangeCache.clear();
-    return this.google.putTaskEvent(await this.eventToken(ref.sub), { ...ref, task: { ...task, ...slot, text: task.title || task.text },
+    return this.google.putTaskEvent(await this.eventToken(ref.sub), { ...ref, completionAction, adjustingOverrun:Number.isSafeInteger(slot.overrunMinutes),
+      task: { ...task, ...slot, text: task.title || task.text },
       actionUrl: this.origin + '/action/' + task.id + '?done=' + (task.done ? '0' : '1'), expectedEtag: task.remote?.etag || null });
+  }
+
+  async moveFlexibleEvent(task, slot, allowed, cache, canMove = other => this.movableFlexibleEvent(other)) {
+    if (!canMove(task) || Date.parse(slot.start) < this.clock().getTime()) {
+      throw invalid('This time has already started or become fixed. Sync again to check the latest opening.', 409);
+    }
+    const dest = recordKey(task.remote.sub, task.remote.calendarId);
+    const refs = allowed.filter(other => overlaps(other, slot)).map(reservationOf);
+    if ((await this.availability(slot, dest, refs, 'confirm')).length) {
+      throw invalid('An event now occupies the proposed time. Sync again to check the calendar.', 409);
+    }
+    if (Date.parse(slot.start) < this.clock().getTime() || !canMove(task)) {
+      throw invalid('This time began while Google was checking availability. Sync again for a future opening.', 409);
+    }
+    const ref = task.remote;
+    const event = await this.writeEvent(task, ref, slot, cache);
+    this.acceptRemote(task, event, ref);
+    this.store.save();
+  }
+
+  eligibleEventOverrun(task) {
+    return Boolean(task.remote && !task.remote.transparent && this.movableFlexibleEvent(task,new Date(Date.parse(task.start) - 1)));
+  }
+
+  async extendRunningEvent(cache) {
+    const { tasks, settings } = this.data;
+    const now = this.clock();
+    const canExtend = task => this.eligibleEventOverrun(task);
+    const canYield = task => canExtend(task) && task.overrunWatchStart !== task.start;
+    const context = { tasks, settings, now, canExtend, canYield };
+    for (const task of tasks) {
+      if (!task.overrunMinutes || !canExtend(task) || Date.parse(task.end) <= now.getTime()) continue;
+      const dest = recordKey(task.remote.sub,task.remote.calendarId);
+      const refs = [task,...tasks.filter(other => other !== task && canYield(other) && overlaps(other,task))].map(reservationOf);
+      const busy = await this.availability(slotOf(task),dest,refs,true);
+      const cap = capOverrun({ ...context, task, busy });
+      if (cap) {
+        const ref = task.remote;
+        const event = await this.writeEvent(task,ref,{ ...slotOf(cap), overrunMinutes:cap.overrunMinutes },cache);
+        this.acceptRemote(task,event,ref);
+        this.store.save();
+        return;
+      }
+    }
+    const possible = proposeOverrun(context);
+    if (!possible) return;
+    const { task } = possible;
+    const dest = recordKey(task.remote.sub,task.remote.calendarId);
+    const refs = [task,...possible.displaced].map(reservationOf);
+    const busy = await this.availability(slotOf(possible),dest,refs,true);
+    const plan = proposeOverrun({ ...context, busy });
+    if (!plan) return;
+
+    const reserved = [slotOf(plan)];
+    const moves = [];
+    for (const next of plan.displaced) {
+      const slot = await this.replacementFor(next,reserved,cache);
+      if (!slot) return;
+      reserved.push(slot);
+      moves.push({ next,slot });
+    }
+    // The watched predecessor was still running at the handoff. Only its
+    // unobserved, personally owned successors can yield across that boundary.
+    for (const {next,slot} of moves) {
+      await this.moveFlexibleEvent(next,slot,[next],cache,other => canYield(other) &&
+        Date.parse(other.start) >= Date.parse(task.end) && this.clock().getTime() < Date.parse(plan.end));
+    }
+    if (!canExtend(task) || this.clock().getTime() >= Date.parse(plan.end) ||
+        (await this.availability(slotOf(plan),dest,[reservationOf(task)],'confirm')).length) {
+      throw invalid('Calendar availability changed before the running task could extend. Sync again to check the next opening.',409);
+    }
+    const ref = task.remote;
+    const event = await this.writeEvent(task,ref,{...slotOf(plan),overrunMinutes:plan.overrunMinutes},cache);
+    this.acceptRemote(task,event,ref);
+    this.store.save();
+  }
+
+  async finishEventSwap(cache) {
+    const group = this.data.eventMoveGroup;
+    if (!group) return;
+    const members = group.map(step => this.data.tasks.find(task => task.id === step.id));
+    const obsolete = () => {
+      delete this.data.eventMoveGroup;
+      this.store.save();
+      throw invalid('A reservation changed while reordering. Sync again to plan around the latest calendar changes.', 409);
+    };
+    // Supersede a previous order or a manual calendar edit without replaying it.
+    if (members.some(task => !task || !this.movableFlexibleEvent(task)) ||
+        this.data.tasks.filter(task => members.includes(task)).some((task,i) => task !== members[i])) return obsolete();
+    for (const [i,step] of group.entries()) {
+      const task = members[i], ref = task.remote;
+      if (ref.sub !== step.sub || ref.calendarId !== step.calendarId || ref.eventId !== step.eventId ||
+          !(sameSlot(task,step.to) || (sameSlot(task,step.from) && ref.etag === step.etag))) return obsolete();
+      const current = await this.google.getTaskEvent(await this.eventToken(ref.sub), { ...ref, taskId: task.id });
+      if (!current?.owned || current.taskId !== task.id || current.etag !== ref.etag || current.done ||
+          current.calendarAppointment || !sameSlot(current,task)) return obsolete();
+    }
+    // Preflight the whole pair/cycle before allowing any transient overlap.
+    for (const [i,step] of group.entries()) {
+      if (sameSlot(members[i],step.to)) continue;
+      const dest = recordKey(step.sub,step.calendarId);
+      const refs = members.filter(other => overlaps(other,step.to)).map(reservationOf);
+      if ((await this.availability(step.to,dest,refs,'confirm')).length) return obsolete();
+    }
+    for (const [i,step] of group.entries()) {
+      if (!sameSlot(members[i],step.to)) await this.moveFlexibleEvent(members[i],step.to,members,cache);
+    }
+    delete this.data.eventMoveGroup;
+    this.store.save();
+  }
+
+  async compactEventReservations(cache) {
+    const { tasks, settings } = this.data;
+    const now = this.clock();
+    const movable = tasks.filter(task => task.remote && this.movableFlexibleEvent(task,now));
+    const candidates = tasks.filter(task => movable.includes(task) || (!task.remote && !task.intent && !task.start && !task.done &&
+      !task.deleting && !task.held && !task.pendingEstimate && !explicitStartFor(task,settings.timeZone)));
+    if (!candidates.length) return;
+    const fixed = tasks.filter(task => !candidates.includes(task) && !task.deleting && task.start && task.end &&
+      (!task.pendingEstimate || task.estimateJob?.protected));
+    const checkedRanges = new Map(), external = new Map();
+    for (const task of candidates) {
+      const range = planningRange({ task, settings, now });
+      if (!range) continue;
+      const dest = task.remote ? recordKey(task.remote.sub, task.remote.calendarId) : this.target().id;
+      const key = dest + '|' + range.start + '|' + range.end;
+      if (!checkedRanges.has(key)) {
+        const reservations = movable.filter(other => overlaps(other, range)).map(reservationOf);
+        checkedRanges.set(key, await this.availability(range, dest, reservations, true));
+      }
+      external.set(task.id, checkedRanges.get(key));
+    }
+    const preserved = new Set();
+    let moves, additions;
+    // A reservation with no legal replacement retains its original time. Plan
+    // again around it before committing any moves onto another event's slot.
+    for (;;) {
+      moves = [];
+      additions = [];
+      const failed = [];
+      const active = candidates.filter(task => !preserved.has(task));
+      const slots = planFlexibleSlots({ tasks: active.filter(task => external.has(task.id)), settings, now, reserved: [...fixed,...preserved],
+        externalFor: task => external.get(task.id), allowCatchUp: false });
+      for (const task of active) {
+        const slot = slots.get(task.id);
+        if (!slot) { if (task.remote) failed.push(task); continue; }
+        if (!task.remote) additions.push({ task, slot });
+        else if (!sameSlot(task,slot)) moves.push({ task, slot });
+      }
+      if (!failed.length) break;
+      for (const task of failed) {
+        preserved.add(task);
+        task.issue = noSlot + ' Google still holds the previous time.';
+        task.syncStatus = 'attention';
+      }
+    }
+    while (moves.length) {
+      const vacant = moves.find(move => !moves.some(other => other !== move && overlaps(other.task,move.slot)));
+      if (vacant) {
+        await this.moveFlexibleEvent(vacant.task,vacant.slot,[vacant.task],cache);
+        moves = moves.filter(move => move !== vacant);
+        continue;
+      }
+      // A cycle can normally use one vacant legal slot as a temporary step.
+      const first = moves[0];
+      const spare = await this.replacementFor(first.task,moves.map(move => move.slot),cache);
+      if (spare && !sameSlot(first.task,spare)) {
+        await this.moveFlexibleEvent(first.task,spare,[first.task],cache);
+        continue;
+      }
+      // In a completely booked window all target slots belong to this group.
+      // Preserve both halves of the swap on disk before the first PATCH.
+      this.data.eventMoveGroup = moves.map(({task,slot}) => ({ id:task.id,sub:task.remote.sub,calendarId:task.remote.calendarId,
+        eventId:task.remote.eventId,etag:task.remote.etag,from:slotOf(task),to:slot }));
+      this.store.save();
+      await this.finishEventSwap(cache);
+      break;
+    }
+    for (const item of additions) await this.pushTask(item.task,cache,item.slot);
   }
 
   async explicitPlacement(task, range, destinationId, rangeCache) {
@@ -1123,11 +1614,11 @@ export class DaylineService {
     const flexible = others.filter(t => this.movableFlexibleEvent(t, now));
     const fixed = others.filter(t => !flexible.includes(t));
     const movableEvents = flexible.filter(t => t.remote);
-    const raw = await this.cachedAvailability(range, destinationId, rangeCache);
+    const raw = await this.bookingAvailability(task,range,destinationId,rangeCache);
     const ownedSlots = task.remote && !task.remote.allDay ? [...movableEvents, task] : movableEvents;
     const possible = withoutSlots(raw, ownedSlots);
     const busy = [...possible, ...fixed];
-    const request = { task, settings, now, allowInProgress: true };
+    const request = { task, settings, now, allowInProgress: !task.remote?.releasedSlot };
     const original = task.remote && Date.parse(task.start) >= now.getTime() &&
       findSlot({ ...request, now: new Date(task.start), busy });
     let preferred = original && Date.parse(original.start) === Date.parse(task.start) ? original : null;
@@ -1140,7 +1631,8 @@ export class DaylineService {
         return null;
       }
       const displaced = movableEvents.filter(t => overlaps(t, slot));
-      const own = task.remote && overlaps(task, slot) ? [task.remote] : [];
+      const physical = task.remote?.providerSlot || task;
+      const own = task.remote && !task.remote.transparent && overlaps(physical, slot) ? [task.remote] : [];
       const ignore = [...own, ...displaced.map(t => t.remote)];
       // The exact time must be free on every other calendar, and on the source
       // calendars once these specific, verified Dayline event IDs are excluded.
@@ -1178,7 +1670,7 @@ export class DaylineService {
     }
   }
 
-  async pushTask(task, rangeCache) {
+  async pushTask(task, rangeCache, plannedSlot) {
     if (this.data.settings.calendarMode !== 'sync') return;
     if (task.deleting) return this.removeRemote(task);
     if (task.pendingEstimate || task.held) return;
@@ -1213,9 +1705,17 @@ export class DaylineService {
       }
     }
 
-    let slot = task.remote?.allDay || { start: task.start, end: task.end };
+    let slot = task.remote?.allDay || task.remote?.providerSlot || { start: task.start, end: task.end };
     let waitingForSlot = false;
-    if (task.dirty.schedule || !ref) {
+    const release = task.remote?.releasedSlot;
+    let completionAction;
+    if (task.done && release) {
+      completionAction = release.kind;
+      if (completionAction === 'trim') slot = { start: slot.start, end: release.providerEnd || release.cutoff };
+    } else if (plannedSlot && !ref) {
+      if ((await this.availability(plannedSlot,this.target().id)).length) throw invalid('The proposed time is now busy. Sync again to check the calendar.',409);
+      slot = plannedSlot;
+    } else if (task.dirty.schedule || !ref) {
       const now = this.clock();
       const range = planningRange({ task, settings, now });
       let placement = null;
@@ -1224,7 +1724,7 @@ export class DaylineService {
         if (explicitStartFor(task, settings.timeZone)) {
           placement = await this.explicitPlacement(task, range, destinationId, rangeCache);
         } else {
-          const busy = await this.cachedAvailability(range, destinationId, rangeCache);
+          const busy = await this.bookingAvailability(task,range,destinationId,rangeCache);
           // Reuse this reservation only after checking for a second, overlapping event.
           if (task.remote && !task.remote.allDay && Date.parse(task.end) > now.getTime()) {
             const candidate = findSlot({ task, settings, now: new Date(task.start), busy: this.localBusy(task.id) });
@@ -1237,12 +1737,27 @@ export class DaylineService {
       if (!placement) {
         if (!task.remote) { task.start = null; task.end = null; }
         const detail = explicitStartFor(task, settings.timeZone) ? task.issue : null;
-        task.issue = (detail || noSlot) + (task.remote ? ' Google still holds the previous time.' : '');
+        task.issue = (detail || noSlot) + (release && !task.done ? ' The completed time stays free until a new slot is confirmed.' :
+          task.remote ? ' Google still holds the previous time.' : '');
         task.syncStatus = 'attention';
         // A completion gesture still reaches an existing reservation when rescheduling cannot fit.
-        if (!task.remote || !task.dirty.done) return;
+        if (!task.remote || !(task.dirty.done || (release && task.dirty.link))) return;
         waitingForSlot = true;
-      } else slot = placement;
+        if (release?.kind === 'free' && !task.remote.transparent) completionAction = 'free';
+      } else {
+        slot = placement;
+        if (release && !task.done) {
+          const dest = recordKey(ref.sub,ref.calendarId);
+          // It may have been restored to busy by another client. Ignore this
+          // old block only after verifying its current ownership and version.
+          const physical = task.remote.providerSlot;
+          const self = !task.remote.transparent && !task.remote.allDay && physical && overlaps(physical,slot) ? [{ ...ref,taskId:task.id,...physical }] : [];
+          if (Date.parse(slot.start) < this.clock().getTime() || (await this.availability(slot,dest,self,'confirm')).length) {
+            throw invalid('The proposed reopening time is no longer free. Sync again to check the calendar.',409);
+          }
+          completionAction = 'book';
+        }
+      }
     }
     if (!ref) {
       const dest = this.target();
@@ -1255,7 +1770,7 @@ export class DaylineService {
       } };
       this.store.save();
     }
-    const event = await this.writeEvent(task, ref, slot, rangeCache);
+    const event = await this.writeEvent(task, ref, slot, rangeCache,completionAction);
     const issue = task.issue;
     task.dirty = waitingForSlot ? { schedule: true } : {};
     this.acceptRemote(task, event, ref);
@@ -1271,24 +1786,37 @@ export class DaylineService {
   }
 
   async planAgainstCalendars(boardRange) {
-    const now = this.clock();
     const settings = this.data.settings;
-    const ranges = [boardRange];
-    for (const task of this.data.tasks) {
-      const active = task.start && Date.parse(task.end) > now.getTime() && canMoveLocalTask(task, new Date(task.start));
-      if (!canMoveLocalTask(task, now) && !active) continue;
-      ranges.push(planningRange({ task, settings, now }));
-      const prior = task.start ? task : task.lastLocalSlot;
-      if (prior) {
-        ranges.push(prior);
-        const resized = findSlot({ task, settings, now: new Date(prior.start) });
-        if (resized && Date.parse(resized.start) === Date.parse(prior.start)) ranges.push(resized);
+    const zone = settings.timeZone;
+    const busy = [], checked = [];
+    let now = this.clock();
+    for (;;) {
+      const ranges = [boardRange];
+      for (const task of this.data.tasks) {
+        const active = task.start && Date.parse(task.end) > now.getTime() && canMoveLocalTask(task, new Date(task.start));
+        if (!canMoveLocalTask(task, now) && !active) continue;
+        ranges.push(planningRange({ task, settings, now }));
+        const prior = task.start ? task : task.lastLocalSlot;
+        if (prior && (task.durationCheckPending || explicitStartFor(task, zone))) {
+          ranges.push(prior);
+          const resized = findSlot({ task, settings, now: new Date(prior.start) });
+          if (resized && Date.parse(resized.start) === Date.parse(prior.start)) ranges.push(resized);
+        }
       }
+      const missing = uncoveredRanges(ranges, combinedRanges(checked));
+      for (const range of missing) busy.push(...await this.availability(range));
+      checked.push(...missing);
+      const before = DateTime.fromJSDate(now, { zone });
+      now = this.clock();
+      const after = DateTime.fromJSDate(now, { zone });
+      if (after.hasSame(before, 'day')) break;
+      // A laptop can wake during a request. Cover the new day's horizon and
+      // schedule from the current clock before exposing any placements.
+      const monday = after.startOf('week');
+      boardRange = { start: monday.toUTC().toISO(), end: monday.plus({ weeks: 5 }).toUTC().toISO() };
     }
-    const busy = [];
-    for (const range of combinedRanges(ranges)) busy.push(...await this.availability(range));
 
-    const planned = this.plannedTasks(this.data.tasks, busy, now);
+    const planned = this.plannedTasks(this.data.tasks, busy, now, { overruns: true });
     planned.forEach((task, i) => { if (task !== this.data.tasks[i]) copyRecord(this.data.tasks[i], task); });
     this.busy = busy.filter(e => Date.parse(e.end) > Date.parse(boardRange.start) && Date.parse(e.start) < Date.parse(boardRange.end));
     this.busyRange = boardRange;
@@ -1320,10 +1848,11 @@ export class DaylineService {
       await this.pullChanges();
       this.store.save();
       const rangeCache = new Map();
+      await this.finishEventSwap(rangeCache);
       let firstError = null;
       try { this.target(); }
       catch (error) { firstError = messageOf(error); }
-      const rank = task => task.deleting ? 0 : explicitStartFor(task, this.data.settings.timeZone) ? 1 : 2;
+      const rank = task => task.deleting || (task.done && (task.dirty.done || task.dirty.release)) ? 0 : explicitStartFor(task, this.data.settings.timeZone) ? 1 : 2;
       const ordered = this.data.tasks.map(task => ({ task, rank: rank(task) }));
       ordered.sort((a, b) => a.rank - b.rank || (a.rank === 1 && Date.parse(a.task.estimateRequestedAt || a.task.createdAt) - Date.parse(b.task.estimateRequestedAt || b.task.createdAt)));
       for (const { task } of ordered) {
@@ -1335,10 +1864,19 @@ export class DaylineService {
           if (error.status === 401) this.tokens.clear();
         }
       }
+      if (!firstError) {
+        await this.extendRunningEvent(rangeCache);
+        await this.compactEventReservations(rangeCache);
+      }
       this.busy = await this.availability(range);
       this.busyRange = range;
       if (firstError) this.error = firstError;
-      else this.data.lastSync = this.clock().toISOString();
+      else {
+        const now = this.clock();
+        const observed = observeOverrun(this.data.tasks,now,t => this.eligibleEventOverrun(t));
+        observed.forEach((next,i) => { if (next !== this.data.tasks[i]) copyRecord(this.data.tasks[i],next); });
+        this.data.lastSync = now.toISOString();
+      }
     } catch (error) {
       this.error = messageOf(error);
       if (error.status === 401) this.tokens.clear();
@@ -1346,8 +1884,9 @@ export class DaylineService {
         this.unavailableLocalPlans(this.error);
         return;
       }
+      const swapTasks = new Set(this.data.eventMoveGroup?.map(step => step.id));
       for (const task of this.data.tasks) {
-        if (!task.pendingEstimate && !(task.done && !task.remote) && (!task.remote || Object.keys(task.dirty).length) && !task.held) {
+        if (!task.pendingEstimate && !(task.done && !task.remote) && (!task.remote || Object.keys(task.dirty).length || task.remote.proposedSlot || swapTasks.has(task.id)) && !task.held) {
           task.syncStatus = task.deleting ? 'deleting' : 'attention';
           task.issue = this.error;
         }

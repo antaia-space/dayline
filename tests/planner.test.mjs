@@ -69,8 +69,22 @@ test('the scheduler combines unordered, overlapping busy intervals and treats en
   assert.deepEqual(slot({ minutes: 25 }, busy), utcRange('2026-11-23T18:35Z', '2026-11-23T19:00Z'));
   assert.deepEqual(slot({ minutes: 26 }, busy), utcRange('2026-11-23T20:00Z', '2026-11-23T20:26Z'));
   assert.deepEqual(slot({ minutes: 20 }, [], '2026-11-23T10:12:24-08:00'),
-    utcRange('2026-11-23T18:15Z', '2026-11-23T18:35Z'));
+    utcRange('2026-11-23T18:13Z', '2026-11-23T18:33Z'));
   assert.equal(slot({ minutes: 25 }, [{ start: 'unavailable', end: '2026-11-23T20:00Z' }]), null);
+});
+
+test('flexible tasks use adjacent minute boundaries after odd work openings, meetings and task lengths', () => {
+  const hours = { ...settings, startTime: '09:02' };
+  const meeting = utcRange('2026-11-23T17:09Z', '2026-11-23T17:17Z');
+  const first = slot({ minutes: 7 }, [meeting], monday, hours);
+  assert.deepEqual(first, utcRange('2026-11-23T17:02Z', '2026-11-23T17:09Z'));
+  const next = slot({ minutes: 13 }, [first, meeting], monday, hours);
+  assert.deepEqual(next, utcRange('2026-11-23T17:17Z', '2026-11-23T17:30Z'));
+  assert.deepEqual(slot({ minutes: 9 }, [next, first, meeting], monday, hours),
+    utcRange(next.end, '2026-11-23T17:39Z'));
+  const fractionalEnd = utcRange('2026-11-23T17:00Z', '2026-11-23T17:02:00.001Z');
+  assert.deepEqual(slot({ minutes: 7 }, [fractionalEnd], monday, hours), utcRange('2026-11-23T17:03Z', '2026-11-23T17:10Z'));
+  assert.deepEqual(slot({ minutes: 5, windowStart: '10:07' }), utcRange('2026-11-23T18:07Z', '2026-11-23T18:12Z'));
 });
 
 test('respects the requested day, clock windows and full duration even when no slot exists', () => {

@@ -21,15 +21,19 @@ function calendar() {
   return { events, reads: 0, puts: 0, busy: [],
     refreshToken: () => ({ access_token: 'fixture', expires_in: 3600 }),
     listCalendars: () => [{ id: 'primary', primary: true, name: 'Team', writable: true, canInspectReservations: true }],
-    getBusy() { this.reads++; return [...this.busy, ...events.values()].map(({ start, end }) => ({ start, end })); },
+    getBusy(_, {start,end}) { this.reads++; return [...this.busy, ...events.values()].filter(e => !e.transparent && Date.parse(e.start) < Date.parse(end) && Date.parse(start) < Date.parse(e.end)).map(({ start, end }) => ({ start, end })); },
     listTaskEvents: () => structuredClone([...events.values()]),
     getTaskEvent: (_, { eventId }) => structuredClone(events.get(eventId)) || null,
     hasOtherBusyEvent: () => false,
-    putTaskEvent(_, { eventId, task, expectedEtag }) {
+    busyWithoutReservations(_, {reservations}) {
+      const ignored = new Set(reservations.map(ref => ref.eventId));
+      return [...this.busy,...[...events.values()].filter(e => !e.transparent && !ignored.has(e.eventId))];
+    },
+    putTaskEvent(_, { eventId, task, expectedEtag,completionAction }) {
       const previous = events.get(eventId);
       assert.equal(previous?.etag || null, expectedEtag);
       const event = { eventId, taskId: task.id, etag: ++this.puts, owned: true, text: task.text,
-        done: task.done, start: task.start, end: task.end };
+        done: task.done, start: task.start, end: task.end,transparent: completionAction === 'free' || (completionAction !== 'book' && Boolean(previous?.transparent)) };
       events.set(eventId, event);
       return structuredClone(event);
     },
@@ -286,7 +290,7 @@ test('a linked model revision preserves a newer Google title and a completion ca
   assert.equal(google.events.get(remote.eventId).done, true);
   finishNext.resolve(); await service.whenEstimatesIdle();
   const done = row(service, id);
-  assert.deepEqual([done.done, done.text, done.title, done.start], [true, 'A later source edit still being estimated', 'Finance team’s title', previousTime]);
+  assert.deepEqual([done.done, done.text, done.title, done.start], [true, 'A later source edit still being estimated', 'Finance team’s title', null]);
 
   await edit(service, id, { done: false }); await service.queueSync();
   await edit(service, id, { text: 'The final project brief' });

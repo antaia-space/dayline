@@ -37,7 +37,9 @@ export function createDurationControls({api,refresh,getState,notify}) {
       const heldFocus = document.activeElement === minus;
       minus.disabled = minutes <= 5;
       if (heldFocus && minus.disabled) group.querySelector('[data-delta="5"]').focus({preventScroll:true});
-      group.title = "Estimated work · " + minutes + " minutes";
+      group.title = task.calendarFit?.originalMinutes > minutes
+        ? "Planned work · " + minutes + " minutes. Adjust to keep your chosen duration."
+        : "Estimated work · " + minutes + " minutes";
     }
     if (ops.length && !timer && !working.size) wake();
   }

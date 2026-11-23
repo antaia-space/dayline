@@ -1,15 +1,28 @@
 import { findSlot, resizedClockWindow } from './planner.mjs';
 import { recordDurationFeedback } from './task-learning.mjs';
+import { fullTaskMinutes } from './calendar-fit.mjs';
 
 export function setManualDuration(changed, minutes, timeZone) {
   if (!Number.isSafeInteger(minutes) || minutes < 1) throw new RangeError('Enter a positive whole number of minutes.');
   changed.estimateOverrides ||= {};
   changed.estimateOverrides.minutes = minutes;
-  if (changed.minutes === minutes) return;
+  const original = fullTaskMinutes(changed);
+  const wasFitted = Boolean(changed.calendarFit);
+  delete changed.calendarFit;
+  if (changed.minutes === minutes) {
+    if (wasFitted) changed.reason = 'Duration set by you.';
+    return;
+  }
+  if (!changed.done) {
+    // A new manual duration replaces the allowance granted by the clock.
+    delete changed.overrunMinutes;
+    delete changed.overrunWatchStart;
+  }
   // Older tasks only stored the displayed duration. Keep that reference across
   // repeated clicks, so undoing a change also undoes its contribution to the note.
-  changed.baseMinutes ??= changed.minutes;
-  changed.estimatedMinutes ??= changed.minutes;
+  const progress = Number.isSafeInteger(changed.calendarProgressMinutes) ? changed.calendarProgressMinutes : 0;
+  changed.baseMinutes ??= original + progress;
+  changed.estimatedMinutes ??= original + progress;
   if (!changed.done && !changed.remote?.allDay) {
     changed.windowEnd = resizedClockWindow(changed, minutes, timeZone);
     changed.dirty.schedule = true;

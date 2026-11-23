@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   authorizationUrl, exchangeCode, refreshToken, getProfile, listCalendars, getBusy,
-  getTaskEvent, listTaskEvents, putTaskEvent, deleteTaskEvent, hasOtherBusyEvent,
+  getTaskEvent, listTaskEvents, putTaskEvent, deleteTaskEvent, hasOtherBusyEvent, busyWithoutReservations,
 } from '../src/google.mjs';
 
 const token = 'test-access';
@@ -291,6 +291,33 @@ test('clearing overlapping owned blocks requires every expected event and no oth
   assert.equal(await query(),true);
 });
 
+test('compaction verifies the owned event version and keeps exact overlapping foreign busy intervals without titles',async t => {
+  const stamp = hhmm => '2026-11-24T' + hhmm + ':00.000Z';
+  const interval = (a,b) => ({start:stamp(a),end:stamp(b)});
+  const raw = () => reply({calendars:{[calendarId]:{busy:[interval('09:00','11:00')]}}});
+  const own = event({start:{dateTime:stamp('09:00')},end:{dateTime:stamp('10:30')}});
+  const foreign = {id:'unrelated',status:'confirmed',start:{dateTime:stamp('09:15')},end:{dateTime:stamp('09:45')}};
+  simulate(t,raw(),url => {
+    const fields = url.searchParams.get('fields');
+    assert.ok(!fields.includes('summary') && !fields.includes('description'));
+    assert.equal(url.searchParams.get('singleEvents'),'true');
+    return reply({items:[own,foreign]});
+  },raw(),reply({items:[{...own,etag:'changed'}]}));
+  const query = {calendarId,...interval('09:00','11:00'),timeZone:'UTC',
+    reservations:[{eventId,taskId:task.id,etag:own.etag,...interval('09:00','10:30')}]};
+  assert.deepEqual(await busyWithoutReservations(token,query),[interval('10:30','11:00'),interval('09:15','09:45')]);
+  await assert.rejects(busyWithoutReservations(token,query),{status:412});
+});
+
+test('a final move check respects a newly observed meeting even when the preceding free/busy call has not seen it yet',async t => {
+  const own = event(), later = '2026-11-24T10:10:00.000Z', until = '2026-11-24T10:20:00.000Z';
+  simulate(t,reply({calendars:{[calendarId]:{busy:[{start,end}]}}}),
+    reply({items:[own,{id:'just-created',start:{dateTime:later},end:{dateTime:until}}]}));
+  const query = {calendarId,start,end:until,timeZone:'UTC',confirm:true,
+    reservations:[{eventId,taskId:task.id,etag:own.etag,start,end}]};
+  assert.deepEqual(await busyWithoutReservations(token,query),[{start:later,end:until}]);
+});
+
 test('an all-day event stays all-day on completion and clears date-only endpoints on an explicit move', async t => {
   const allDay = event({ start: { date: '2026-11-24' }, end: { date: '2026-11-25' } });
   simulate(t, reply(allDay), (_, init) => {
@@ -306,6 +333,25 @@ test('an all-day event stays all-day on completion and clears date-only endpoint
   const done = { ...task, done: true, start: allDay.start.date, end: allDay.end.date };
   assert.equal((await putTaskEvent(token, { ...write, task: done, expectedEtag: allDay.etag })).start, allDay.start.date);
   assert.equal((await putTaskEvent(token, { ...write, expectedEtag: allDay.etag })).start, start);
+});
+
+test('personal completion toggles Google transparency with If-Match and never changes another organizer’s reservation',async t => {
+  const original = event(), free = event({summary:'✓ ' + task.text,transparency:'transparent'});
+  simulate(t,reply(original),(_,init) => {
+    const patch = JSON.parse(init.body);
+    assert.equal(init.headers['If-Match'],original.etag);
+    assert.equal(patch.transparency,'transparent');
+    assert.equal(patch.start,undefined);
+    assert.equal(patch.end,undefined);
+    return reply({...original,...patch});
+  },reply(free),(_,init) => {
+    const patch = JSON.parse(init.body);
+    assert.equal(patch.transparency,'opaque');
+    return reply({...free,...patch});
+  },reply(event({organizer:{email:'external@example.test'}})));
+  assert.equal((await putTaskEvent(token,{...write,expectedEtag:original.etag,task:{...task,done:true},completionAction:'free'})).transparent,true);
+  assert.equal(Boolean((await putTaskEvent(token,{...write,expectedEtag:free.etag,completionAction:'book'})).transparent),false);
+  await assert.rejects(putTaskEvent(token,{...write,expectedEtag:original.etag,completionAction:'trim'}),{reason:'sharedAppointment'});
 });
 
 test('concurrent calendar edits survive app writes and deletions', async t => {

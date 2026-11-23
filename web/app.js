@@ -2,10 +2,12 @@ import {
   addDays, button, dayIndex, displayTime, element, formatDay,
   hhmmMinutes, icon, instantTime, isoWeek, navigationLabel, startOfWeek, weekdayNames, weekLabel, workdaysLabel, zonedDay
 } from "./ui.js";
-import { renderAgenda, renderBacklog, renderKey, renderWeek } from "./views.js";
+import { fittedDuration, releasedCompletionDay, renderAgenda, renderBacklog, renderKey, renderWeek } from "./views.js";
 import { createAgentSettings, estimateSource } from "./agent.js";
 import { createComposer } from "./composer.js";
 import { createDurationControls } from "./duration.js";
+import { createTaskOrder } from "./task-order.js";
+import { createSubtaskControls, overrunNote } from "./subtasks.js";
 import { createMeetingDetails, createMeetingFeed } from "./meetings.js";
 import { localRead,localWrite } from "./outbox.js";
 
@@ -43,6 +45,8 @@ const composer = createComposer({
   context:() => ({state,view,monday,selectedDay,compact:compact.matches})
 });
 const durationControls = createDurationControls({api,refresh,getState:() => state,notify:toast});
+const taskOrder = createTaskOrder({root:byId("planner"),api,refresh,getState:() => state,notify:toast,repaint:render});
+const subtaskControls = createSubtaskControls({api,refresh,getState:() => state,notify:toast,editor:byId("editor-checklist")});
 const meetings = createMeetingFeed({read:api,changed:render});
 const meetingDetails = createMeetingDetails({root:byId("planner"),zone:() => state.settings.timeZone,
   find:id => meetings.current.events.find(event => event.id === id)});
@@ -143,7 +147,8 @@ async function refresh(force = false, forceMeetings = false) {
     }
     if (!weekends && view === "week" && dayIndex(selectedDay) > 5) selectedDay = addDays(monday,4);
     meetings.update(state,monday,forceMeetings);
-    const paint = JSON.stringify([state.tasks,state.categories,state.settings,state.selectedAgent,state.busy,state.busyStart,state.busyEnd,state.connection,day,selectedDay]);
+    const currentMinute = view === "day" && selectedDay === day ? Math.ceil(new Date(state.now || Date.now()).getTime()/60000) : null;
+    const paint = JSON.stringify([state.tasks,state.categories,state.settings,state.selectedAgent,state.busy,state.busyStart,state.busyEnd,state.connection,day,selectedDay,currentMinute]);
     if (force || lastPaint !== paint) {
       render();
       lastPaint = paint;
@@ -151,10 +156,16 @@ async function refresh(force = false, forceMeetings = false) {
     byId("planner").setAttribute("aria-busy","false");
     byId("service-error").hidden = true;
     if (byId("settings").open && settingTab === "calendars") fillCalendarSettings();
+    if (byId("settings").open && settingTab === "agent") agentSettings.update(next);
     if (byId("action-dialog").open) renderCalendarAction();
     if (byId("task-dialog").open && editingTask && !retryingEstimates.has(editingTask.id)) {
       const latest = state.tasks.find(task => task.id === editingTask.id);
-      if (latest && latest.estimateState !== editingTask.estimateState && !Object.keys(taskChanges()).length) openEditor(latest);
+      const changed = latest && (latest.estimateState !== editingTask.estimateState || latest.minutes !== editingTask.minutes ||
+        latest.done !== editingTask.done || latest.start !== editingTask.start || latest.end !== editingTask.end || latest.completedDay !== editingTask.completedDay ||
+        latest.calendarProgressMinutes !== editingTask.calendarProgressMinutes || latest.overrunMinutes !== editingTask.overrunMinutes ||
+        latest.calendarFit?.originalMinutes !== editingTask.calendarFit?.originalMinutes);
+      if (changed && !Object.keys(taskChanges()).length) openEditor(latest);
+      else if (latest) subtaskControls.showEditor(latest);
     }
     if (route && !routeOpened) {
       routeOpened = true;
@@ -169,7 +180,7 @@ async function refresh(force = false, forceMeetings = false) {
 }
 
 function render() {
-  if (!state) return;
+  if (!state || taskOrder.deferRender()) return;
   const active = document.activeElement;
   const bookmark = active?.dataset.focus;
   const weekView = view === "week";
@@ -201,6 +212,8 @@ function render() {
     renderAgenda(state,context);
   }
   renderBacklog(state);
+  taskOrder.paint();
+  subtaskControls.paint();
   durationControls.paint();
   composer.update();
   renderKey(state.categories);
@@ -282,8 +295,10 @@ function navigateTo(day) {
 }
 
 function showTaskLocation(task) {
-  if (task.start && !task.pendingEstimate) {
-    navigateTo(zonedDay(task.start,state.settings.timeZone));
+  const zone = state.settings.timeZone;
+  const day = releasedCompletionDay(task,zone) || (task.start && !task.pendingEstimate && zonedDay(task.start,zone));
+  if (day) {
+    navigateTo(day);
   } else {
     byId("backlog-content").hidden = false;
     byId("backlog-toggle").setAttribute("aria-expanded","true");
@@ -386,10 +401,14 @@ function settingsTab(tab) {
   byId("agent-settings").hidden = tab !== "agent";
   errorAt("settings-error");
   if (tab === "calendars") fillCalendarSettings();
-  if (tab === "agent") openAgentSettings();
+  if (tab === "agent") agentSettings.open(state);
 }
 
-const openAgentSettings = createAgentSettings({api,toast,errorAt,onSaved:() => refresh(true)});
+const agentSettings = createAgentSettings({api,toast,errorAt,onSaved:selected => {
+  if (state) state.selectedAgent = selected;
+  composer.update();
+  void refresh(true);
+}});
 byId("settings-open").addEventListener("click",() => openSettings("work"));
 byId("hours-open").addEventListener("click",() => openSettings("work"));
 byId("connection-status").addEventListener("click",() => openSettings("calendars"));
@@ -680,6 +699,7 @@ function openEditor(task) {
   title.value = task.title || "";
   title.dataset.initial = title.value;
   byId("task-text").value = task.text;
+  subtaskControls.showEditor(task);
   byId("task-estimate-fields").hidden = Boolean(task.pendingEstimate);
   byId("task-minutes").value = task.pendingEstimate ? "" : task.minutes;
   byId("duration-learning").hidden = Boolean(task.pendingEstimate);
@@ -690,16 +710,26 @@ function openEditor(task) {
   byId("task-day").value = task.earliestDay && task.earliestDay === task.latestDay ? task.earliestDay : "";
   byId("task-day").dataset.initial = byId("task-day").value;
   const reason = !task.pendingEstimate && task.reason;
-  byId("estimate-reason").textContent = reason || "";
-  byId("estimate-reason").hidden = !reason;
+  const fit = fittedDuration(task);
+  const overrun = overrunNote(task);
+  const reserved = task.calendarProgressMinutes;
+  const progress = Number.isSafeInteger(reserved) && reserved > 0
+    ? reserved + (reserved === 1 ? " minute was" : " minutes were") + " scheduled before the calendar interruption. This block shows the remaining time."
+    : "";
+  byId("estimate-reason").textContent = [reason,fit && (fit.label + ". " + fit.explanation),progress,overrun?.explanation].filter(Boolean).join(" ");
+  byId("estimate-reason").hidden = !reason && !fit && !progress && !overrun;
   const info = [];
   if (task.start && !task.pendingEstimate) {
     const date = zonedDay(task.start,state.settings.timeZone);
     const time = task.allDay ? "All day" : instantTime(task.start,state.settings.timeZone) + "–" + instantTime(task.end,state.settings.timeZone);
     info.push(element("span","",formatDay(date,{weekday:"long",month:"short",day:"numeric"}) + " · " + time));
-  } else info.push(element("span","","Unscheduled"));
+  } else {
+    const completedDay = releasedCompletionDay(task,state.settings.timeZone);
+    info.push(element("span","",completedDay ? "Completed · Planned for " + formatDay(completedDay,{weekday:"long",month:"short",day:"numeric"}) : "Unscheduled"));
+  }
   const status = taskStatus(task);
-  const source = estimateSource(task.agent);
+  const estimating = task.estimateState === "queued" || task.estimateState === "estimating";
+  const source = estimateSource(estimating ? task.estimateAgent : task.agent);
   if (status && (task.estimateState || !(task.pendingEstimate && source))) info.push(element("span","",status));
   if (source) info.push(element("span","",task.pendingEstimate ? source : "Estimate · " + source));
   const notes = new Set([task.agent?.notice,task.issue].filter((note) => note && !(reason && reason.includes(note))));

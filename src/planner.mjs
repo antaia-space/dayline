@@ -36,7 +36,7 @@ function numberFrom(text) {
   return text.split(/[- ]/).reduce((total, part) => total + smallNumbers[part], 0);
 }
 
-function durationInText(source) {
+export function durationInText(source) {
   const normalized = source.toLowerCase()
     .replace(/\bminuten\b/g, 'minutes').replace(/\b(?:stunden?|std)\b/g, 'hours')
     .replace(/(\d)\s*½/g, '$1.5').replace(/½/g, '0.5')
@@ -343,7 +343,6 @@ export function resizedClockWindow(task, minutes, timeZone) {
 }
 
 const minuteMs = 60_000;
-const gridMs = 5 * minuteMs;
 
 function validDay(text, zone) {
   if (typeof text !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
@@ -397,13 +396,17 @@ function mergeIntervals(intervals) {
   return result;
 }
 
-function blockedIntervals(busy, zone) {
+function blockedIntervals(busy, zone, instants) {
   if (!Array.isArray(busy)) return null;
   const intervals = [];
+  const millis = value => {
+    if (!instants) return instantInZone(value, zone).toMillis();
+    if (!instants.has(value)) instants.set(value, instantInZone(value, zone).toMillis());
+    return instants.get(value);
+  };
   for (const item of busy) {
     if (!item || item.start == null || item.end == null) return null;
-    const start = instantInZone(item.start, zone).toMillis();
-    const end = instantInZone(item.end, zone).toMillis();
+    const start = millis(item.start), end = millis(item.end);
     if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
     if (start < end) intervals.push({ start, end });
   }
@@ -440,22 +443,31 @@ function dayWindows(day, localStart, localEnd) {
   return mergeIntervals(windows);
 }
 
-function freeStart(window, blocked, nowMillis, duration, fitsOnlyAtOpening) {
-  const roundUp = (time) => Math.ceil(time / gridMs) * gridMs;
-  let candidate = fitsOnlyAtOpening && nowMillis <= window.start ? window.start : roundUp(Math.max(nowMillis, window.start));
+function freeStart(window, blocked, nowMillis, duration) {
+  const nextMinute = time => Math.ceil(time / minuteMs) * minuteMs;
+  let candidate = nextMinute(Math.max(nowMillis, window.start));
   for (const event of blocked) {
     if (candidate + duration > window.end) return null;
     if (event.end <= candidate) continue;
     if (event.start >= candidate + duration) return candidate;
-    candidate = roundUp(event.end);
+    candidate = nextMinute(event.end);
   }
   return candidate + duration <= window.end ? candidate : null;
 }
 
-function fixedStart(day, minute, windows, blocked, nowMillis, duration, capturedAt) {
+function cached(map, key, calculate) {
+  if (!map.has(key)) map.set(key, calculate());
+  return map.get(key);
+}
+
+function workWindows(day, start, end, cache) {
+  return cache ? cached(cache.windows, day.toMillis() + '/' + start + '/' + end, () => dayWindows(day, start, end)) : dayWindows(day, start, end);
+}
+
+function fixedStart(day, minute, windows, blocked, nowMillis, duration, capturedAt, cache) {
   // Intersect that single wall-clock minute with the day's real instants.
   // It can be missing in spring or have two candidates in autumn.
-  for (const { start } of dayWindows(day, minute, minute + 1)) {
+  for (const { start } of workWindows(day, minute, minute + 1, cache)) {
     const end = start + duration;
     if (start < nowMillis && !(capturedAt <= start && nowMillis < end)) continue;
     if (!windows.some(window => start >= window.start && end <= window.end)) continue;
@@ -464,10 +476,19 @@ function fixedStart(day, minute, windows, blocked, nowMillis, duration, captured
   return null;
 }
 
-export function findSlot({ task, settings, busy = [], now, horizonDays = 28, allowInProgress = false }) {
-  const days = searchDays({ task, settings, now, horizonDays });
+// All duration trials within one plan share a settings snapshot. Only pure
+// calendar calculations are cached; each trial still checks its own busy list.
+export function createSlotSearch(settings) {
+  const cache = { days: new Map(), nextDays: new Map(), wording: new Map(), windows: new Map(), instants: new Map() };
+  return input => findSlot({ ...input, settings, cache });
+}
+
+export function findSlot({ task, settings, busy = [], now, horizonDays = 28, allowInProgress = false, cache }) {
+  const calendarDays = () => searchDays({ task, settings, now, horizonDays });
+  const days = cache ? cached(cache.days, JSON.stringify([now, task.earliestDay, task.latestDay, horizonDays]), calendarDays) : calendarDays();
   if (!days || !Array.isArray(settings.workDays) || !Number.isSafeInteger(task.minutes) || task.minutes < 1) return null;
-  const wording = sourceClocks(task, settings.timeZone);
+  const readWording = () => sourceClocks(task, settings.timeZone);
+  const wording = cache ? cached(cache.wording, JSON.stringify([task.text, task.estimateRequestedAt || task.createdAt]), readWording) : readWording();
   const exact = wording?.exact;
   // The written clock wins over an older model's window. An actual "before",
   // "after", range or deadline in the same wording still bounds the full task.
@@ -476,25 +497,29 @@ export function findSlot({ task, settings, busy = [], now, horizonDays = 28, all
   const startMinute = Math.max(clockValue(settings.startTime), lower);
   const endMinute = Math.min(clockValue(settings.endTime, true), upper);
   if (!(startMinute < endMinute)) return null;
-  const blocked = blockedIntervals(busy, settings.timeZone);
+  const blocked = blockedIntervals(busy, settings.timeZone, cache?.instants);
   if (!blocked) return null;
   const duration = task.minutes * minuteMs;
-  const fitsOnlyAtOpening = task.windowStart != null && task.windowEnd != null && endMinute - startMinute === task.minutes;
   const nowMillis = days.current.toMillis();
   const captured = task.estimateRequestedAt || task.createdAt;
-  const capturedAt = allowInProgress && captured != null ? instantInZone(captured, settings.timeZone).toMillis() : Infinity;
-  for (let day = days.first; day < days.stop; day = day.plus({ days: 1 }).startOf('day')) {
+  const capturedAt = allowInProgress && captured != null
+    ? Math.max(instantInZone(captured, settings.timeZone).toMillis(), Date.parse(task.reopenedAt) || 0) : Infinity;
+  const nextDay = day => {
+    const next = () => day.plus({ days: 1 }).startOf('day');
+    return cache ? cached(cache.nextDays, day.toMillis(), next) : next();
+  };
+  for (let day = days.first; day < days.stop; day = nextDay(day)) {
     if (!settings.workDays.includes(day.weekday)) continue;
     const deadline = task.deadlineTime != null && day.toISODate() === task.latestDay ? clockValue(task.deadlineTime, true) : 1440;
     if (!(startMinute < deadline)) continue;
-    const windows = dayWindows(day, startMinute, Math.min(endMinute, deadline));
+    const windows = workWindows(day, startMinute, Math.min(endMinute, deadline), cache);
     if (exact != null) {
-      const start = fixedStart(day, exact, windows, blocked, nowMillis, duration, capturedAt);
+      const start = fixedStart(day, exact, windows, blocked, nowMillis, duration, capturedAt, cache);
       if (start !== null) return { start: new Date(start).toISOString(), end: new Date(start + duration).toISOString() };
       continue;
     }
     for (const window of windows) {
-      const start = freeStart(window, blocked, nowMillis, duration, fitsOnlyAtOpening);
+      const start = freeStart(window, blocked, nowMillis, duration);
       if (start !== null) return { start: new Date(start).toISOString(), end: new Date(start + duration).toISOString() };
     }
   }

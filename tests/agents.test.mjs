@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { openStore } from '../src/store.mjs';
+import { defaultSettings, openStore } from '../src/store.mjs';
 import { DaylineService } from '../src/service.mjs';
 import { TaskAgents } from '../src/agents/manager.mjs';
 import { startServer } from '../src/http.mjs';
@@ -194,4 +194,23 @@ test('desktop and browser retries share a single paid estimate for a waiting tas
   assert.equal(task.agent.outcome, 'success');
   assert.equal(task.minutes, 35);
   assert.ok(task.start);
+});
+
+test('a provider switch applies to later captures in a stale tab while earlier offline entries retain their agent', async () => {
+  const previous = {provider:'codex',model:'gpt-6.2-sol',effort:'low'};
+  const next = {provider:'gemini',model:'gemini-4-hydrogen'};
+  const store = {state:{version:1,settings:{...defaultSettings(),timeZone:'UTC'},tasks:[],accounts:[],agent:{...previous}},save(){}};
+  const manager = new TaskAgents({store});
+  manager.select(next);
+  const switched = store.state.agent.selectedAt;
+  assert.ok(Number.isSafeInteger(switched));
+  const service = new DaylineService({store,clock:()=>new Date(switched+60_000),vault:{}});
+  const earlier = service.enqueueTask({text:'Earlier offline task',captureAgent:previous,capturedAt:switched-1});
+  const later = service.enqueueTask({text:'Later task in a sleeping window',captureAgent:previous,capturedAt:switched+1});
+  assert.deepEqual(service.findTask(earlier).estimateJob.selection,previous);
+  assert.deepEqual(service.findTask(later).estimateJob.selection,next);
+  manager.select(next);
+  assert.equal(store.state.agent.selectedAt,switched);
+  manager.select({provider:'local'});
+  assert.deepEqual(service.findTask(later).estimateJob.selection,next);
 });

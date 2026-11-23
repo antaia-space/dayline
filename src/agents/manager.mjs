@@ -19,6 +19,7 @@ const categories = CATEGORIES.map(category => category.id);
 const nullable = { type: ['string', 'null'] };
 const properties = {
   title: { type: 'string' },
+  subtasks: { type: 'array', items: { type: 'string' } },
   category: { type: 'string', enum: categories },
   minutes: { type: 'integer' },
   earliestDay: nullable, latestDay: nullable, windowStart: nullable, windowEnd: nullable, deadlineTime: nullable,
@@ -52,9 +53,8 @@ function checked(output, text) {
   const fail = () => { throw new Error('The agent returned an estimate that Dayline could not use.'); };
   if (!output || Array.isArray(output) || typeof output !== 'object' ||
     Object.keys(output).some(key => !Object.hasOwn(properties, key)) ||
-    estimateSchema.required.some(key => key !== 'title' && !Object.hasOwn(output, key))) fail();
-  // Documented provider schemas require the title. Older custom adapters can
-  // still supply their duration and constraints, with a locally derived title.
+    estimateSchema.required.some(key => key !== 'title' && key !== 'subtasks' && !Object.hasOwn(output, key))) fail();
+  // Older adapters can still supply estimates with locally inferred titles and checklists.
   if (Object.hasOwn(output, 'title') && !validTaskTitle(output.title)) fail();
   if (!categories.includes(output.category) || !Number.isSafeInteger(output.minutes) || output.minutes < 1 ||
     output.minutes > 1440 || typeof output.reason !== 'string' || !output.reason.trim() || output.reason.length > 400) fail();
@@ -81,8 +81,8 @@ export class TaskAgents {
     this.adapters = adapters;
     this.launchLogin = launchLogin;
     const saved = store.state.agent;
-    if (saved?.provider === 'codex' && (!saved.model || saved.effort !== 'low')) {
-      Object.assign(saved, { model: saved.model || codexModel, effort: 'low' });
+    if (saved && (!Number.isSafeInteger(saved.selectedAt) || (saved.provider === 'codex' && (!saved.model || saved.effort !== 'low')))) {
+      Object.assign(saved, this.selected, { selectedAt: Number.isSafeInteger(saved.selectedAt) ? saved.selectedAt : Date.now() });
       store.save();
     }
   }
@@ -101,9 +101,12 @@ export class TaskAgents {
 
   select(input) {
     const selection = agentSelection(input);
-    const lastRun = this.store.state.agent?.lastRun || null;
-    this.store.state.agent = { ...selection, lastRun };
-    this.store.save();
+    const previous = this.store.state.agent;
+    const same = this.selected.provider === selection.provider && this.selected.model === selection.model;
+    const selectedAt = same && Number.isSafeInteger(previous?.selectedAt) ? previous.selectedAt : Date.now();
+    this.store.state.agent = { ...selection, selectedAt, lastRun: previous?.lastRun || null };
+    try { this.store.save(); }
+    catch (error) { this.store.state.agent = previous; throw error; }
     return this.selected;
   }
 
@@ -147,7 +150,7 @@ export class TaskAgents {
         const fixed = estimateTask(text, { ...context, estimatedMinutes: minutes });
         const knownDays = Boolean(fixed.earliestDay || fixed.latestDay);
         const knownWindow = Boolean(fixed.windowStart || fixed.windowEnd);
-        result = { ...rules, title: proposal.title, category: proposal.category, minutes, reason: rules.explicitMinutes ? rules.reason : proposal.reason.trim(),
+        result = { ...rules, title: proposal.title, subtasks: proposal.subtasks, category: proposal.category, minutes, reason: rules.explicitMinutes ? rules.reason : proposal.reason.trim(),
           earliestDay: knownDays ? fixed.earliestDay : proposal.earliestDay,
           latestDay: knownDays ? fixed.latestDay : proposal.latestDay,
           deadlineTime: knownDays ? fixed.deadlineTime : proposal.deadlineTime,
@@ -176,7 +179,7 @@ export class TaskAgents {
     }
     // Queued work is committed by the service only if that estimate is still
     // current. An older in-flight request must not replace the latest receipt.
-    if (!context.selection) this.store.state.agent = { ...this.selected, lastRun: run };
+    if (!context.selection) this.store.state.agent = { ...this.store.state.agent, ...this.selected, lastRun: run };
     return { ...result, agent: run };
   }
 }

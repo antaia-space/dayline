@@ -13,6 +13,22 @@ const shown = (target,value) => {
 };
 const agentLabel = (provider) => agents[provider]?.label || provider || "Unknown agent";
 
+function selectionName(selection) {
+  if (!selection?.provider) return "";
+  const model = selection.model || (selection.provider === "codex" ? codexDefault : selection.provider === "local" ? "" : "provider default");
+  return [agentLabel(selection.provider),model].filter(Boolean).join(" · ");
+}
+
+export function estimateActivity(tasks = []) {
+  const active = tasks.filter(task => task.estimateState === "queued" || task.estimateState === "estimating");
+  const task = active.find(item => item.estimateState === "estimating") || active[0];
+  if (!task) return "";
+  const name = selectionName(task.estimateAgent);
+  const action = task.estimateState === "estimating" ? "Estimating now" : "Queued for estimation";
+  const more = active.length > 1 ? " · " + (active.length - 1) + " more queued" : "";
+  return [action,name].filter(Boolean).join(" · ") + more;
+}
+
 export function estimateSource(run) {
   if (!run || !run.provider) return "";
   const effort = run.provider === "codex" && run.effort ? run.effort + " reasoning effort" : "";
@@ -25,16 +41,21 @@ export function estimateSource(run) {
   return selected;
 }
 
-function paintUsage(run) {
+function paintUsage(run,selected) {
+  const anotherSelection = run && selected && (run.provider !== selected.provider ||
+    (selected.model && run.model && selected.model !== run.model));
+  shown(id("agent-run-context"),anotherSelection ? "New tasks use " + selectionName(selected) + "." : "");
   if (!run) {
-    id("agent-run").textContent = "Usage appears after the first estimate.";
+    id("agent-run").textContent = "No estimate has finished yet.";
     shown(id("agent-run-usage"),"");
     shown(id("agent-run-notice"),"");
     return;
   }
   const when = run.at ? new Date(run.at) : null;
   const time = Number.isFinite(when?.getTime()) ? when.toLocaleString(undefined,{dateStyle:"medium",timeStyle:"short"}) : "";
-  id("agent-run").textContent = [estimateSource(run),time].filter(Boolean).join(" · ");
+  const result = run.outcome === "pending" ? "Estimate unavailable" : run.outcome === "fallback" ? "Used local rules" : "Completed";
+  const source = run.outcome === "pending" || run.outcome === "fallback" ? selectionName(run) : estimateSource(run);
+  id("agent-run").textContent = [result,source,time].filter(Boolean).join(" · ");
   const counts = [
     ["Input",run.inputTokens],["Cached input",run.cachedInputTokens],["Output",run.outputTokens]
   ].filter(([,count]) => Number.isFinite(count) && count >= 0)
@@ -46,6 +67,9 @@ function paintUsage(run) {
 
 export function createAgentSettings({api,toast,errorAt,onSaved}) {
   let information = null;
+  let savedSelection = null;
+  let latestRun = null;
+  let snapshotVersion = 0;
   let sequence = 0;
   let busy = false;
   let authenticating = false;
@@ -56,16 +80,25 @@ export function createAgentSettings({api,toast,errorAt,onSaved}) {
   function allowSave() {
     const picked = provider.value;
     const choice = picked === "local" ? "" : chosenModelId(picked,model.value);
-    const current = information?.selected;
+    const current = savedSelection;
     id("agent-save").disabled = busy || !information || information.provider !== picked ||
       (current?.provider === picked && (current.model || "") === choice);
     id("agent-save").textContent = picked === "local" ? "Use local agent" : "Save agent";
   }
 
   function currentSelection(selected) {
-    const name = agentLabel(selected?.provider);
-    const modelName = selected?.model || (selected?.provider === "codex" ? codexDefault : selected?.provider === "local" ? "" : "provider default");
-    shown(id("agent-current"),"Current selection · " + [name,modelName].filter(Boolean).join(" · "));
+    if (selected?.provider) savedSelection = selected;
+    shown(id("agent-current"),savedSelection && "New tasks use " + selectionName(savedSelection) + ".");
+    paintUsage(latestRun,savedSelection);
+  }
+
+  function update(snapshot) {
+    if (!snapshot) return;
+    snapshotVersion++;
+    if (Object.hasOwn(snapshot,"lastAgentRun")) latestRun = snapshot.lastAgentRun;
+    currentSelection(snapshot.selectedAgent);
+    shown(id("agent-activity"),estimateActivity(snapshot.tasks));
+    allowSave();
   }
 
   function paint(record,chosenModel) {
@@ -77,7 +110,6 @@ export function createAgentSettings({api,toast,errorAt,onSaved}) {
     const remote = picked !== "local";
     information = record;
     provider.value = picked;
-    currentSelection(record.selected);
     id("model-field").hidden = !remote;
     model.value = chosenModel;
     const suggestions = (Array.isArray(record.models) ? record.models : []).filter((item) => item && typeof item.id === "string");
@@ -120,7 +152,6 @@ export function createAgentSettings({api,toast,errorAt,onSaved}) {
       ? "Each estimate sends the task text and date/time hints to " + definition.service + " through " + definition.client + ", using your signed-in subscription’s quota."
       : "Task estimation runs on this Mac.";
     shown(id("agent-sharing"),sharing);
-    paintUsage(record.lastRun);
     const notes = Array.isArray(record.durationNotes) ? record.durationNotes.filter(note => typeof note === "string" && note.trim()) : [];
     id("duration-notes").hidden = !notes.length;
     id("duration-note-list").replaceChildren(...notes.map(note => {
@@ -133,6 +164,7 @@ export function createAgentSettings({api,toast,errorAt,onSaved}) {
 
   async function load(picked,{keepModel = false, clearLogin = true} = {}) {
     const request = ++sequence;
+    const version = snapshotVersion;
     const previous = keepModel ? model.value : null;
     information = null;
     busy = true;
@@ -146,11 +178,15 @@ export function createAgentSettings({api,toast,errorAt,onSaved}) {
       if (request !== sequence || !active()) return;
       if (!picked && record.selected?.provider && record.selected.provider !== record.provider) {
         provider.value = record.selected.provider;
-        currentSelection(record.selected);
+        if (version === snapshotVersion) currentSelection(record.selected);
         id("agent-status").textContent = "Checking " + agentLabel(record.selected.provider) + "…";
         record = await api("/api/agent?provider=" + encodeURIComponent(record.selected.provider));
       }
       if (request !== sequence || !active()) return;
+      if (version === snapshotVersion) {
+        latestRun = record.lastRun;
+        currentSelection(record.selected);
+      }
       const savedModel = record.selected?.provider === record.provider ? (record.selected.model || "") : "";
       paint(record,previous === null ? savedModel : previous);
     } catch (error) {
@@ -198,13 +234,13 @@ export function createAgentSettings({api,toast,errorAt,onSaved}) {
     allowSave();
     errorAt("settings-error");
     try {
-      await api("/api/agent","POST",{provider:picked,model:choice});
-      if (active()) await load(picked);
-      if (onSaved) await onSaved();
+      const saved = await api("/api/agent","POST",{provider:picked,model:choice});
+      currentSelection(saved);
+      if (onSaved) onSaved(saved);
       toast("Task agent saved.");
     } catch (error) { if (active()) errorAt("settings-error",error.message); }
     finally { busy = false; provider.disabled = false; model.disabled = false; allowSave(); }
   });
 
-  return () => load(null);
+  return {open(snapshot) { update(snapshot); return load(snapshot?.selectedAgent?.provider); },update};
 }

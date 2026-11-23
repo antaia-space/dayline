@@ -48,7 +48,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     case 'session/prompt':
       if (options.permission) return send({ id: 101, method: 'session/request_permission', params: { sessionId: 'scoped-session', options: [{ optionId: 'yes', kind: 'allow_always' }] } });
       if (options.tool) return send({ method: 'session/update', params: { sessionId: 'scoped-session', update: { sessionUpdate: 'tool_call', toolCallId: 'x' } } });
-      const chunks = options.malformed ? ['not valid json'] : ['{"minutes":', '35}'];
+      const chunks = options.chunks || (options.malformed ? ['not valid json'] : ['{"minutes":', '35}']);
       for (const text of chunks) send({ method: 'session/update', params: { sessionId: 'scoped-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } } });
       result = { stopReason: 'end_turn', usage: { inputTokens: 42, outputTokens: 5, cachedReadTokens: 7 } }; break;
     default: return send({ id: m.id, error: { code: -32601, message: 'access-key' } });
@@ -151,4 +151,12 @@ test('refuses to open an ACP session if the CLI cannot load the isolated text-on
   const adapter = await fixture(t, { missingAgent: true });
   await assert.rejects(adapter.agyEstimate(estimate), /could not complete/);
   await assert.rejects(adapter.readLog(), { code: 'ENOENT' });
+});
+
+test('Antigravity accepts one fenced JSON response split across streamed chunks', async t => {
+  const fence = String.fromCharCode(96).repeat(3);
+  const adapter = await fixture(t,{ chunks:[fence+'json\n{"minutes":','35}\n'+fence] });
+  assert.deepEqual((await adapter.agyEstimate(estimate)).output,{minutes:35});
+  const invalid = await fixture(t,{ chunks:['explanation\n'+fence+'json\n{"minutes":35}\n'+fence] });
+  await assert.rejects(invalid.agyEstimate(estimate),/invalid JSON/);
 });

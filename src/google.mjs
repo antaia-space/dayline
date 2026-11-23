@@ -15,7 +15,7 @@ const AVAILABILITY_SCOPES = [
 const MEETING_SCOPES = [...AVAILABILITY_SCOPES, 'https://www.googleapis.com/auth/calendar.events.readonly'];
 const SYNC_SCOPES = [...AVAILABILITY_SCOPES, 'https://www.googleapis.com/auth/calendar.events'];
 const WRITABLE = new Set(['owner', 'writer', 'writerWithoutPrivateAccess']);
-const EVENT_FIELDS = 'id,etag,status,summary,start,end,colorId,extendedProperties/private,attendees(self),attendeesOmitted,recurrence,recurringEventId,hangoutLink,conferenceData/conferenceId,eventType';
+const EVENT_FIELDS = 'id,etag,status,summary,start,end,updated,transparency,colorId,extendedProperties/private,creator(email,self),organizer(email,self),attendees(self),attendeesOmitted,recurrence,recurringEventId,hangoutLink,conferenceData/conferenceId,eventType';
 const CHECK = '(?:[✓✔☑]\\uFE0F?|\\[x\\])';
 const LEADING_CHECK = new RegExp('^(?:' + CHECK + '\\s*)+', 'iu');
 const TRAILING_CHECK = new RegExp('(?:\\s*' + CHECK + ')+$', 'iu');
@@ -268,11 +268,13 @@ function normalizeEvent(event, expectedTaskId) {
   if (!event.id || !event.etag || (owned && !validInterval(start, end))) {
     throw invalidResponse('Google returned an incomplete event. Sync again to check it.');
   }
-  const calendarAppointment = Boolean(event.attendeesOmitted || event.attendees?.some(person => !person.self) ||
+  const calendarAppointment = Boolean((event.organizer && !event.organizer.self) || (event.creator && !event.creator.self) ||
+    event.attendeesOmitted || event.attendees?.some(person => !person.self) ||
     event.recurrence?.length || event.recurringEventId || event.hangoutLink || event.conferenceData?.conferenceId ||
     (event.eventType && event.eventType !== 'default'));
   return { eventId: event.id, taskId, ...splitTitle(event.summary), start, end, etag: event.etag, owned,
-    ...(calendarAppointment && { calendarAppointment: true }) };
+    ...(calendarAppointment && { calendarAppointment: true }), ...(event.transparency === 'transparent' && { transparent: true }),
+    ...(Number.isFinite(Date.parse(event.updated)) && { updated: event.updated }) };
 }
 
 async function readEvent(accessToken, calendarId, eventId) {
@@ -337,6 +339,47 @@ export async function hasOtherBusyEvent(accessToken, { calendarId, eventId, even
   return [...expected].some(id => !seen.has(id)) || live.some(event => !expected.has(event?.id) && event?.transparency !== 'transparent');
 }
 
+// Free/busy merges simultaneous events. Remove the known reservation intervals
+// from that union only after matching their IDs, private markers and ETags.
+// Other opaque events can put part of an interval straight back into the result.
+export async function busyWithoutReservations(accessToken, { calendarId, start, end, timeZone, reservations, confirm = false }) {
+  const raw = await getBusy(accessToken, { calendarIds: [calendarId], start, end });
+  const url = new URL(eventCollection(calendarId));
+  url.search = new URLSearchParams({ timeMin: start, timeMax: end, singleEvents: 'true', maxResults: '2500',
+    fields: 'kind,nextPageToken,items(id,etag,status,start,end,transparency,eventType,attendees(self,responseStatus),extendedProperties/private)' });
+  const events = (await paginatedItems(accessToken, url, 'calendar#events')).filter(e => e.status !== 'cancelled');
+  const byId = new Map(events.map(e => [e.id, e]));
+  const intervals = raw.map(b => [Date.parse(b.start), Date.parse(b.end)]);
+  let result = [...intervals];
+  for (const ref of reservations) {
+    const event = byId.get(ref.eventId), props = event?.extendedProperties?.private;
+    if (!event || event.etag !== ref.etag || props?.dayline !== '1' || props.daylineTaskId !== ref.taskId ||
+        Date.parse(eventTime(event.start)) !== Date.parse(ref.start) || Date.parse(eventTime(event.end)) !== Date.parse(ref.end)) {
+      throw new GoogleError(412, 'conditionNotMet', 'A Dayline reservation changed in Google Calendar. Sync again to check its latest time.');
+    }
+    byId.delete(ref.eventId);
+    const from = Date.parse(ref.start), until = Date.parse(ref.end);
+    result = result.flatMap(([a,b]) => b <= from || a >= until ? [[a,b]] :
+      [[a,Math.min(b,from)],[Math.max(a,until),b]].filter(([l,r]) => l < r));
+  }
+  const instant = endpoint => endpoint?.date && timeZone
+    ? DateTime.fromISO(endpoint.date, { zone: timeZone }).toMillis() : Date.parse(endpoint?.dateTime && eventTime(endpoint));
+  for (const event of byId.values()) {
+    if (event.transparency === 'transparent' || event.eventType === 'workingLocation' ||
+        event.attendees?.some(a => a.self && a.responseStatus === 'declined')) continue;
+    const a = instant(event.start), b = instant(event.end);
+    if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) throw invalidResponse('Google returned an incomplete busy period.');
+    // On the last check, a new meeting seen by events.list can be newer than
+    // the free/busy response above. It must veto the write immediately.
+    const bounds = confirm ? [[Date.parse(start), Date.parse(end)]] : intervals;
+    for (const [left,right] of bounds) {
+      const from = Math.max(a,left), until = Math.min(b,right);
+      if (from < until) result.push([from,until]);
+    }
+  }
+  return result.map(([a,b]) => ({ start: new Date(a).toISOString(), end: new Date(b).toISOString() }));
+}
+
 function actionLink(actionUrl, done) {
   const url = new URL(actionUrl);
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) {
@@ -366,7 +409,7 @@ function ownedResult(event, taskId, eventId) {
   return result;
 }
 
-export async function putTaskEvent(accessToken, { calendarId, eventId, task, actionUrl, expectedEtag }) {
+export async function putTaskEvent(accessToken, { calendarId, eventId, task, actionUrl, expectedEtag, completionAction, adjustingOverrun }) {
   const id = eventId ?? task.id.replaceAll('-', '');
   checkEventId(id);
   const color = CATEGORIES.find(category => category.id === task.category)?.googleColorId;
@@ -408,6 +451,14 @@ export async function putTaskEvent(accessToken, { calendarId, eventId, task, act
   }
 
   const patch = {};
+  if (completionAction && previous.calendarAppointment) {
+    throw new GoogleError(409, 'sharedAppointment', 'This shared calendar appointment keeps its existing time and availability.');
+  }
+  if (adjustingOverrun && (previous.calendarAppointment || previous.done || previous.transparent || current.start?.date)) {
+    throw new GoogleError(409, 'fixedAppointment', 'This calendar appointment can no longer be extended automatically.');
+  }
+  if (completionAction === 'free' && !previous.transparent) patch.transparency = 'transparent';
+  if (completionAction === 'book' && previous.transparent) patch.transparency = 'opaque';
   if (title !== previous.text || task.done !== previous.done) patch.summary = summary;
   if (color !== current.colorId) patch.colorId = color;
   const description = eventDescription(actionUrl, task.done, current.description);

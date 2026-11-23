@@ -4,6 +4,7 @@ import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { findCli, runCli } from './cli.mjs';
+import { parseGeminiEstimate } from './gemini.mjs';
 
 const agentName = 'dayline-task-estimator';
 const install = 'Install the official Google Antigravity CLI (agy) to connect Gemini.';
@@ -207,8 +208,8 @@ export function createAntigravityAdapter(locate = findCli) {
       const result = await request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'Task data\n' + JSON.stringify(estimate.input) }] });
       if (result?.stopReason !== 'end_turn') throw new Error(failed);
       let output;
-      try { output = JSON.parse(response.trim()); } catch { /* Invalid responses use local rules. */ }
-      if (!object(output)) throw new Error('Gemini returned an invalid JSON estimate.');
+      try { output = parseGeminiEstimate(response); }
+      catch { throw new Error('Gemini returned an invalid JSON estimate.'); }
       const usage = {};
       for (const [key, source] of [['inputTokens', 'inputTokens'], ['outputTokens', 'outputTokens'], ['cachedInputTokens', 'cachedReadTokens']]) {
         const value = result.usage?.[source];
