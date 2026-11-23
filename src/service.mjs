@@ -18,6 +18,7 @@ import { localTaskTitle, recordDurationFeedback } from './task-learning.mjs';
 import { adjustTaskDuration, previewAdjustedSlot, setManualDuration } from './duration.mjs';
 import { agentSelection } from './agents/manager.mjs';
 import { canWriteBookings, writesBookings } from './booking-service.mjs';
+import { receiverAccount, receiverSettings } from './receiver-choice.mjs';
 
 const id = () => randomUUID().replaceAll('-', '');
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -200,7 +201,10 @@ function copyRecord(current, next) {
 }
 
 export class DaylineService {
-  constructor({ store, vault, google = googleCalendar, readMeetings = readCalendarMeetings, estimate = estimateTask, clock = () => new Date(), bundledClient = null }) {
+  constructor({ store, vault, google = googleCalendar, readMeetings = readCalendarMeetings, estimate = estimateTask, clock = () => new Date(), bundledClient = null,
+    relayAccount = receiverSettings({}).account }) {
+    // Which connected account signs in to the receiver; see receiver-choice.mjs.
+    this.relayAccount = relayAccount;
     this.store = store;
     this.data = store.state;
     this.vault = vault;
@@ -1020,7 +1024,7 @@ export class DaylineService {
   async client() {
     if (this.data.client) return JSON.parse(await this.vault.open(this.data.client));
     if (this.bundledClient) return this.bundledClient;
-    throw invalid('Import the Antaia Google Desktop OAuth client in Settings first.', 409);
+    throw invalid('Import a Google Desktop OAuth client in Settings first.', 409);
   }
 
   async beginConnection({ expectedMode, mode = this.data.settings.calendarMode, accountSub } = {}) {
@@ -1117,8 +1121,11 @@ export class DaylineService {
   }
 
   async relayIdentity() {
-    const account = this.data.accounts.find(a => a.email?.toLowerCase().endsWith('@antaia.space'));
-    if (!account) throw invalid('Connect your Antaia Google account for live calendar notifications.', 401);
+    const account = receiverAccount(this.data.accounts, this.relayAccount);
+    if (!account) {
+      throw invalid(this.relayAccount ? 'Connect your ' + (this.relayAccount.startsWith('@') ? this.relayAccount.slice(1) + ' Google account' : 'Google account ' + this.relayAccount) +
+        ' for live calendar notifications.' : 'Connect a Google account for live calendar notifications.', 401);
+    }
     await this.token(account.sub);
     const proof = this.tokens.get(account.sub)?.identity;
     if (typeof proof !== 'string' || !proof) throw invalid('Google did not return an identity for live notifications.', 401);

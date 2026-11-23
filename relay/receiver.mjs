@@ -11,9 +11,9 @@ const lifetime = 8 * 24 * 60 * 60;
 const encoder = new TextEncoder();
 const handlePattern = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 const reservedHandles = new Set(['api', 'v1', 'health', 'assets']);
-const HANDLE = '([a-z0-9][a-z0-9._-]{0,62})', SLUG = '([a-z0-9][a-z0-9-]{0,39})', TOKEN = '([0-9a-v]{24}\\.[A-Za-z0-9_-]{27})';
-const pageRoute = new RegExp('^/' + HANDLE + '(?:/' + SLUG + '|/booking/' + TOKEN + ')?$');
-const apiRoute = new RegExp('^/api/' + HANDLE + '/(?:(page)|(book)|slots/' + SLUG + '|booking/' + TOKEN + '(?:/(reschedule|cancel))?)$');
+const HANDLE = '([a-z0-9][a-z0-9._-]{0,62})', SLUG = '([a-z0-9][a-z0-9-]{0,39})', TOKEN = '([0-9a-v]{24}\\.[A-Za-z0-9_-]{27})', CODE = '([0-9a-v]{16})';
+const pageRoute = new RegExp('^/' + HANDLE + '(?:/' + SLUG + '|/booking/' + TOKEN + '|/with/' + SLUG + '|/once/' + CODE + ')?$');
+const apiRoute = new RegExp('^/api/' + HANDLE + '/(?:(page)|(book)|slots/' + SLUG + '|group/' + SLUG + '|once/' + CODE + '|booking/' + TOKEN + '(?:/(reschedule|cancel))?)$');
 const pagePolicy = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const shell = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
   '<meta name="color-scheme" content="light dark"><meta name="robots" content="noindex"><title>Book a meeting</title>' +
@@ -90,6 +90,22 @@ function bookingHandle(value) {
   return typeof value === 'string' && handlePattern.test(value) && !reservedHandles.has(value) ? value : null;
 }
 
+// Who may use this receiver is set where it is deployed: the accounts of one
+// Google Workspace domain (ALLOWED_DOMAIN), named addresses such as personal
+// Gmail accounts (ALLOWED_EMAILS, comma-separated), or both. With neither set
+// it serves Antaia's Workspace, as it did before these settings existed.
+function member(env,payload) {
+  if (![true,'true'].includes(payload.email_verified)) return null;
+  const listed = value => typeof value==='string' ? value.toLowerCase().split(',').map(item=>item.trim()).filter(Boolean) : [];
+  const emails = listed(env.ALLOWED_EMAILS);
+  const domain = listed(env.ALLOWED_DOMAIN)[0] ?? (emails.length ? '' : 'antaia.space');
+  const address = typeof payload.email==='string' ? payload.email.toLowerCase() : '';
+  // Google sets "hd" only for an account of that Workspace; an address alone does not prove membership.
+  if (domain && payload.hd===domain) return {address:address.endsWith('@'+domain) ? address : ''};
+  if (address && emails.includes(address)) return {address};
+  return null;
+}
+
 function receiverTicket(request) {
   const header = request.headers.get('sec-websocket-protocol') || '';
   if (header.length>320) return null;
@@ -134,9 +150,9 @@ async function bookingRelay(request, env, url, time) {
     if (typeof input === 'number') return reply(input);
     return askPage(env,ticket.handle,{op:'sync',streamId:ticket.streamId,input});
   }
-  const [,handle,isPage,isBook,slug,token,action] = api;
+  const [,handle,isPage,isBook,slug,group,code,token,action] = api;
   if (!bookingHandle(handle)) return reply(404);
-  const reading = Boolean(isPage || slug || (token && !action));
+  const reading = Boolean(isPage || slug || group || code || (token && !action));
   if (request.method !== (reading ? 'GET' : 'POST')) return reply(405);
   let input;
   if (!reading) {
@@ -146,8 +162,8 @@ async function bookingRelay(request, env, url, time) {
     input = await jsonBody(request,maxGuestBody);
     if (typeof input === 'number') return reply(input,{error:'Bad request.'});
   }
-  const op = isPage ? 'page' : isBook ? 'book' : slug ? 'slots' : action || 'status';
-  return askPage(env,handle,{op,slug,token,input,ip:request.headers.get('cf-connecting-ip') || 'unknown'});
+  const op = isPage || group ? 'page' : isBook ? 'book' : slug ? 'slots' : code ? 'pass' : action || 'status';
+  return askPage(env,handle,{op,slug,group,code,token,input,ip:request.headers.get('cf-connecting-ip') || 'unknown'});
 }
 
 export function createRelay({keys = googleKeys,now = Date.now} = {}) {
@@ -181,16 +197,15 @@ export function createRelay({keys = googleKeys,now = Date.now} = {}) {
         } catch (error) {
           return reply(error.code==='ERR_JWKS_TIMEOUT' || error instanceof TypeError ? 503 : 401);
         }
-        if (typeof payload.sub!=='string' || !payload.sub.length || payload.sub.length>255 ||
-          payload.hd!=='antaia.space' || ![true,'true'].includes(payload.email_verified) ||
+        const who = member(env,payload);
+        if (typeof payload.sub!=='string' || !payload.sub.length || payload.sub.length>255 || !who ||
           ((payload.azp!==undefined || (Array.isArray(payload.aud) && payload.aud.length>1)) && payload.azp!==env.GOOGLE_CLIENT_ID)) return reply(403);
         const digest = await crypto.subtle.digest('SHA-256',encoder.encode(JSON.stringify(['dayline-device-v1',payload.sub,input.deviceId])));
         const streamId = base64url.encode(new Uint8Array(digest)), expires = Math.floor(time/1000)+lifetime;
         const [receiveToken,notifyToken] = await Promise.all([signTicket(key,streamId,'receive',expires),signTicket(key,streamId,'notify',expires)]);
         const granted = {streamId,receiveToken,notifyToken,expiresAt:expires*1000};
-        // The Workspace address is verified above; its local part names this person's booking page.
-        const address = typeof payload.email==='string' ? payload.email.toLowerCase() : '';
-        const handle = env.PAGES && address.endsWith('@antaia.space') ? bookingHandle(address.slice(0,-'@antaia.space'.length)) : null;
+        // The address is verified above; the part before "@" names this person's booking page.
+        const handle = env.PAGES && who.address ? bookingHandle(who.address.slice(0,who.address.indexOf('@'))) : null;
         if (handle) Object.assign(granted,{bookingHandle:handle,bookingToken:await signTicket(key,streamId,'booking',expires,{handle})});
         return reply(200,granted);
       }

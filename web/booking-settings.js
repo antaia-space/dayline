@@ -294,22 +294,35 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
     copyLink.disabled = !href;
     if (!href) copyLink.dataset.tip = why;
     copyLink.addEventListener("click",() => copy(href,copyLink));
-    actions.append(book,share,copyLink,pageLink(href,"external","Preview the booking page for " + type.title,why),typeMenu(type,index));
+    // A link that works for one booking only, for a time you offer to one person.
+    const once = iconButton("once",href ? "Make a single-use link" : "Single-use link. " + why,async () => {
+      once.disabled = true;
+      fail();
+      try {
+        const {url} = await api("/api/booking/passes","POST",{slug:type.slug});
+        // Publishing the link can take a few seconds, longer than a click may still copy for. Show it with its own Copy button.
+        openShare(type,url,"Single-use link","This link works for one booking of “" + type.title + "”. It stops working once a meeting is booked with it, or after 30 days.");
+      } catch (error) { fail(error.message); }
+      finally { once.disabled = false; }
+    });
+    once.disabled = !href;
+    actions.append(book,share,once,copyLink,pageLink(href,"external","Preview the booking page for " + type.title,why),typeMenu(type,index));
     card.append(main,actions);
     return card;
   }
 
   // ----------------------------------------------------------- sharing
   let share = null;
-  async function openShare(type,href) {
+  // With `note` the dialog shows one link and what it is; without, the type's link and times for an email.
+  async function openShare(type,href,label = "Share",note) {
     share?.remove();
     const box = share = element("dialog","panel small booking-share");
-    box.setAttribute("aria-label","Share " + type.title);
+    box.setAttribute("aria-label",label + " " + type.title);
     box.addEventListener("click",event => { if (event.target === box) box.close(); });
     box.addEventListener("close",() => { box.remove(); if (share === box) share = null; });
     const head = element("div","dialog-heading");
     const heading = element("div");
-    heading.append(element("p","eyebrow","Share"),element("h2","",type.title));
+    heading.append(element("p","eyebrow",label),element("h2","",type.title));
     const close = iconButton("x","Close",() => box.close());
     head.append(heading,close);
     const body = element("div","form-body");
@@ -319,6 +332,14 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
     copyLink.addEventListener("click",() => copy(href,copyLink));
     const row = element("div","booking-link");
     row.append(link,copyLink);
+    if (note) {
+      body.append(field("Link",row,note));
+      box.append(head,body);
+      root.parentElement.append(box);
+      box.showModal();
+      copyLink.focus();
+      return;
+    }
     const text = input("textarea","Loading your free times…",{rows:"7","aria-label":"Times for an email"});
     const copyTimes = action("secondary","Copy times","link");
     copyTimes.disabled = true;
@@ -551,7 +572,17 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
       const heading = element("div","booking-address");
       heading.append(element("h2","booking-heading",address ? "Meeting types for" : "Meeting types"));
       if (address) heading.append(element("strong","booking-address-email",address.email));
-      bar.append(heading,create);
+      const tools = element("div","booking-row-actions");
+      // The page of this address lists only its own meeting types.
+      const pageHref = address?.page && linkFor("with/" + address.page);
+      if (pageHref) {
+        const copyPage = action("secondary","Copy page link","link");
+        copyPage.dataset.tip = "The page that lists the meeting types of " + address.email;
+        copyPage.addEventListener("click",() => copy(pageHref,copyPage));
+        tools.append(copyPage,openLink(pageHref,"Open the page of " + address.email));
+      }
+      tools.append(create);
+      bar.append(heading,tools);
       part.append(bar);
       if (address && !address.access) {
         const note = element("div","setup-box booking-access");

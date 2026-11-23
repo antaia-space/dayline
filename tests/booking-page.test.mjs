@@ -46,7 +46,7 @@ test('manage tokens verify only for the right page, secret and an untouched id',
 test('the page offers published times, holds a requested one, and stores only the listed fields', async () => {
   const b = board();
   assert.equal((await b.call('page')).status, 404);
-  assert.deepEqual((await b.publish()).body, { requests: [], waiting: 0, publishedAt: start });
+  assert.deepEqual((await b.publish()).body, { requests: [], waiting: 0, publishedAt: start, spent: [] });
 
   // Hidden types stay off the index; internal settings are not shown to guests.
   const index = (await b.call('page')).body;
@@ -62,7 +62,7 @@ test('the page offers published times, holds a requested one, and stores only th
   const id = booked.body.token.slice(0, 24);
   assert.deepEqual(b.stored.get('ledger'), { [id]: { id, type: 'meeting', start: slot(1), end: slot(2), status: 'pending', createdAt: start,
     expiresAt: slot(1) - 30 * MINUTE, guest: { name: 'Ada Guest', email: 'ada@example.test', timeZone: 'Europe/Zurich', notes: 'Hello' } } });
-  assert.deepEqual(Object.keys(b.stored.get('page')).sort(), ['owner', 'paused', 'publishedAt', 'slots', 'streamId', 'types']);
+  assert.deepEqual(Object.keys(b.stored.get('page')).sort(), ['owner', 'passes', 'paused', 'publishedAt', 'slots', 'streamId', 'types']);
 
   // The held time and its gap are gone for every type; a type without a gap keeps its neighbours.
   assert.deepEqual((await b.call('slots', { slug: 'meeting' })).body.slots, [slot(3), slot(4)]);
@@ -187,6 +187,60 @@ test('Google Calendar corrects the copy when the owner moves or deletes a booked
   assert.equal((await b.call('status', { token: await signToken(known, 'urs', secret) })).body.status, 'confirmed');
 });
 
+test('each address the owner is booked with has its own page', async () => {
+  const b = board();
+  const coffee = { ...meeting, slug: 'coffee', title: 'Coffee chat', group: 'home' };
+  await b.publish({ page: page({ types: [{ ...meeting, group: 'work' }, { ...quiet, group: 'work' }, coffee],
+    slots: { meeting: [slot(0)], private: [slot(1)], coffee: [slot(2)] } }) });
+  const titles = async group => (await b.call('page', { group })).body.types.map(type => type.title);
+  assert.deepEqual(await titles(undefined), ['Meeting', 'Coffee chat']);
+  assert.deepEqual(await titles('work'), ['Meeting'], 'hidden types stay off the address page too');
+  assert.deepEqual(await titles('home'), ['Coffee chat']);
+  assert.equal((await b.call('page', { group: 'elsewhere' })).status, 404);
+  // Guests are told nothing about the grouping itself.
+  assert.ok(!JSON.stringify((await b.call('page')).body).includes('group'));
+});
+
+test('a single-use link books one meeting and then stops working', async () => {
+  const b = board();
+  const code = 'a'.repeat(16), other = 'b'.repeat(16);
+  const withPasses = passes => b.publish({ page: page({ passes }) });
+  const sync = input => b.call('sync', { streamId: stream, input }).then(answer => answer.body);
+  await withPasses([{ code, slug: 'private' }, { code: other, slug: 'meeting' }, { code: 'short', slug: 'meeting' }, { code: 'c'.repeat(16), slug: 'missing' }]);
+  assert.deepEqual(b.stored.get('page').passes, [{ code, slug: 'private' }, { code: other, slug: 'meeting' }]);
+
+  // The link shows the times of its meeting type, hidden or not.
+  const shown = (await b.call('pass', { code })).body;
+  assert.deepEqual([shown.type.title, shown.pass, shown.slots.length], ['Private call', code, 3]);
+  assert.equal((await b.call('pass', { code: 'z'.repeat(16) })).status, 410);
+  // It is only good for its own type.
+  assert.equal((await b.book(slot(1), { pass: code })).status, 410);
+
+  // While a request made with it waits, the link is held; a refusal frees it again.
+  const first = await b.book(slot(0), { type: 'private', pass: code });
+  assert.equal(first.status, 202);
+  assert.equal((await b.call('pass', { code })).status, 410);
+  assert.equal((await b.book(slot(2), { type: 'private', pass: code, email: 'bob@example.test' })).status, 410);
+  await sync({ outcomes: [{ id: first.body.token.slice(0, 24), kind: 'book', ok: false, reason: 'taken' }] });
+  assert.equal((await b.call('pass', { code })).status, 200);
+
+  // Once a meeting is confirmed the link is spent, also after that meeting is cancelled.
+  const second = await b.book(slot(2), { type: 'private', pass: code });
+  const id = second.body.token.slice(0, 24);
+  assert.deepEqual((await sync({ outcomes: [{ id, kind: 'book', ok: true, start: slot(2), end: slot(3) }] })).spent, [code]);
+  await b.call('cancel', { token: second.body.token });
+  await sync({ outcomes: [{ id, kind: 'cancel', ok: true }] });
+  assert.equal((await b.call('pass', { code })).status, 410);
+  assert.equal((await b.book(slot(1), { type: 'private', pass: code, email: 'cy@example.test' })).status, 410);
+  // The ordinary link of the type still works, and so does the other single-use link.
+  assert.equal((await b.book(slot(1), { type: 'private', email: 'cy@example.test' })).status, 202);
+  assert.equal((await b.call('pass', { code: other })).status, 200);
+
+  // The Mac stops publishing a spent link; the receiver then forgets it.
+  assert.deepEqual((await withPasses([{ code: other, slug: 'meeting' }])).body.spent, []);
+  assert.equal(b.stored.has('spent'), false);
+});
+
 test('stored data is deleted on schedule', async () => {
   const b = board();
   await b.publish();
@@ -281,4 +335,40 @@ test('only the signed-in Workspace member can publish their own page', async () 
       iat: seconds, exp: seconds + 3600, email_verified: true, hd: 'antaia.space', email: 'urs@antaia.space' })
       .setProtectedHeader({ alg: 'RS256', kid: 'k' }).sign(pair.privateKey) } }), older)).json();
   assert.deepEqual(Object.keys(plain).sort(), ['expiresAt', 'notifyToken', 'receiveToken', 'streamId']);
+});
+
+test('whoever deploys a receiver decides which Google accounts it serves', async () => {
+  const pair = await generateKeyPair('RS256');
+  const keys = createLocalJWKSet({ keys: [{ ...await exportJWK(pair.publicKey), kid: 'k', alg: 'RS256', use: 'sig' }] });
+  const client = 'own-app.apps.googleusercontent.com', seconds = Math.floor(start / 1000);
+  const relay = createRelay({ keys, now: () => start });
+  const base = { GOOGLE_CLIENT_ID: client, RELAY_SECRET: 'Synthetic receiver secret reserved for this test only',
+    STREAMS: { idFromName: id => id, get: () => ({ fetch: async () => new Response(null, { status: 204 }) }) }, PAGES: { idFromName: name => name, get: () => ({}) } };
+  const session = async (settings, claims) => {
+    const answer = await relay(new Request('https://relay.example.invalid/v1/session', { method: 'POST', body: JSON.stringify({ deviceId: 'd'.repeat(43) }),
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + await new SignJWT({ sub: 'subject', iss: 'https://accounts.google.com', aud: client,
+        iat: seconds, exp: seconds + 3600, email_verified: true, ...claims }).setProtectedHeader({ alg: 'RS256', kid: 'k' }).sign(pair.privateKey) } }), { ...base, ...settings });
+    return answer.ok ? (await answer.json()).bookingHandle ?? 'no page' : answer.status;
+  };
+  const member = { hd: 'example.org', email: 'ada@example.org' }, antaia = { hd: 'antaia.space', email: 'urs@antaia.space' };
+  const gmail = { email: 'Ada.Home@gmail.com' }, stranger = { email: 'someone@gmail.com' };
+
+  // With nothing set the receiver serves Antaia's Workspace, as before these settings existed.
+  assert.deepEqual([await session({}, antaia), await session({}, member), await session({}, gmail)], ['urs', 403, 403]);
+  assert.deepEqual([await session({ ALLOWED_DOMAIN: '', ALLOWED_EMAILS: '' }, antaia), await session({ ALLOWED_DOMAIN: '', ALLOWED_EMAILS: '' }, gmail)], ['urs', 403]);
+
+  // Another Workspace: its members only. An address in that domain without Google's "hd" claim is not a member.
+  const domain = { ALLOWED_DOMAIN: ' Example.org ' };
+  assert.deepEqual([await session(domain, member), await session(domain, antaia), await session(domain, gmail)], ['ada', 403, 403]);
+  assert.equal(await session(domain, { email: 'ada@example.org' }), 403);
+  assert.equal(await session(domain, { ...member, email_verified: false }), 403);
+
+  // Named addresses, for personal Google accounts. Naming them stops serving Antaia.
+  const named = { ALLOWED_EMAILS: 'ada.home@gmail.com, second@gmail.com' };
+  assert.deepEqual([await session(named, gmail), await session(named, stranger), await session(named, antaia)], ['ada.home', 403, 403]);
+  assert.equal(await session(named, { ...gmail, email_verified: 'false' }), 403);
+
+  // Both together.
+  const both = { ...domain, ...named };
+  assert.deepEqual([await session(both, member), await session(both, gmail), await session(both, stranger)], ['ada', 'ada.home', 403]);
 });

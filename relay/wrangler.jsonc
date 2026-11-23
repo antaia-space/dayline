@@ -7,7 +7,10 @@
   "logpush": false,
   "observability": { "enabled": false, "logs": { "enabled": false }, "traces": { "enabled": false } },
   "vars": {
-    "GOOGLE_CLIENT_ID": "1084728392138-s82su94gcrvrs8le83j8ck8997kid0rb.apps.googleusercontent.com"
+    "GOOGLE_CLIENT_ID": "1084728392138-s82su94gcrvrs8le83j8ck8997kid0rb.apps.googleusercontent.com",
+    // Who may use this receiver: one Google Workspace domain, and/or a comma-separated list of addresses.
+    "ALLOWED_DOMAIN": "antaia.space",
+    "ALLOWED_EMAILS": ""
   },
   "assets": { "directory": "./public" },
   "durable_objects": { "bindings": [{ "name": "STREAMS", "class_name": "DeviceStream" }, { "name": "PAGES", "class_name": "BookingPage" }] },

@@ -116,9 +116,12 @@ else {
     const vault = keychainVault(safeStorage);
     const store = openStore(dataDirectory);
     const agents = new TaskAgents({ store, helperPath: fs.existsSync(estimator) ? estimator : null });
-    service = new DaylineService({ store, vault,
+    // A build made for another receiver carries its address in receiver.json (see scripts/package-mac.mjs).
+    const { receiverSettings } = await import('../src/receiver-choice.mjs');
+    const carried = path.join(resources, 'receiver.json');
+    const { origin: relay, account: relayAccount } = receiverSettings(process.env, fs.existsSync(carried) ? JSON.parse(fs.readFileSync(carried, 'utf8')) : null);
+    service = new DaylineService({ store, vault, relayAccount,
       estimate: (text, context) => agents.estimate(text, context), bundledClient: loadBundledClient(resources) });
-    const relay = process.env.DAYLINE_PUSH_RELAY ?? 'https://dayline-calendar.antaia-space.workers.dev';
     // The person's own public booking page lives on the receiver and may be opened from Settings.
     try { bookingOrigin = relay ? new URL(relay).origin : null; } catch { bookingOrigin = null; }
     local = await startServer({ service, agents, webRoot: path.join(__dirname, '..', 'web'), port: Number(process.env.DAYLINE_PORT || 43127),

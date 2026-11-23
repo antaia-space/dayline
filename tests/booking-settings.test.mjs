@@ -51,6 +51,8 @@ test('booking settings load, validate and save for a paired planner only', async
   assert.equal((await write('/api/booking', 'PATCH', { enabled: false }, { cookie, Origin: 'https://elsewhere.example' })).status, 403);
   const first = await read();
   assert.deepEqual([first.enabled, first.status.state, first.addresses, first.notices, first.upcoming], [false, 'off', [], [], []]);
+  // A single-use link needs booking links switched on.
+  assert.equal((await write('/api/booking/passes', 'POST', { slug: 'meeting' })).status, 409);
   // Free times for sharing: paired planner only, and empty until a page is published.
   assert.equal((await fetch(app.origin + '/api/booking/times/meeting')).status, 401);
   assert.deepEqual(await (await fetch(app.origin + '/api/booking/times/meeting', { headers: { cookie } })).json(), { slots: [] });

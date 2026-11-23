@@ -88,8 +88,9 @@ function message(title, ...children) {
 }
 
 // ---------------------------------------------------------- index page
-async function home() {
-  const { ok, data } = await call('GET', '/page');
+// `group` is the page of one of the owner's addresses.
+async function home(group) {
+  const { ok, data } = await call('GET', group ? '/group/' + encodeURIComponent(group) : '/page');
   if (!ok) return message('No booking page here', h('p', { class: 'muted' }, data.error || 'Check the link you were given.'));
   document.title = 'Book a meeting with ' + data.owner.name;
   show(h('div', { class: 'card home' },
@@ -105,7 +106,8 @@ async function home() {
 
 // ----------------------------------------------------------- scheduler
 // `moving` is set when an existing booking is given a new time: { token, start, back }.
-async function scheduler(slug, moving) {
+// `moving` is set when an existing booking is given a new time; `pass` when the guest came by a single-use link.
+async function scheduler(slug, moving, pass) {
   const state = { tz: detectedZone(), zones: [], weekStart: 1, view: null, slots: null, day: null, picked: null, step: 'pick',
     sending: false, error: null, loadError: null, type: null, owner: null, open: true, first: true };
   try { state.zones = Intl.supportedValuesOf('timeZone'); } catch { /* older browsers: the detected zone alone */ }
@@ -120,7 +122,8 @@ async function scheduler(slug, moving) {
     state.slots = null;
     state.loadError = null;
     if (state.type) draw();
-    const { ok, status, data } = await call('GET', '/slots/' + encodeURIComponent(slug));
+    const { ok, status, data } = await call('GET', pass ? '/once/' + pass : '/slots/' + encodeURIComponent(slug));
+    if (!ok && status === 410) return message('This link has been used', h('p', { class: 'muted' }, 'A single-use link works for one booking. Ask for a new one.'));
     if (!ok && status === 404) return message('Nothing to book here', h('p', { class: 'muted' }, data.error || 'Check the link you were given.'));
     if (!ok) { state.loadError = data.error || 'Could not load times.'; state.slots = []; if (!state.type) return message('Could not load this page', h('p', { class: 'muted' }, state.loadError)); return draw(); }
     Object.assign(state, { type: data.type, owner: data.owner, open: data.open, slots: data.slots });
@@ -147,7 +150,7 @@ async function scheduler(slug, moving) {
     state.sending = true;
     state.error = null;
     draw();
-    const answer = await call('POST', '/book', { type: slug, start: state.picked, timeZone: state.tz, name: form.get('name'), email: form.get('email'),
+    const answer = await call('POST', '/book', { type: state.type.slug, ...(pass && { pass }), start: state.picked, timeZone: state.tz, name: form.get('name'), email: form.get('email'),
       notes: form.get('notes'), website: form.get('website') });
     if (!answer.ok) return failed(answer);
     const latest = answer.data.status === 'pending' ? await settled(answer.data.token, record => record.status === 'pending') : answer.data;
@@ -347,5 +350,7 @@ async function manage(token) {
 
 if (!handle) message('No booking page here');
 else if (second === 'booking' && third) manage(third);
+else if (second === 'with' && third) home(third);
+else if (second === 'once' && third) scheduler(null, null, third);
 else if (second) scheduler(second);
 else home();
