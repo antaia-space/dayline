@@ -86,7 +86,7 @@ export function createTaskOrder({root,api,refresh,getState,notify,repaint}) {
     const box = menu.getBoundingClientRect();
     const above = rect.bottom + box.height + 8 > window.innerHeight;
     menu.style.top = Math.max(4,above ? rect.top - box.height - 4 : rect.bottom + 4) + "px";
-    menu.style.left = Math.max(4,Math.min(rect.right - box.width,window.innerWidth-box.width-4)) + "px";
+    menu.style.left = Math.max(4,Math.min(rect.left,window.innerWidth-box.width-4)) + "px";
     handle.setAttribute("aria-expanded","true");
     for (const choice of choices) choice.disabled = !stepRequest(open,Number(choice.dataset.step));
     if (focused?.disabled) choices.find(choice => !choice.disabled)?.focus({preventScroll:true});

@@ -10,6 +10,11 @@ import { claudeEstimate, claudeStatus } from './claude.mjs';
 
 export { codexModel };
 const instructions = readFileSync(new URL('./instructions.md', import.meta.url), 'utf8');
+const commandInstructions = readFileSync(new URL('./command-instructions.md', import.meta.url), 'utf8');
+const commandSchema = { type:'object', additionalProperties:false, required:['intent','subject','instruction'], properties:{
+  intent:{type:'string',enum:['change','create','clarify']}, subject:{type:'string'}, instruction:{type:'string'}
+} };
+const comparable = text => text.normalize('NFKC').toLowerCase().replace(/\s+/gu,' ').trim();
 const providers = {
   codex: { status: codexStatus, estimate: codexEstimate },
   gemini: googleAgent,
@@ -117,6 +122,30 @@ export class TaskAgents {
     catch { throw badRequest('Dayline could not open the official client. Install it on this Mac and check again.'); }
     const choice = { codex: 'Sign in with ChatGPT', gemini: 'Google OAuth for your Google account', claude: 'your Claude subscription' }[provider];
     return { message: 'In the official client, choose ' + choice + '. Finish sign-in, then choose Check sign-in in Dayline.' };
+  }
+
+  async interpretCommand(text, { now, timeZone, selection = this.selected }) {
+    const {provider,model} = selection;
+    if (provider === 'local') return { intent:'clarify' };
+    const when = DateTime.fromJSDate(now,{zone:timeZone});
+    const input = { text, today:when.toISODate(), currentTime:when.toFormat('HH:mm'), timeZone };
+    const response = await this.adapters[provider].estimate({model,instructions:commandInstructions,input,schema:commandSchema});
+    if (provider === 'codex' && (response.model !== model || response.effort !== 'low')) {
+      throw new Error('Codex did not confirm the requested model and reasoning effort.');
+    }
+    const claudeAlias = provider === 'claude' && ['haiku','sonnet','opus'].includes(model) && response.model?.split('-').includes(model);
+    if (model && response.model !== model && !claudeAlias) throw new Error('The agent did not confirm the selected model.');
+    const agent = { ...selection, model:response.model || model, ...usageFields(response.usage) };
+    const output = response.output;
+    if (output?.intent === 'create') return {intent:'create',agent};
+    if (output?.intent !== 'change' || typeof output.subject !== 'string' || !output.subject.trim() ||
+        typeof output.instruction !== 'string' || !output.instruction.trim() || output.instruction.length > 1000) return { intent:'clarify',agent };
+    const subject = comparable(output.subject), instruction = comparable(output.instruction), source = comparable(text);
+    const bulk = /\b(?:all|every|each|both|all of|tous|toutes|todos|todas|alle|beide)\b/u;
+    if (!source.includes(subject) || !instruction.includes(subject) || (bulk.test(instruction) && !bulk.test(source))) return {intent:'clarify',agent};
+    const relative = /^(?:move|put|prioriti[sz]e)\s+.+?\s+(?:before|after|ahead of|behind)\s+(?:the\s+)?(.+?)(?:\s+task)?[.!]?$/iu.exec(instruction);
+    if (relative && !source.includes(relative[1])) return {intent:'clarify',agent};
+    return { intent:'change', instruction:output.instruction.trim(), agent };
   }
 
   async estimate(text, context) {

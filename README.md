@@ -42,13 +42,19 @@ To distribute a build with the company’s Desktop client already configured, se
 - Each task type has a consistent color. Select a task to see how its duration was estimated or edit its text, duration, type, or preferred day. If there is no opening long enough, the task appears under **Unscheduled**.
 - You can start using the planner before connecting a calendar. It finds time within your work hours and around your other tasks. After you connect, it also checks for conflicts with meetings.
 
+### Change a plan from the task field
+
+Enter **“Move the budget review task to Wednesday”** to reschedule the existing task with its estimate and checklist. You can specify a clock time, move one task before or after another in the same day, resize or rename a task, mark it done, reopen it, or move an explicitly named group. For example, **“Give the budget review 10 more minutes”** adjusts the existing reservation. **“Move all unfinished tasks from Tuesday to Friday”** moves the eligible group.
+
+Dayline resolves direct instructions locally. For indirect phrasing such as **“Wednesday would work better for the budget review”**, the selected subscription agent can interpret the sentence and its date/time context. Task matching and availability checks happen on your Mac. If two tasks match, their names and scheduling details appear under the entry field. Select the one you mean, edit the request, or explicitly choose **Add as new task**. You can keep entering other tasks while a choice is open.
+
 ### Reorder the day
 
-Drag the grip on a flexible task above or below another task in its day. You can also click or tap the grip and choose **Move earlier** or **Move later**, or focus it and use the up and down arrow keys. The same controls let you prioritize tasks in **Unscheduled**. The desktop and browser save one order. Working hours, time windows, fixed tasks and Google meetings determine where that order fits.
+Drag the grip on the left edge of a flexible task to place it above or below another task in its day. The five-minute controls stay at the right edge. You can also click or tap the grip and choose **Move earlier** or **Move later**, or focus it and use the up and down arrow keys. The same controls let you prioritize tasks in **Unscheduled**. The desktop and browser save one order. Working hours, time windows, fixed tasks and Google meetings determine where that order fits.
 
 Dayline packs flexible work into the earliest available slots and checks Google about once a minute while the app runs. When a meeting appears, moves, or disappears, the next check replans your tasks. Already-queued work can start at the end of the preceding block when a refresh comes a few minutes later and that task would still be underway. A newly entered task starts from its capture time or later. Short blocks in the day agenda take less vertical space than long ones.
 
-Checking off a task before its scheduled start frees the whole slot. The day agenda shows the checked item beside the block that takes its place, or below it on a narrow screen. Items without a matching time appear under **Completed** on their original day. Finishing a task during its slot releases the unused portion. Reopen it to schedule the unfinished work again.
+Checking off a task before its scheduled start frees the whole slot. The day agenda shows the checked item beside the block that takes its place, or below it on a narrow screen. The checked line uses a short display title. Open it for the full wording, checklist and original time. Several completions in the same slot share an expandable line. Items without a matching time appear under **Completed** on their original day. Finishing a task during its slot releases the unused portion. Reopen it to schedule the unfinished work again.
 
 ### Adjust a duration
 

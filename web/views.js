@@ -136,8 +136,8 @@ function taskControls(task, state, view,openChecklist = false) {
 
 function taskRow(task,state,day,view) {
   const row = element("div","task-row" + (task.done ? " is-done" : ""));
-  row.append(...taskControls(task,state,view));
   addOrderHandle(row,task,day,view);
+  row.append(...taskControls(task,state,view));
   return row;
 }
 
@@ -153,22 +153,61 @@ export function releasedCompletionDay(task,zone) {
   return recorded ? zonedDay(recorded,zone) : "";
 }
 
+// A completed note keeps its full accessible name and editor title. Familiar
+// correspondence phrases can be abbreviated without a second model request.
+export function shortCompletedTitle(name) {
+  const message = /^(?:write|send|compose|draft)\s+(?:(?:an?|the)\s+)?(e-?mail|message|text|reply)\s+to\s+(.+)$/iu.exec(name);
+  if (!message) return name;
+  const recipient = message[2].split(/\s+(?:about\b|regarding\b|concerning\b|to\s+(?:ask|coordinate|confirm|arrange|discuss)\b)/iu)[0].trim();
+  const verb = { message:"Message",text:"Text",email:"Email","e-mail":"Email",reply:"Reply to" }[message[1].toLowerCase()];
+  return recipient ? verb + " " + recipient : name;
+}
+
+const expandedCompletions = new Set();
+
 function completedSection(tasks,day,view,slotZone) {
   const section = element("section","completed-section" + (slotZone ? " in-slot" : ""));
   section.setAttribute("aria-label","Completed tasks for " + formatDay(day,{weekday:"long",month:"short",day:"numeric"}));
-  section.append(element("h3","completed-label",slotZone ? "Completed early" : "Completed"));
+  section.append(element("h3",slotZone ? "sr-only" : "completed-label",slotZone ? "Completed early" : "Completed"));
+  let rows = section;
+  if (slotZone && tasks.length > 1) {
+    const group = element("details","completed-group");
+    const key = tasks.map(task => task.id).join("-");
+    group.open = expandedCompletions.has(key);
+    group.ontoggle = () => {
+      if (group.isConnected) {
+        if (group.open) expandedCompletions.add(key);
+        else expandedCompletions.delete(key);
+      }
+    };
+    const summary = element("summary","completed-group-summary");
+    summary.dataset.focus = view + "-completed-group-" + key;
+    summary.setAttribute("aria-label",tasks.length + " tasks completed early. Show or hide the list.");
+    summary.append(icon("check"),element("span","completed-short-name",shortCompletedTitle(tasks[0].title || tasks[0].text)),
+      element("span","completed-count","+" + (tasks.length-1)),icon("down"));
+    group.append(summary);
+    section.append(group);
+    rows = group;
+  }
   for (const task of tasks) {
     const row = element("div","completed-row");
     const [toggle,title] = taskButtons(task,view), content = element("div","completed-content");
     content.append(title);
+    row.append(toggle,content);
     if (slotZone) {
       const {start,end} = task.completedPlannedSlot;
-      content.append(element("span","completed-time","Originally " + instantTime(start,slotZone) + "–" + instantTime(end,slotZone)));
+      const original = "Originally " + instantTime(start,slotZone) + "–" + instantTime(end,slotZone);
+      const fullTitle = task.title || task.text;
+      title.textContent = shortCompletedTitle(fullTitle);
+      title.title = fullTitle + " · " + original;
+      title.setAttribute("aria-description",original);
+      content.append(element("span","sr-only",original));
+      row.append(element("span","completed-duration",duration(Math.round((Date.parse(end)-Date.parse(start))/60000))));
+    } else {
+      const checklist = taskChecklist(task,view);
+      if (checklist) content.append(checklist);
     }
-    const checklist = taskChecklist(task,view);
-    if (checklist) content.append(checklist);
-    row.append(toggle,content);
-    section.append(row);
+    rows.append(row);
   }
   return section;
 }
@@ -353,8 +392,8 @@ function agendaTask(entry,state,day) {
   const card = element("div","agenda-block agenda-task" + (task.done ? " is-done" : ""));
   card.style.setProperty("--task-color",categoryColor(categoryOf(state,task).color));
   const openChecklist = !task.done && task.subtasks?.length <= 3 && entry.end-entry.start >= 30;
-  card.append(...taskControls(task,state,"agenda",openChecklist));
   addOrderHandle(card,task,day,"agenda");
+  card.append(...taskControls(task,state,"agenda",openChecklist));
   return card;
 }
 

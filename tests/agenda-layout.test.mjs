@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {agendaBlockSize,releasedCompletionDay,renderAgenda,renderBacklog,renderWeek} from '../web/views.js';
+import {agendaBlockSize,releasedCompletionDay,shortCompletedTitle,renderAgenda,renderBacklog,renderWeek} from '../web/views.js';
 
 const day = '2026-12-01';
 const start = Date.parse(day+'T09:00:00Z');
@@ -8,6 +8,13 @@ const at = minute => new Date(start+minute*60000).toISOString();
 const size = (minutes,fields={},type='task') => agendaBlockSize({
   kind:type,start:540,end:540+minutes,[type]:{start:at(0),end:at(minutes),...fields}
 },day,'UTC');
+
+test('completed correspondence has a compact display title and other subjects keep their wording', () => {
+  assert.equal(shortCompletedTitle('Write a message to Morgan about where to meet'),'Message Morgan');
+  assert.equal(shortCompletedTitle('Compose an email to Sam to confirm the agenda'),'Email Sam');
+  assert.equal(shortCompletedTitle('Review the materials checklist'),'Review the materials checklist');
+  assert.equal(shortCompletedTitle('Réserver la salle de réunion'),'Réserver la salle de réunion');
+});
 
 test('visible task and meeting lengths use a bounded scale and shortened tasks use their booked interval', () => {
   assert.ok(size(5).minimumRem < size(30).minimumRem);
@@ -66,6 +73,12 @@ test('places released completed tasks under their original day without reserving
   const [replacement]=named('agenda','has-completed');
   assert.match(text(replacement),/Review samples.*Completed early.*Finish early.*Originally 9:00 AM–9:05 AM.*File a note/);
   assert.equal(named('agenda','completed-row').length,3);
+  const [group]=named('agenda','completed-group');
+  assert.equal(group.open,false);
+  assert.equal(named('agenda','completed-time').length,0);
+  assert.deepEqual(named('agenda','completed-duration').map(node=>node.textContent),['5m','5m']);
+  assert.ok(flatten(replacement).some(node=>node.title?.includes('Originally 9:00 AM–9:05 AM')));
+
   assert.equal(named('week-board','completed-row').length,3);
   assert.match(text(named('agenda','completed-section').at(-1)),/After hours/);
   assert.match(text(elements.get('agenda-summary')),/10m planned/);

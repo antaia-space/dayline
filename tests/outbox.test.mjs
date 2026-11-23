@@ -44,7 +44,8 @@ test('a burst survives window restart and two windows deliver the three captures
   const env = browser(t);
   const sends = [];
   let active = 0;
-  const api = async (_url,method,body) => {
+  const api = async (url,method,body) => {
+    assert.equal(url,'/api/capture');
     assert.equal(method,'POST');
     sends.push(body.text);
     assert.equal(++active,1);
@@ -105,4 +106,57 @@ test('a definitive rejection retains the text and does not hold up valid capture
   assert.equal(outbox.entries()[0].blocked,true);
   outbox.reconcile([{id:rejected.id}]);
   assert.deepEqual(outbox.entries(),[]);
+});
+
+test('unresolved commands survive later entries and reload, and the selected task is replayed with the original capture',async t => {
+  const env = browser(t), calls = [], seen = [];
+  const change = {...task('a','Move the review to Friday'),implicit:true,captureTimeZone:'UTC',provider:'gemini',model:'example-model'};
+  const ordinary = task('b','Buy envelopes'), target = 'c'.repeat(32);
+  const prompt = {kind:'command',status:'choice',message:'Which review?',choices:[{id:target,title:'Sample review',detail:'Tuesday at 09:00'}]};
+  let loseReply = true;
+  const api = async (url,_method,body) => {
+    assert.equal(url,'/api/capture');
+    calls.push(body);
+    if (body.requestId===ordinary.id) return {id:ordinary.id};
+    if (!body.chosenTaskId) return prompt;
+    if (loseReply) { loseReply=false; throw new Error('Connection interrupted'); }
+    return {kind:'command',status:'applied',message:'Moved the review to Friday.',taskIds:[target]};
+  };
+  const outbox = make(api);
+  outbox.add(change);outbox.add(ordinary);await env.tick();await env.tick();
+  assert.deepEqual(calls.map(body=>body.requestId),[change.id,ordinary.id]);
+  assert.equal(outbox.entries()[0].text,change.text);
+  assert.deepEqual(outbox.entries()[0].command.choices,prompt.choices);
+  const next = createCaptureOutbox({api,onChange(){},onRemoteChange(){},onAccepted:(item,result)=>seen.push(result)});
+  next.reconcile([{id:target}]);await env.tick();
+  assert.equal(calls.length,2);
+  assert.equal(next.decide(change.id,{chosenTaskId:'unknown'}),false);
+  assert.equal(next.decide(change.id,{chosenTaskId:target}),true);
+  assert.equal(next.decide(change.id,{forceCreate:true}),false);
+  await env.tick();next.retry(change.id);await env.tick();
+  assert.deepEqual(calls[2],{...calls[0],chosenTaskId:target});
+  assert.deepEqual(calls[3],calls[2]);
+  assert.deepEqual(seen.at(-1).taskIds,[target]);
+  assert.deepEqual(next.entries(),[]);
+});
+
+test('unmatched and clarification requests wait for an explicit create or an acknowledged revision',async t => {
+  const env = browser(t), calls = [];
+  const first=task('a','Move the missing item'), second=task('b','Make it shorter'), revised={...task('c','Shorten the sample review by five minutes'),revises:second.id};
+  const api = async (_path,_method,body) => {
+    calls.push(body);
+    if (body.forceCreate) return {id:body.requestId};
+    if (body.requestId===revised.id) return {kind:'command',status:'applied',message:'Shortened the review.'};
+    return {kind:'command',status:body.requestId===first.id?'unmatched':'clarify',message:'Which item do you mean?'};
+  };
+  const queue=make(api);
+  queue.add(first);queue.add(second);await env.tick();await env.tick();
+  assert.deepEqual(queue.entries().map(item=>item.command.status),['unmatched','clarify']);
+  assert.ok(calls.every(body=>!body.forceCreate));
+  queue.decide(first.id,{forceCreate:true});queue.add(revised);
+  assert.ok(queue.entries().some(item=>item.id===second.id));
+  await env.tick();await env.tick();
+  assert.deepEqual(calls[2],{...calls[0],forceCreate:true});
+  assert.equal(calls[3].revises,undefined);
+  assert.deepEqual(queue.entries(),[]);
 });

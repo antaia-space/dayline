@@ -725,7 +725,9 @@ function openEditor(task) {
     info.push(element("span","",formatDay(date,{weekday:"long",month:"short",day:"numeric"}) + " · " + time));
   } else {
     const completedDay = releasedCompletionDay(task,state.settings.timeZone);
-    info.push(element("span","",completedDay ? "Completed · Planned for " + formatDay(completedDay,{weekday:"long",month:"short",day:"numeric"}) : "Unscheduled"));
+    const former = task.completedPlannedSlot;
+    const time = former ? " · " + instantTime(former.start,state.settings.timeZone) + "–" + instantTime(former.end,state.settings.timeZone) : "";
+    info.push(element("span","",completedDay ? "Completed · Planned for " + formatDay(completedDay,{weekday:"long",month:"short",day:"numeric"}) + time : "Unscheduled"));
   }
   const status = taskStatus(task);
   const estimating = task.estimateState === "queued" || task.estimateState === "estimating";

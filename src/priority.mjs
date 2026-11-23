@@ -4,7 +4,7 @@ import { canFitDuration, fullTaskMinutes, shorterDurations } from './calendar-fi
 
 const priorSlot = task => task.start && task.end ? task : task.lastLocalSlot;
 const overlaps = (a, b) => Date.parse(a.start) < Date.parse(b.end) && Date.parse(b.start) < Date.parse(a.end);
-const captured = task => Math.max(Date.parse(task.estimateRequestedAt || task.createdAt), Date.parse(task.reopenedAt) || 0);
+const captured = task => Math.max(Date.parse(task.estimateRequestedAt || task.createdAt), Date.parse(task.reopenedAt) || 0, Date.parse(task.commandMovedAt) || 0);
 
 export function canMoveLocalTask(task, now) {
   if (task.pendingEstimate || task.done || task.held || task.deleting || task.remote || task.intent) return false;

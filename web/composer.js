@@ -1,10 +1,12 @@
 import { addDays, duration, formatDay, instantTime, zonedDay } from "./ui.js";
 import { createCaptureOutbox, localRead, localWrite, recordsWithPrefix } from "./outbox.js";
+import { createAffectedTaskLinks, createCommandPrompts } from "./commands.js";
 
 const byId = id => document.getElementById(id);
 const draftKey = "dayline.taskDraft";
 const draftPrefix = "dayline.draft.";
 const receiptKey = "dayline.lastCapture";
+const resultKey = "dayline.lastCommandResult";
 const clients = { local:"the local agent", codex:"Codex", gemini:"Google Gemini", claude:"Claude Code" };
 
 function readJSON(raw) { try { return JSON.parse(raw); } catch { return null; } }
@@ -30,11 +32,39 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
   let selected = draft?.day || null, implicit = Boolean(selected && draft?.implicit);
   let lastContext = "", choicesKey = "", issueKey = "", legacyChecked = false;
   let receipt = readJSON(localRead("sessionStorage",receiptKey) ?? localRead("localStorage",receiptKey));
+  const focusInput = () => input.focus({preventScroll:true});
+  const affectedLinks = createAffectedTaskLinks(byId("affected-tasks"),openAffected);
+  const prompts = createCommandPrompts(byId("capture-commands"),{
+    decide(item,decision) {
+      if (outbox.decide(item.id,decision)) { remember(item); update(); focusInput(); }
+    },
+    edit(item) {
+      if (input.value.trim() && draft?.revises !== item.id) { error("Finish your current entry before editing this request."); focusInput(); return; }
+      selected = item.day || null; implicit = Boolean(item.implicit);
+      input.value = item.text;
+      storeDraft({id:crypto.randomUUID().replaceAll("-",""),text:item.text,day:selected,implicit,revises:item.id,updatedAt:Date.now()});
+      error(); update(); focusInput();
+    },
+    dismiss(item) {
+      outbox.remove(item.id);
+      if (receipt?.id === item.id) {
+        receipt = null;
+        localWrite("sessionStorage",receiptKey,null);
+        if (readJSON(localRead("localStorage",receiptKey))?.id === item.id) localWrite("localStorage",receiptKey,null);
+      }
+      update(); focusInput();
+    },
+    retry:id => outbox.retry(id),focusInput
+  });
   input.value = draft?.text || "";
-  const outbox = createCaptureOutbox({api,onChange:update,onRemoteChange:() => { void refresh(true); },onAccepted(item) {
+  const latestResult = readJSON(localRead("localStorage",resultKey));
+  if (receipt && latestResult?.id === receipt.id) Object.assign(receipt,latestResult);
+  const outbox = createCaptureOutbox({api,onChange:update,onRemoteChange:() => { void refresh(true); },onAccepted(item,result) {
     // Storage-denied browsers keep their original text until the local service acknowledges it.
-    if (draft?.id === item.id) { storeDraft(null); input.value = ""; lastContext = ""; }
-    if (receipt?.id === item.id) receipt.ackAt = Date.now();
+    if (draft?.id === item.id) { storeDraft(null); input.value = ""; lastContext = ""; error(); }
+    const ack = {id:item.id,ackAt:Date.now(),...(result.kind === "command" && result.status === "applied" && {command:result})};
+    if (ack.command) localWrite("localStorage",resultKey,JSON.stringify(ack));
+    if (receipt?.id === item.id) { Object.assign(receipt,ack); saveReceipt(); }
     void refresh(true);
   }});
 
@@ -56,13 +86,18 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
   function capture() {
     if (!input.value.trim()) { if (draft) storeDraft(null); return; }
     if (draft?.text === input.value && draft.day === selected && Boolean(draft.implicit) === implicit) return;
-    storeDraft({id:crypto.randomUUID().replaceAll("-",""),text:input.value,day:selected,implicit,updatedAt:Date.now()});
+    storeDraft({id:crypto.randomUUID().replaceAll("-",""),text:input.value,day:selected,implicit,
+      ...(draft?.revises && {revises:draft.revises}),updatedAt:Date.now()});
   }
   function remember(item) {
     receipt = {id:item.id,text:item.text,provider:item.provider,model:item.model};
+    saveReceipt(true);
+  }
+  function saveReceipt(newest = false) {
     const value = JSON.stringify(receipt);
     localWrite("sessionStorage",receiptKey,value);
-    localWrite("localStorage",receiptKey,value);
+    const shared = readJSON(localRead("localStorage",receiptKey));
+    if (newest || !shared || shared.id === receipt.id) localWrite("localStorage",receiptKey,value);
   }
   function error(message = "") {
     byId("quick-error").textContent = message;
@@ -86,11 +121,10 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
       picker.replaceChildren(new Option("Auto-schedule",""),...preferredOption,...days.map(day => new Option("On " + name(day),day)));
     }
     picker.value = implicit && selected ? "view:" + selected : selected || "";
-    picker.title = implicit ? "Use this day unless your task names a date." : "Choose a date, or let Dayline find the next opening.";
-    input.placeholder = selected ? "What needs doing that day?" : ctx.compact ? "e.g. Review deck, 45m" : "Add a task, e.g. review the deck for 45 minutes tomorrow";
+    picker.title = implicit ? "Preferred day for new tasks. A date in your wording takes priority." : "Choose a date for new tasks, or let Dayline find an opening.";
   }
   function sendIssues(waiting) {
-    const issues = waiting.filter(item => item.problem);
+    const issues = waiting.filter(item => item.problem && !item.command);
     const signature = JSON.stringify(issues.map(item => [item.id,item.problem,item.blocked]));
     if (signature === issueKey) return;
     issueKey = signature;
@@ -144,8 +178,12 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
     dayOptions(ctx);
     const waiting = outbox.entries();
     sendIssues(waiting);
+    prompts(waiting.filter(item => item.command));
     const task = receipt && ctx.state.tasks.find(item => item.id === receipt.id);
     const unsent = receipt && waiting.find(item => item.id === receipt.id);
+    const command = unsent?.command || receipt?.command;
+    const affected = command?.status === "applied" ? command.taskIds.map(id => ctx.state.tasks.find(item => item.id === id)).filter(Boolean) : [];
+    affectedLinks(affected);
     let message = "";
     if (task) {
       const title = "“" + shortTitle(task.title || task.text) + "”";
@@ -161,17 +199,23 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
         message = title + " scheduled " + when + ".";
       } else if (task.syncStatus === "pending" && ctx.state.connection.connected) message = "Checking calendar availability for " + title + "…";
       else message = title + " is in Unscheduled." + (task.issue ? " " + task.issue : "");
+    } else if (unsent?.command) {
+      message = unsent.decision ? "Saving your choice…" : "Your planner request needs a response below.";
+    } else if (command?.status === "applied") {
+      message = command.message;
     } else if (unsent) {
       message = (unsent.problem ? "Waiting to save " : "Saving ") + "“" + shortTitle(unsent.text) + "” on this Mac.";
     } else if (receipt?.ackAt && Date.now() - receipt.ackAt < 10000) message = "Saved “" + shortTitle(receipt.text) + "” on this Mac.";
-    const other = waiting.length - (unsent ? 1 : 0);
-    if (other) message += (message ? " " : "") + other + (other === 1 ? " task waiting to send." : " tasks waiting to send.");
+    const other = waiting.filter(item => item.id !== unsent?.id && (!item.command || item.decision)).length;
+    if (other) message += (message ? " " : "") + other + (other === 1 ? " entry waiting to send." : " entries waiting to send.");
     const status = byId("entry-status");
     byId("entry-feedback").hidden = !message;
     if (status.textContent !== message) status.textContent = message;
     const action = byId("view-added");
-    action.hidden = !task;
-    if (task) action.setAttribute("aria-label","View task — " + (task.title || task.text));
+    const target = task || (affected.length === 1 && affected[0]);
+    action.hidden = !target;
+    action.dataset.id = target?.id || "";
+    if (target) action.setAttribute("aria-label","View task — " + (target.title || target.text));
   }
   function choose(day,focus = true,fromView = false) {
     selected = day || null; implicit = Boolean(selected && fromView);
@@ -184,9 +228,15 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
     const fromView = picker.value.startsWith("view:");
     choose(fromView ? picker.value.slice(5) : picker.value,false,fromView);
   });
-  byId("view-added").addEventListener("click",() => {
-    const task = context().state?.tasks.find(item => item.id === receipt?.id);
+  function openAffected(id) {
+    const task = context().state?.tasks.find(item => item.id === id);
     if (task) { showLocation(task); openTask(task); }
+  }
+  byId("view-added").addEventListener("click",() => openAffected(byId("view-added").dataset.id));
+  window.addEventListener("storage",event => {
+    if (event.key !== resultKey || !receipt) return;
+    const ack = readJSON(event.newValue);
+    if (ack?.id === receipt.id) { Object.assign(receipt,ack); saveReceipt(); void refresh(true); }
   });
   form.addEventListener("submit",event => {
     event.preventDefault();
@@ -195,7 +245,7 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
     capture();
     const agent = ctx.state.selectedAgent || {};
     const item = {id:draft.id,text:draft.text.trim(),day:draft.day,implicit:Boolean(draft.implicit),createdAt:Date.now(),
-      captureTimeZone:ctx.state.settings.timeZone,provider:agent.provider,model:agent.model,effort:agent.effort};
+      captureTimeZone:ctx.state.settings.timeZone,provider:agent.provider,model:agent.model,effort:agent.effort,...(draft.revises && {revises:draft.revises})};
     const saved = outbox.add(item);
     remember(item);
     if (saved) { storeDraft(null); input.value = ""; lastContext = ""; }

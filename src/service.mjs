@@ -5,7 +5,8 @@ import metadata from '../package.json' with { type: 'json' };
 import * as googleCalendar from './google.mjs';
 import { readCalendarMeetings } from './meetings.mjs';
 import { MeetingAgenda, meetingRange } from './meeting-agenda.mjs';
-import { CATEGORIES, estimateTask, explicitStartFor, findSlot, planningRange } from './planner.mjs';
+import { CATEGORIES, estimateTask, explicitStartFor, findSlot, planningRange, resizedClockWindow } from './planner.mjs';
+import { executePlannerCommand, guardCommandCapture, protectedCommandAppointment, settlePlannerClarification } from './planner-command-service.mjs';
 import { canMoveLocalTask, explicitSchedulingIssue, nextFlexibleSlot, planFlexibleSlots, planTaskSlots } from './priority.mjs';
 import { fullTaskMinutes } from './calendar-fit.mjs';
 import { releaseCompletedTime, reopenCompletedTask } from './completion.mjs';
@@ -58,7 +59,7 @@ const completedBesideMeeting = task => task.done && task.remote?.calendarAppoint
 
 function safeTask(task) {
   const { remote, dirty, intent, pausedSync, lastLocalSlot, held, deleting, estimateJob, estimateOverrides, orderRequestedAt,
-    estimateRequestedAt, estimateRetryIds, estimateRemoteTitle, durationRequests, durationCheckPending, overrunWatchStart, ...visible } = task;
+    estimateRequestedAt, estimateRetryIds, estimateRemoteTitle, durationRequests, durationCheckPending, overrunWatchStart, commandEventPending, commandMovedAt, ...visible } = task;
   const text = estimateJob?.text ?? task.text;
   const active = task.estimateState === 'queued' || task.estimateState === 'estimating';
   return { ...visible, ...(completedBesideMeeting(task) && { start: null, end: null }),
@@ -86,7 +87,7 @@ function estimateOverrides(task, timeZone) {
   return overrides;
 }
 
-function applyEstimate(task, estimate, overrides) {
+function applyEstimate(task, estimate, overrides, timeZone) {
   if (!estimate.pendingEstimate) updateSubtasks(task, estimate.subtasks);
   if (!estimate.pendingEstimate) {
     delete task.calendarFit;
@@ -109,6 +110,10 @@ function applyEstimate(task, estimate, overrides) {
     Object.assign(task, { earliestDay: overrides.day, latestDay: overrides.day, deadlineTime: null });
   } else if (overrides.viewDay && !task.earliestDay && !task.latestDay) {
     task.earliestDay = task.latestDay = overrides.viewDay;
+  }
+  if (overrides.time && Number.isSafeInteger(task.minutes) && task.minutes > 0) {
+    task.windowStart = overrides.time;
+    task.windowEnd = resizedClockWindow(task, task.minutes, timeZone);
   }
 }
 
@@ -331,11 +336,12 @@ export class DaylineService {
 
   canReorderTask(task, now) {
     if (task.done || task.deleting || task.held || task.pendingEstimate || task.estimateJob || task.intent ||
-        (task.end && Date.parse(task.end) <= now.getTime()) || explicitStartFor(task, this.data.settings.timeZone)) return false;
+        task.pausedSync?.intent || protectedCommandAppointment(task) || (task.end && Date.parse(task.end) <= now.getTime()) ||
+        explicitStartFor(task, this.data.settings.timeZone)) return false;
     return !task.remote || this.movableFlexibleEvent(task, now);
   }
 
-  reorderTask(taskId, { targetId, placement, day }) {
+  reorderedTaskList(taskId, { targetId, placement, day }) {
     if (!['before', 'after'].includes(placement) || typeof targetId !== 'string' || !/^[a-f0-9]{32}$/.test(targetId) || taskId === targetId) {
       throw invalid('Choose another task to move this one before or after.');
     }
@@ -354,9 +360,9 @@ export class DaylineService {
     reordered.splice(reordered.indexOf(target) + (placement === 'after' ? 1 : 0), 0, task);
     const later = placement === 'after' ? task : target;
     const displaced = later.start && Date.parse(later.start) < now.getTime() && !later.remote ? later : null;
-    if (reordered.every((item, i) => members[i] === item) && !displaced) return { id: task.id };
+    if (reordered.every((item, i) => members[i] === item) && !displaced) return this.data.tasks;
     const indices = new Map(members.map((item, i) => [item, i]));
-    const proposed = this.data.tasks.map(original => {
+    return this.data.tasks.map(original => {
       if (!indices.has(original)) return original;
       const item = reordered[indices.get(original)];
       if (item !== task && item !== displaced) return item;
@@ -368,12 +374,20 @@ export class DaylineService {
         changed.syncStatus = 'pending';
         delete changed.lastLocalSlot;
         delete changed.durationCheckPending;
+        delete changed.overrunWatchStart;
+        delete changed.overrunMinutes;
       }
       return changed;
     });
-    if (this.data.accounts.length) this.commitTaskList(proposed);
-    else this.persistLocalPlan(proposed, true);
-    return { id: task.id };
+  }
+
+  reorderTask(taskId, input) {
+    const proposed = this.reorderedTaskList(taskId, input);
+    if (proposed !== this.data.tasks) {
+      if (this.data.accounts.length) this.commitTaskList(proposed);
+      else this.persistLocalPlan(proposed, true);
+    }
+    return { id: taskId };
   }
 
   localBusy(except) {
@@ -458,16 +472,15 @@ export class DaylineService {
   captureDraft(input) {
     const text = taskText(input.text);
     if (input.requestId != null && (typeof input.requestId !== 'string' || !/^[a-f0-9]{32}$/.test(input.requestId))) throw invalid('Invalid task request identifier.');
+    guardCommandCapture(this.data, input);
     if (input.requestId && (this.data.tasks.some(t => t.id === input.requestId) || this.data.deletedTaskIds?.includes(input.requestId))) return null;
     const day = requestedDay(input.day);
     const viewDay = requestedDay(input.viewDay);
-    const now = capturedAt(input.capturedAt, this.clock());
-    if (input.captureTimeZone != null && (typeof input.captureTimeZone !== 'string' ||
-        !(IANAZone.isValidZone(input.captureTimeZone) || input.captureTimeZone === 'UTC'))) throw invalid('Choose a valid capture time zone.');
+    const context = this.captureContext(input);
     const task = {
       id: input.requestId || id(), text,
       start: null, end: null, done: false, syncStatus: 'pending', issue: null,
-      createdAt: now.toISOString(), dirty: this.data.settings.calendarMode === 'sync' ? { schedule: true } : {}, remote: null, intent: null, held: false
+      createdAt: context.at, dirty: this.data.settings.calendarMode === 'sync' ? { schedule: true } : {}, remote: null, intent: null, held: false
     };
     const overrides = {};
     if (day) overrides.day = day;
@@ -475,6 +488,13 @@ export class DaylineService {
     task.estimateOverrides = overrides;
     updateSubtasks(task);
     return task;
+  }
+
+  captureContext(input) {
+    const at = capturedAt(input.capturedAt, this.clock()).toISOString();
+    const timeZone = input.captureTimeZone ?? this.data.settings.timeZone;
+    if (typeof timeZone !== 'string' || (timeZone !== 'UTC' && !IANAZone.isValidZone(timeZone))) throw invalid('Choose a valid capture time zone.');
+    return { at, timeZone };
   }
 
   captureSelection(clientAgent, createdAt) {
@@ -492,7 +512,7 @@ export class DaylineService {
     if (!task) return input.requestId;
     const estimate = await this.estimate(task.text, { now: new Date(task.createdAt), timeZone: input.captureTimeZone || this.data.settings.timeZone,
       taskId: task.id, ...(input.captureAgent != null && { selection: this.captureSelection(input.captureAgent, task.createdAt) }) });
-    applyEstimate(task, estimate, task.estimateOverrides);
+    applyEstimate(task, estimate, task.estimateOverrides, input.captureTimeZone || this.data.settings.timeZone);
     if (task.pendingEstimate) waitForEstimate(task);
     if (!this.data.accounts.length) {
       this.persistLocalPlan([...this.data.tasks, task]);
@@ -509,10 +529,13 @@ export class DaylineService {
     task.title = localTaskTitle(task.text);
     task.earliestDay = task.latestDay = task.estimateOverrides.day || task.estimateOverrides.viewDay || null;
     this.stageEstimate(task, task.text, false, { at: task.createdAt, timeZone: input.captureTimeZone, agent: this.captureSelection(input.captureAgent, task.createdAt) });
+    const priorCommand = input.forceCreate === true && this.data.plannerCommands?.[task.id];
+    if (priorCommand) delete this.data.plannerCommands[task.id];
     this.data.tasks.push(task);
     try { this.store.save(); }
     catch (error) {
       this.data.tasks.splice(this.data.tasks.indexOf(task), 1);
+      if (priorCommand) this.data.plannerCommands[task.id] = priorCommand;
       throw error;
     }
     this.wakeEstimateWorker();
@@ -627,14 +650,14 @@ export class DaylineService {
         if (!estimate || estimate.pendingEstimate || !Number.isSafeInteger(estimate.minutes) || estimate.minutes < 1) {
           changed.estimateState = 'failed';
           changed.estimateJob.notice = estimate?.agent?.notice || estimateFailed;
-          if (!job.protected && estimate?.pendingEstimate) applyEstimate(changed, estimate, changed.estimateOverrides);
+          if (!job.protected && estimate?.pendingEstimate) applyEstimate(changed, estimate, changed.estimateOverrides, job.timeZone);
           this.saveEdit(task, changed);
           return false;
         }
         const before = captureTask(changed);
         changed.text = job.text;
         changed.title = estimate.title || localTaskTitle(job.text);
-        applyEstimate(changed, estimate, changed.estimateOverrides || {});
+        applyEstimate(changed, estimate, changed.estimateOverrides || {}, job.timeZone);
         changed.estimateState = null;
         changed.estimateJob = null;
         if (before.title !== changed.title || before.text !== changed.text) changed.dirty.text = true;
@@ -664,7 +687,7 @@ export class DaylineService {
     const previous = captureTask(task);
     const wasPending = task.pendingEstimate;
     task.text = text;
-    applyEstimate(task, estimate, overrides);
+    applyEstimate(task, estimate, overrides, zone);
     task.estimateRequestedAt = requested.toISOString();
     if (previous.text !== text || previous.title !== task.title) task.dirty.text = true;
     if (previous.category !== task.category) task.dirty.category = true;
@@ -687,6 +710,14 @@ export class DaylineService {
 
   enqueueEdit(taskId, input) {
     return this.editTask(taskId, input, true);
+  }
+
+  runPlannerCommand(input, options) {
+    return executePlannerCommand(this, input, options);
+  }
+
+  settlePlannerClarification(input, message) {
+    return settlePlannerClarification(this, input, message);
   }
 
   adjustDuration(taskId, input) {
@@ -757,6 +788,16 @@ export class DaylineService {
         else await this.reviseEstimate(changed, text);
       }
     }
+    this.applyTaskFields(changed, input);
+    const learning = this.data.durationLearning;
+    if (owns(input, 'minutes') && task.minutes !== changed.minutes) recordDurationFeedback(this.data, task, changed);
+    try { this.saveEdit(task, changed, { durationOnly: Object.keys(input).length === 1 && owns(input, 'minutes') }); }
+    catch (error) { this.data.durationLearning = learning; throw error; }
+    if (queueEstimate) this.wakeEstimateWorker();
+    return taskId;
+  }
+
+  applyTaskFields(changed, input) {
     const overrides = estimateOverrides(changed, this.data.settings.timeZone);
     changed.estimateOverrides = overrides;
     if (owns(input, 'title')) {
@@ -786,18 +827,12 @@ export class DaylineService {
       }
     }
     if (owns(input, 'done')) this.setTaskCompletion(changed, input.done);
-    const learning = this.data.durationLearning;
-    if (owns(input, 'minutes') && task.minutes !== changed.minutes) recordDurationFeedback(this.data, task, changed);
-    try { this.saveEdit(task, changed, { durationOnly: Object.keys(input).length === 1 && owns(input, 'minutes') }); }
-    catch (error) { this.data.durationLearning = learning; throw error; }
-    if (queueEstimate) this.wakeEstimateWorker();
-    return taskId;
   }
 
-  saveEdit(task, changed, { durationOnly = false } = {}) {
+  prepareSavedEdit(task, changed, { durationOnly = false } = {}) {
     if (changed.pendingEstimate) {
       waitForEstimate(changed);
-      return this.commitEdit(task, changed);
+      return;
     }
     if (durationOnly && (changed.done || changed.remote?.allDay)) delete changed.dirty.schedule;
     if (changed.dirty.schedule) changed.held = false;
@@ -811,7 +846,7 @@ export class DaylineService {
       }
       if (this.data.settings.calendarMode === 'availability') changed.dirty = {};
       if (changed.done || changed.start) changed.syncStatus = 'local';
-      return this.commitEdit(task, changed);
+      return;
     }
     if (this.data.settings.calendarMode === 'availability') {
       const needsPlacement = Boolean(changed.dirty.schedule);
@@ -830,6 +865,10 @@ export class DaylineService {
         changed.syncStatus = 'local';
       }
     }
+  }
+
+  saveEdit(task, changed, options) {
+    this.prepareSavedEdit(task, changed, options);
     this.commitEdit(task, changed);
   }
 
@@ -1683,7 +1722,10 @@ export class DaylineService {
     let ref = task.remote || task.intent;
     if (ref) this.syncPermission(ref.sub);
     else this.target();
-    if (task.remote && !Object.keys(task.dirty).length) return;
+    if (task.remote && !Object.keys(task.dirty).length) { delete task.commandEventPending; return; }
+    if (task.commandEventPending && protectedCommandAppointment(task)) {
+      throw invalid('Google Calendar now protects this appointment. Review it in Google Calendar before changing its reservation.', 409);
+    }
     if (ref && !this.calendars.some(c => c.sub === ref.sub && c.providerId === ref.calendarId && c.writable)) {
       throw invalid('Reconnect the original writable calendar to sync this task.', 409);
     }
@@ -1772,6 +1814,7 @@ export class DaylineService {
     }
     const event = await this.writeEvent(task, ref, slot, rangeCache,completionAction);
     const issue = task.issue;
+    if (!waitingForSlot) delete task.commandEventPending;
     task.dirty = waitingForSlot ? { schedule: true } : {};
     this.acceptRemote(task, event, ref);
     // The response is authoritative, including recovery from an idempotent duplicate insert.

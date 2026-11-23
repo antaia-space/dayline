@@ -309,6 +309,10 @@ function displayWindow({ low, high, exact }, minutes) {
 }
 
 function sourceClocks(task, timeZone) {
+  const directedTime = task?.estimateOverrides?.time;
+  if (typeof directedTime === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(directedTime)) {
+    return { exact: clockValue(directedTime), low: null, high: null };
+  }
   if (typeof task?.text !== 'string' || !task.text) return null;
   const captured = instantInZone(task.estimateRequestedAt || task.createdAt, timeZone).startOf('day');
   if (!captured.isValid) return null;
@@ -488,7 +492,7 @@ export function findSlot({ task, settings, busy = [], now, horizonDays = 28, all
   const days = cache ? cached(cache.days, JSON.stringify([now, task.earliestDay, task.latestDay, horizonDays]), calendarDays) : calendarDays();
   if (!days || !Array.isArray(settings.workDays) || !Number.isSafeInteger(task.minutes) || task.minutes < 1) return null;
   const readWording = () => sourceClocks(task, settings.timeZone);
-  const wording = cache ? cached(cache.wording, JSON.stringify([task.text, task.estimateRequestedAt || task.createdAt]), readWording) : readWording();
+  const wording = cache ? cached(cache.wording, JSON.stringify([task.text, task.estimateRequestedAt || task.createdAt, task.estimateOverrides?.time]), readWording) : readWording();
   const exact = wording?.exact;
   // The written clock wins over an older model's window. An actual "before",
   // "after", range or deadline in the same wording still bounds the full task.
@@ -503,7 +507,7 @@ export function findSlot({ task, settings, busy = [], now, horizonDays = 28, all
   const nowMillis = days.current.toMillis();
   const captured = task.estimateRequestedAt || task.createdAt;
   const capturedAt = allowInProgress && captured != null
-    ? Math.max(instantInZone(captured, settings.timeZone).toMillis(), Date.parse(task.reopenedAt) || 0) : Infinity;
+    ? Math.max(instantInZone(captured, settings.timeZone).toMillis(), Date.parse(task.reopenedAt) || 0, Date.parse(task.commandMovedAt) || 0) : Infinity;
   const nextDay = day => {
     const next = () => day.plus({ days: 1 }).startOf('day');
     return cache ? cached(cache.nextDays, day.toMillis(), next) : next();

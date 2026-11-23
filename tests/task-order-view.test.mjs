@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {addOrderHandle,orderRequest} from '../web/task-order.js';
-import {fittedDuration,freeTimeRows} from '../web/views.js';
+import {fittedDuration,freeTimeRows,renderAgenda,renderBacklog,renderWeek} from '../web/views.js';
 
 test('reorder controls send a same-list target and distinguish adjacent and long moves from no-ops', () => {
   const day = '2026-12-01', ids = ['draft','review','notes','email'];
@@ -58,5 +58,40 @@ test('only server-authorized tasks render a named keyboard and pointer handle in
     assert.equal(grip.attributes['aria-haspopup'],'menu');
     assert.equal(grip.attributes['aria-keyshortcuts'],'ArrowUp ArrowDown');
     assert.equal(grip.dataset.focus,view+'-order-draft');
+  }
+});
+
+test('each task surface puts the reorder button first and keeps duration buttons in their own control group', t => {
+  function node(tag) {
+    const item = {tag,className:'',dataset:{},attributes:{},children:[],style:{setProperty(){}},
+      setAttribute(key,value){ this.attributes[key]=value; },append(...items){ this.children.push(...items); },
+      replaceChildren(...items){ this.children=items; }};
+    item.classList={add:name => { item.className += ' ' + name; }};
+    return item;
+  }
+  const elements=new Map(), previous=globalThis.document;
+  globalThis.document={createElement:node,createElementNS:(_,tag)=>node(tag),createTextNode:()=>node('text'),
+    getElementById(id){ if (!elements.has(id)) elements.set(id,node('div')); return elements.get(id); }};
+  t.after(()=>{ if (previous) globalThis.document=previous; else delete globalThis.document; });
+  const each=root=>[root,...root.children.flatMap(each)];
+  const day='2026-12-01',context={monday:'2026-11-30',selected:day,today:day};
+  const scheduled={id:'movable',text:'Review examples',start:day+'T09:00:00Z',end:day+'T09:15:00Z',minutes:15,canReorder:true};
+  const locked={...scheduled,id:'appointment',start:day+'T10:00:00Z',end:day+'T10:15:00Z',canReorder:false};
+  const backlog={...scheduled,id:'waiting',start:null,end:null};
+  const state={tasks:[scheduled,locked,backlog],categories:[],busy:[],now:day+'T08:30:00Z',connection:{connected:false},
+    settings:{timeZone:'UTC',workDays:[1,2,3,4,5],startTime:'09:00',endTime:'17:00'}};
+  renderWeek(state,context); renderAgenda(state,context); renderBacklog(state);
+  for (const [container,id] of [['week-board','movable'],['agenda','movable'],['backlog-content','waiting']]) {
+    const row=each(elements.get(container)).find(part=>part.dataset.orderItem===id);
+    const actions=each(row).filter(part=>part.tag==='button').map(part=>part.dataset.action);
+    assert.deepEqual(actions,['task-order','toggle-task','edit-task','adjust-duration','adjust-duration']);
+    const group=each(row).find(part=>part.attributes.role==='group');
+    assert.equal(group.dataset.durationFor,id);
+    assert.deepEqual(group.children.filter(part=>part.tag==='button').map(part=>part.dataset.delta),['-5','5']);
+  }
+  for (const container of ['week-board','agenda']) {
+    const lockedGroup=each(elements.get(container)).find(part=>part.dataset.durationFor===locked.id);
+    assert.ok(lockedGroup);
+    assert.equal(each(elements.get(container)).filter(part=>part.dataset.orderItem===locked.id).length,0);
   }
 });

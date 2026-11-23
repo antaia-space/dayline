@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { invalid } from './service.mjs';
 import { durationNotes } from './task-learning.mjs';
+import { createCaptureHandler } from './capture.mjs';
 
 const POLICY = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.png': 'image/png' };
@@ -40,6 +41,7 @@ function page(title, body, link = '/', label = 'Open planner') {
 export async function startServer({ service, agents, webRoot, port = 43127, intervalMs = 60000 }) {
   const sessionSecret = randomBytes(32).toString('base64url');
   const invitations = new Map();
+  const capture = createCaptureHandler(service,agents);
   let durationSyncTimer;
   let cookieName;
   let origin;
@@ -108,7 +110,11 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
       const subtask = SUBTASK_ROUTE.exec(pathname);
       let status = 200;
       let syncAfter = true;
-      if (req.method === 'POST' && pathname === '/api/tasks') {
+      if (req.method === 'POST' && pathname === '/api/capture') {
+        result = await capture(body);
+        status = result.kind === 'command' ? 200 : 202;
+        syncAfter = result.status === 'applied';
+      } else if (req.method === 'POST' && pathname === '/api/tasks') {
         result.id = await service.run(() => service.enqueueTask(body));
         status = 202;
         syncAfter = false;

@@ -1,5 +1,16 @@
 const prefix = "dayline.capture.";
 const keyFor = id => prefix + id;
+const waitingToSend = item => !item.blocked && (!item.command || item.decision);
+
+function commandResult(result) {
+  if (result?.kind !== "command" || !["applied","choice","unmatched","clarify"].includes(result.status) ||
+      typeof result.message !== "string" || !result.message.trim()) return null;
+  const choices = (Array.isArray(result.choices) ? result.choices : [])
+    .filter(choice => typeof choice?.id === "string" && typeof choice.title === "string")
+    .map(({id,title,detail}) => ({id,title,...(typeof detail === "string" && detail && {detail})}));
+  const taskIds = [...new Set(Array.isArray(result.taskIds) ? result.taskIds.filter(id => typeof id === "string") : [])];
+  return {kind:"command",status:result.status,message:result.message,choices,taskIds};
+}
 
 export function localRead(area,key) {
   try { return window[area].getItem(key); } catch { return null; }
@@ -56,11 +67,18 @@ export function createCaptureOutbox({api,onChange,onAccepted,onRemoteChange}) {
     if (item.captureTimeZone) request.captureTimeZone = item.captureTimeZone;
     if (item.provider) request.captureAgent = {provider:item.provider,model:item.model || "",...(item.effort ? {effort:item.effort} : {})};
     if (item.day) request[item.implicit ? "viewDay" : "day"] = item.day;
+    if (item.decision?.chosenTaskId) request.chosenTaskId = item.decision.chosenTaskId;
+    if (item.decision?.forceCreate === true) request.forceCreate = true;
     try {
-      const response = await api("/api/tasks","POST",request);
-      if (response.id !== item.id) throw new Error("Dayline has not confirmed this task yet.");
-      remove(item.id);
-      onAccepted(item);
+      const response = await api("/api/capture","POST",request);
+      const command = commandResult(response);
+      if (!command && (response?.kind === "command" || response?.id !== item.id)) throw new Error("Dayline has not confirmed this entry yet.");
+      if (command && command.status !== "applied") {
+        const {decision,...original} = item;
+        put({...original,command,blocked:false,problem:"",tries:0,nextAt:0});
+      } else remove(item.id);
+      if (item.revises && item.revises !== item.id) remove(item.revises);
+      onAccepted(item,command || {id:response.id});
     } catch (error) {
       if (!entries().some(current => current.id === item.id)) return;
       const blocked = error.status >= 400 && error.status < 500 && ![401,408,429].includes(error.status);
@@ -70,7 +88,7 @@ export function createCaptureOutbox({api,onChange,onAccepted,onRemoteChange}) {
   }
   async function drain() {
     for (;;) {
-      const first = entries().find(item => !item.blocked);
+      const first = entries().find(waitingToSend);
       if (!first || first.nextAt > Date.now()) return;
       await send(first);
       onChange();
@@ -87,7 +105,7 @@ export function createCaptureOutbox({api,onChange,onAccepted,onRemoteChange}) {
       else await drain();
     } finally {
       active = false;
-      const first = entries().find(item => !item.blocked);
+      const first = entries().find(waitingToSend);
       if (first) wake(Math.max(300,(first.nextAt || 0) - Date.now()));
     }
   }
@@ -114,10 +132,23 @@ export function createCaptureOutbox({api,onChange,onAccepted,onRemoteChange}) {
       const item = entries().find(entry => entry.id === id);
       if (item) { put({...item,blocked:false,nextAt:0,problem:""}); onChange(); wake(); }
     },
+    decide(id,decision) {
+      const item = entries().find(entry => entry.id === id);
+      if (!item?.command || (item.decision && !item.blocked)) return false;
+      const choice = decision?.chosenTaskId && item.command.choices.some(option => option.id === decision.chosenTaskId);
+      if (!choice && decision?.forceCreate !== true) return false;
+      const answer = choice ? {chosenTaskId:decision.chosenTaskId} : {forceCreate:true};
+      put({...item,decision:answer,blocked:false,tries:0,nextAt:0,problem:""});
+      onChange(); wake();
+      return true;
+    },
     reconcile(tasks) {
       const received = new Set(tasks.map(task => task.id));
-      for (const item of entries()) if (received.has(item.id)) remove(item.id);
-      if (!timer && !active && entries().some(item => !item.blocked)) wake();
+      for (const item of entries()) if (received.has(item.id)) {
+        remove(item.id);
+        if (item.revises && item.revises !== item.id) remove(item.revises);
+      }
+      if (!timer && !active && entries().some(waitingToSend)) wake();
     }
   };
 }
