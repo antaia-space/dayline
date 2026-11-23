@@ -1,10 +1,13 @@
-// The Bookings tab: the public booking page, the meetings booked through it,
-// where they go, and the meeting types a guest can pick.
-import { element } from "./ui.js";
+// The Bookings tab: one card per meeting type, each with its own link, and a
+// side panel to edit one type. Below them, the meetings people booked.
+import { element, icon } from "./ui.js";
 
 const slugOf = text => text.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,40);
 const plural = (count,word) => count + " " + word + (count === 1 ? "" : "s");
 const reasons = {taken:"the time was taken first",expired:"it could not be confirmed in time",unavailable:"the request no longer matched your settings"};
+// Monday first, as in the planner. Keys match the booking rules on the Mac.
+const DAYS = [["mon","Mon","M"],["tue","Tue","T"],["wed","Wed","W"],["thu","Thu","T"],["fri","Fri","F"],["sat","Sat","S"],["sun","Sun","S"]];
+const lengthLabel = minutes => minutes % 60 ? minutes + " min" : minutes / 60 + (minutes === 60 ? " hr" : " hrs");
 
 function field(label,control,hint) {
   const wrap = element("label","",label);
@@ -31,15 +34,48 @@ function check(label,checked,hint) {
   return {wrap,box};
 }
 
-export function createBookingSettings({api,toast,fail,connect,zone,onChange}) {
+function action(className,label,symbol) {
+  const control = element("button",className);
+  control.type = "button";
+  if (symbol) control.append(icon(symbol));
+  control.append(element("span","",label));
+  return control;
+}
+
+// "Mon–Fri" for a run of days, "Mon, Wed, Fri" otherwise.
+export function daysLabel(keys) {
+  const order = DAYS.map(([key]) => key), picked = order.filter(key => keys.includes(key));
+  const runs = [];
+  for (const key of picked) {
+    const last = runs.at(-1);
+    if (last && order.indexOf(key) === order.indexOf(last.at(-1)) + 1) last.push(key);
+    else runs.push([key]);
+  }
+  const name = key => DAYS.find(([id]) => id === key)[1];
+  return runs.map(run => run.length > 2 ? name(run[0]) + "–" + name(run.at(-1)) : run.map(name).join(", ")).join(", ");
+}
+
+// When a type can be booked, in one line for its card.
+export function hoursLabel(hours,settings) {
+  if (!hours) {
+    if (!settings) return "Your working hours";
+    const keys = settings.workDays.map(day => DAYS[day-1][0]);
+    return daysLabel(keys) + ", " + settings.startTime + "–" + settings.endTime;
+  }
+  const keys = DAYS.map(([key]) => key).filter(key => hours[key]?.length);
+  const ranges = new Set(keys.map(key => hours[key].map(({start,end}) => start + "–" + end).join(" and ")));
+  return daysLabel(keys) + ", " + (ranges.size === 1 ? [...ranges][0] : "hours vary");
+}
+
+export function createBookingSettings({api,toast,fail,connect,zone,settings,onChange}) {
   const root = document.getElementById("booking-settings");
   let view = null;
-  let draft = null;
-  let editing = -1;
   let saving = false;
   let sequence = 0;
+  let panel = null;
+  let pageOpen = false;
 
-  const linkFor = slug => view?.status.url ? view.status.url + (slug ? "/" + slug : "") : "";
+  const linkFor = slug => view?.enabled && view.status.url ? view.status.url + (slug ? "/" + slug : "") : "";
 
   async function copy(text,control) {
     try { await navigator.clipboard.writeText(text); }
@@ -47,7 +83,7 @@ export function createBookingSettings({api,toast,fail,connect,zone,onChange}) {
       // The Mac app grants no clipboard permission; copying a selection needs none.
       const holder = input("text",text,{readonly:""});
       holder.className = "booking-copy-holder";
-      root.append(holder);
+      (panel?.open ? panel : root).append(holder);
       holder.select();
       document.execCommand("copy");
       holder.remove();
@@ -58,248 +94,356 @@ export function createBookingSettings({api,toast,fail,connect,zone,onChange}) {
 
   function statusLine() {
     const {status} = view;
-    if (status.state === "off") return "";
     if (status.state === "live") {
-      const at = status.publishedAt ? " Free times published at " + new Date(status.publishedAt).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"}) + "." : "";
+      const at = status.publishedAt ? " Free times published at " + new Date(status.publishedAt).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",hourCycle:"h23"}) + "." : "";
       return "Your page is live." + at + (status.waiting ? " " + plural(status.waiting,"request") + " waiting." : "");
     }
     if (status.state === "starting") return status.message || "Publishing your free times…";
     return status.message || "The booking page is not reachable at the moment.";
   }
 
-  function readType(form,type) {
-    const number = name => Number(form.querySelector('[name="' + name + '"]').value);
-    type.title = form.querySelector('[name="title"]').value.trim();
-    type.slug = form.querySelector('[name="slug"]').value.trim();
-    type.description = form.querySelector('[name="description"]').value.trim();
-    type.durationMin = number("durationMin");
-    type.slotStepMin = number("slotStepMin");
-    type.bufferMin = number("bufferMin");
-    type.minNoticeMin = Math.round(number("noticeHours") * 60);
-    type.maxDaysAhead = number("maxDaysAhead");
-    type.hidden = form.querySelector('[name="hidden"]').checked;
-    type.notesToWiki = form.querySelector('[name="notesToWiki"]').checked;
-  }
-
-  function typeEditor(type,index) {
-    const form = element("div","booking-type-editor");
-    const title = input("text",type.title,{name:"title",maxlength:"80",required:""});
-    const slug = input("text",type.slug,{name:"slug",maxlength:"40",pattern:"[a-z0-9][a-z0-9\\-]*",spellcheck:"false",autocapitalize:"none"});
-    let slugTouched = Boolean(type.slug);
-    title.addEventListener("input",() => { if (!slugTouched) slug.value = slugOf(title.value); });
-    slug.addEventListener("input",() => { slugTouched = true; });
-    const pair = (...fields) => { const row = element("div","field-pair"); row.append(...fields); return row; };
-    const number = (name,value,min,max,step = "1") => input("number",value,{name,min:String(min),max:String(max),step,inputmode:"decimal",required:""});
-    const hidden = check("Hidden",type.hidden," Left off your page. Only people with its link can book it.");
-    hidden.box.name = "hidden";
-    const wiki = check("Notes may be copied to the company wiki",type.notesToWiki," Off keeps notes of these meetings out of the wiki.");
-    wiki.box.name = "notesToWiki";
-    const done = element("button","secondary","Done");
-    done.type = "button";
-    done.addEventListener("click",() => { readType(form,type); editing = -1; render(); });
-    const remove = element("button","text-button","Remove type");
-    remove.type = "button";
-    remove.disabled = draft.types.length < 2;
-    remove.addEventListener("click",() => { draft.types.splice(index,1); editing = -1; render(); });
-    const actions = element("div","booking-row-actions");
-    actions.append(remove,done);
-    form.append(
-      pair(field("Title",title),field("Link name",slug)),
-      field("Description",input("text",type.description,{name:"description",maxlength:"300"})),
-      pair(field("Length (min)",number("durationMin",type.durationMin,5,480,"5")),field("Offer a start every (min)",number("slotStepMin",type.slotStepMin,5,240,"5"))),
-      pair(field("Gap between meetings (min)",number("bufferMin",type.bufferMin,0,240,"5")),field("Minimum notice (hours)",number("noticeHours",type.minNoticeMin / 60,0,720,"0.5"))),
-      field("Bookable up to (days ahead)",number("maxDaysAhead",type.maxDaysAhead,1,90)),
-      hidden.wrap,wiki.wrap,actions);
-    return form;
-  }
-
-  function typeRow(type,index) {
-    const row = element("li","booking-type");
-    if (editing === index) { row.append(typeEditor(type,index)); return row; }
-    const text = element("div","booking-type-text");
-    text.append(element("strong","",type.title || "Untitled"),
-      element("span","booking-type-facts",[type.durationMin + " min",type.hidden && "hidden",!type.notesToWiki && "notes stay private"].filter(Boolean).join(" · ")));
-    const actions = element("div","booking-row-actions");
-    const saved = view.types.some(known => known.slug === type.slug);
-    if (view.enabled && saved && linkFor(type.slug)) {
-      const copyLink = element("button","text-button","Copy link");
-      copyLink.type = "button";
-      copyLink.setAttribute("aria-label","Copy the link for " + type.title);
-      copyLink.addEventListener("click",() => copy(linkFor(type.slug),copyLink));
-      actions.append(copyLink);
-    }
-    const edit = element("button","text-button","Edit");
-    edit.type = "button";
-    edit.setAttribute("aria-label","Edit " + type.title);
-    edit.addEventListener("click",() => { if (commitOpenType()) { editing = index; render(); } });
-    actions.append(edit);
-    row.append(text,actions);
-    return row;
-  }
-
-  function commitOpenType() {
-    const open = root.querySelector(".booking-type-editor");
-    if (!open || editing < 0) return true;
-    readType(open,draft.types[editing]);
-    return true;
-  }
-
-  function collect() {
-    commitOpenType();
-    draft.enabled = root.querySelector("#booking-enabled").checked;
-    draft.owner = {name:root.querySelector("#booking-name").value.trim(),headline:root.querySelector("#booking-headline").value.trim()};
-    draft.calendarId = root.querySelector("#booking-calendar").value || null;
-  }
-
-  async function save(event) {
-    event.preventDefault();
-    if (saving) return;
-    collect();
-    fail();
+  // Every change is saved at once and the tab redrawn from the planner's answer.
+  async function send(changes,done) {
+    if (saving) return false;
     saving = true;
-    editing = -1;
-    render();
+    fail();
     try {
-      const changes = {enabled:draft.enabled,owner:draft.owner,types:draft.types};
-      if (draft.calendarId) changes.calendarId = draft.calendarId;
-      accept(await api("/api/booking","PATCH",changes));
-      toast(view.enabled ? "Booking links saved." : "Booking links are off.");
+      view = await api("/api/booking","PATCH",changes);
+      if (done) toast(done);
       onChange?.();
-    } catch (error) { fail(error.message); }
-    finally { saving = false; render(); }
+      return true;
+    } catch (error) {
+      (panel?.open ? panelError : fail)(error.message);
+      return false;
+    } finally {
+      saving = false;
+      render();
+    }
   }
 
-  function accept(next) {
-    view = next;
-    draft = {enabled:next.enabled,owner:{...next.owner},calendarId:next.calendarId,types:structuredClone(next.types)};
+  function panelError(message = "") {
+    const line = panel?.querySelector(".booking-panel-error");
+    if (line) { line.textContent = message; line.hidden = !message; }
   }
 
-  function render() {
-    if (!view) { root.replaceChildren(element("p","hint","Loading booking settings…")); return; }
+  // ------------------------------------------------------------ the page
+  function pageBox() {
+    const box = element("section","setup-box booking-status");
+    const toggle = element("label","toggle-label booking-toggle");
+    const enabled = input("checkbox");
+    enabled.checked = view.enabled;
+    enabled.addEventListener("change",async () => {
+      const wanted = enabled.checked;
+      if (!await send({enabled:wanted},wanted ? "Booking links are on." : "Booking links are off.") && wanted) { pageOpen = true; render(); }
+    });
+    const knob = element("span","switch");
+    knob.setAttribute("aria-hidden","true");
+    toggle.append(enabled,knob,element("span","",view.enabled ? "Booking links are on" : "Offer booking links"));
+    const top = element("div","booking-status-top");
+    top.append(toggle);
+    if (view.enabled && view.status.url) {
+      const link = input("text",view.status.url,{readonly:"","aria-label":"Your booking page"});
+      link.addEventListener("focus",() => link.select());
+      const copyLink = action("secondary","Copy link","link");
+      copyLink.addEventListener("click",() => copy(view.status.url,copyLink));
+      const row = element("div","booking-link");
+      row.append(link,copyLink,openLink(view.status.url,"Open your booking page"));
+      top.append(row);
+    }
+    box.append(top);
+    const line = element("p","hint",view.enabled ? statusLine()
+      : "Guests pick a time on a public page. The meeting lands in your Google Calendar with a Google Meet link, and Google sends the invitation.");
+    line.setAttribute("role","status");
+    box.append(line);
+
+    const chosen = view.calendars.find(choice => choice.id === view.calendarId);
+    const details = element("details","booking-page-settings");
+    details.open = pageOpen || !view.owner.name || !chosen || !chosen.access;
+    details.addEventListener("toggle",() => { pageOpen = details.open; });
+    const summary = element("summary","","Page settings");
+    summary.append(element("span","booking-type-facts",[view.owner.name || "No name yet",chosen ? chosen.name + " — " + chosen.accountEmail : "No calendar chosen"].join(" · ")));
     const form = element("form");
-    form.noValidate = false;
-    form.addEventListener("submit",save);
-
-    const intro = element("p","hint","Guests pick a time on a public page. The meeting lands in your Google Calendar with a Google Meet link, and Google sends the invitation.");
-    const enabled = check("Offer booking links",draft.enabled);
-    enabled.box.id = "booking-enabled";
-    form.append(intro,enabled.wrap);
-
-    if (view.enabled) {
-      const box = element("div","setup-box booking-status");
-      if (view.status.url) {
-        const link = input("text",view.status.url,{readonly:"","aria-label":"Your booking page"});
-        link.addEventListener("focus",() => link.select());
-        const copyLink = element("button","secondary","Copy link");
-        copyLink.type = "button";
-        copyLink.addEventListener("click",() => copy(view.status.url,copyLink));
-        const visit = element("a","outside-link","Open");
-        visit.href = view.status.url;
-        visit.target = "_blank";
-        visit.rel = "noopener noreferrer";
-        visit.setAttribute("aria-label","Open your booking page");
-        const row = element("div","booking-link");
-        row.append(link,copyLink,visit);
-        box.append(row);
-      }
-      const line = element("p","hint",statusLine());
-      line.setAttribute("role","status");
-      box.append(line);
-      form.append(box);
-
-      // Read from Google Calendar on this Mac; guests' names are not kept on the receiver.
-      const upcoming = element("fieldset","booking-upcoming");
-      upcoming.append(element("legend","","Upcoming booked meetings"));
-      const timeZone = zone?.() || undefined;
-      const day = new Intl.DateTimeFormat([],{weekday:"short",month:"short",day:"numeric",timeZone});
-      const time = new Intl.DateTimeFormat([],{hour:"numeric",minute:"2-digit",timeZone});
-      if (!view.upcoming.length) upcoming.append(element("p","hint","Nobody has booked a meeting yet."));
-      else {
-        const list = element("ul","booking-type-list");
-        for (const meeting of view.upcoming) {
-          const row = element("li","booking-type");
-          const text = element("div","booking-type-text");
-          text.append(element("strong","",meeting.type + " with " + meeting.name),element("span","booking-type-facts",meeting.email));
-          row.append(text,element("span","booking-when",day.format(meeting.start) + " · " + time.format(meeting.start) + "–" + time.format(meeting.end)));
-          list.append(row);
-        }
-        upcoming.append(list);
-      }
-      form.append(upcoming);
-    }
-
-    if (view.notices.length) {
-      const notices = element("fieldset","booking-notices");
-      notices.append(element("legend","","Requests that were not booked"));
-      for (const notice of view.notices) {
-        const row = element("div","booking-notice");
-        const when = notice.start ? new Date(notice.start).toLocaleString([],{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) : "";
-        const text = element("p","",notice.name + " (" + notice.email + ") asked for " + notice.type + (when ? " on " + when : "") + ". Not booked: " +
-          (reasons[notice.reason] || reasons.unavailable) + ".");
-        const dismiss = element("button","text-button","Dismiss");
-        dismiss.type = "button";
-        dismiss.addEventListener("click",async () => {
-          dismiss.disabled = true;
-          try { collect(); const kept = draft; accept(await api("/api/booking/notices","POST",{id:notice.id})); draft = kept; render(); onChange?.(); }
-          catch (error) { fail(error.message); dismiss.disabled = false; }
-        });
-        row.append(text,dismiss);
-        notices.append(row);
-      }
-      form.append(notices);
-    }
-
-    const name = input("text",draft.owner.name,{id:"booking-name",maxlength:"100",autocomplete:"name"});
-    const headline = input("text",draft.owner.headline,{id:"booking-headline",maxlength:"100"});
+    const name = input("text",view.owner.name,{maxlength:"100",autocomplete:"name"});
+    const headline = input("text",view.owner.headline,{maxlength:"100"});
     const names = element("div","field-pair");
     names.append(field("Name guests see",name),field("Headline",headline));
-    form.append(names);
-
     const calendar = element("select");
-    calendar.id = "booking-calendar";
-    if (!view.calendars.length) calendar.append(new Option("Connect a Google account under Calendars first",""));
-    else if (!draft.calendarId) calendar.append(new Option("Choose a calendar",""));
-    for (const choice of view.calendars) calendar.append(new Option(choice.name + " — " + choice.accountEmail,choice.id,false,choice.id === draft.calendarId));
-    calendar.addEventListener("change",() => { collect(); render(); });
-    form.append(field("Bookings go to",calendar));
-    const chosen = view.calendars.find(choice => choice.id === draft.calendarId);
+    if (!view.calendars.length) calendar.append(new Option("Connect a Google account under Settings → Calendars first",""));
+    else if (!view.calendarId) calendar.append(new Option("Choose a calendar",""));
+    for (const choice of view.calendars) calendar.append(new Option(choice.name + " — " + choice.accountEmail,choice.id,false,choice.id === view.calendarId));
+    const save = element("button","secondary","Save page settings");
+    save.type = "submit";
+    form.addEventListener("submit",event => {
+      event.preventDefault();
+      const changes = {owner:{name:name.value.trim(),headline:headline.value.trim()}};
+      if (calendar.value) changes.calendarId = calendar.value;
+      void send(changes,"Page settings saved.");
+    });
+    form.append(names,field("Bookings go to",calendar));
     if (chosen && !chosen.access) {
-      const note = element("div","setup-box booking-access");
+      const note = element("div","booking-access");
       note.append(element("p","hint","Dayline needs permission to add events to " + chosen.accountEmail + " before it can create booked meetings. Your tasks stay local."));
       const allow = element("button","secondary","Allow booked meetings");
       allow.type = "button";
-      allow.disabled = draft.calendarId !== view.calendarId;
-      allow.title = allow.disabled ? "Save the calendar choice first" : "";
       allow.addEventListener("click",() => connect(allow,{mode:"booking",accountSub:chosen.sub}));
       note.append(allow);
       form.append(note);
     }
-
-    const types = element("fieldset","booking-types");
-    types.append(element("legend","","Meeting types"));
-    const list = element("ul","booking-type-list");
-    draft.types.forEach((type,index) => list.append(typeRow(type,index)));
-    const add = element("button","text-button","Add meeting type");
-    add.type = "button";
-    add.disabled = draft.types.length >= 20;
-    add.addEventListener("click",() => {
-      collect();
-      draft.types.push({slug:"",title:"",description:"",durationMin:30,slotStepMin:30,bufferMin:15,minNoticeMin:720,maxDaysAhead:45,hidden:false,notesToWiki:true});
-      editing = draft.types.length - 1;
-      render();
-      root.querySelector('.booking-type-editor [name="title"]')?.focus();
-    });
-    types.append(list,add);
-    form.append(types);
-
-    form.append(element("p","hint","The public page shows your name, these meeting types and the start times that are free. Meeting details, tasks and Google access stay on this Mac."));
     const actions = element("div","dialog-actions");
-    const submit = element("button","primary",saving ? "Saving…" : "Save booking");
-    submit.type = "submit";
-    submit.disabled = saving;
-    actions.append(submit);
+    actions.append(save);
     form.append(actions);
-    root.replaceChildren(form);
+    details.append(summary,form);
+    box.append(details);
+    return box;
+  }
+
+  function openLink(href,label) {
+    const visit = element("a","icon-button booking-open");
+    visit.href = href;
+    visit.target = "_blank";
+    visit.rel = "noopener noreferrer";
+    visit.title = label;
+    visit.setAttribute("aria-label",label);
+    visit.append(icon("external"));
+    return visit;
+  }
+
+  // --------------------------------------------------------- type cards
+  function typeCard(type,index) {
+    const card = element("li","booking-card" + (type.hidden ? " is-hidden" : ""));
+    const main = element("button","booking-card-main");
+    main.type = "button";
+    main.setAttribute("aria-label","Edit " + type.title);
+    main.title = "Edit this meeting type";
+    main.addEventListener("click",() => openPanel(index));
+    main.append(element("strong","",type.title),
+      element("span","booking-type-facts",[lengthLabel(type.durationMin),"Google Meet","One-on-one",type.hidden && "Hidden",!type.notesToWiki && "Notes stay private"].filter(Boolean).join(" · ")),
+      element("span","booking-type-facts",hoursLabel(type.hours,settings?.())));
+    const actions = element("div","booking-row-actions");
+    const href = linkFor(type.slug);
+    const copyLink = action("secondary","Copy link","link");
+    copyLink.setAttribute("aria-label","Copy the link for " + type.title);
+    copyLink.disabled = !href;
+    copyLink.title = href ? href : view.enabled ? "The link appears once your page is published" : "Switch on booking links to get a link";
+    copyLink.addEventListener("click",() => copy(href,copyLink));
+    actions.append(copyLink);
+    if (href) actions.append(openLink(href,"Open the page for " + type.title));
+    card.append(main,actions);
+    return card;
+  }
+
+  // ------------------------------------------------------ the side panel
+  function closePanel() {
+    if (panel?.open) panel.close();
+  }
+
+  function openPanel(index) {
+    const isNew = index < 0;
+    const type = isNew ? {slug:"",title:"",description:"",durationMin:30,slotStepMin:30,bufferMin:15,minNoticeMin:720,maxDaysAhead:45,hidden:false,notesToWiki:true,hours:null}
+      : structuredClone(view.types[index]);
+    panel?.remove();
+    panel = element("dialog","booking-panel");
+    panel.setAttribute("aria-label",isNew ? "New meeting type" : "Meeting type " + type.title);
+    panel.addEventListener("click",event => { if (event.target === panel) closePanel(); });
+    panel.addEventListener("close",() => { panel?.remove(); panel = null; });
+
+    const head = element("header","booking-panel-head");
+    const heading = element("div");
+    heading.append(element("p","eyebrow","Meeting type"),element("h2","",isNew ? "New meeting type" : type.title));
+    const close = element("button","icon-button");
+    close.type = "button";
+    close.setAttribute("aria-label","Close");
+    close.append(icon("x"));
+    close.addEventListener("click",closePanel);
+    head.append(heading,close);
+
+    const form = element("form","form-body booking-panel-body");
+    const section = (title,...children) => { const part = element("section","booking-panel-section"); part.append(element("h3","",title),...children); return part; };
+    const pair = (...fields) => { const row = element("div","field-pair"); row.append(...fields); return row; };
+    const number = (value,min,max,step = "1") => input("number",value,{min:String(min),max:String(max),step,inputmode:"decimal",required:""});
+
+    const title = input("text",type.title,{maxlength:"80",required:""});
+    const slug = input("text",type.slug,{maxlength:"40",pattern:"[a-z0-9][a-z0-9\\-]*",spellcheck:"false",autocapitalize:"none",required:""});
+    let slugTouched = !isNew;
+    title.addEventListener("input",() => { if (!slugTouched) slug.value = slugOf(title.value); });
+    slug.addEventListener("input",() => { slugTouched = true; });
+    const base = view.status.url ? view.status.url.replace(/^https:\/\//,"") + "/" : "your page/";
+    const description = input("text",type.description,{maxlength:"300"});
+
+    const duration = number(type.durationMin,5,480,"5");
+    duration.setAttribute("list","booking-lengths");
+    const lengths = element("datalist");
+    lengths.id = "booking-lengths";
+    for (const minutes of [15,20,30,45,60,90]) lengths.append(new Option(lengthLabel(minutes),String(minutes)));
+
+    const ahead = number(type.maxDaysAhead,1,90), notice = number(type.minNoticeMin / 60,0,720,"0.5");
+    const step = number(type.slotStepMin,5,240,"5"), gap = number(type.bufferMin,0,240,"5");
+    const range = element("p","booking-sentence");
+    range.append("Guests can book up to ",ahead," days ahead, with at least ",notice," hours of notice.");
+    ahead.setAttribute("aria-label","Days ahead");
+    notice.setAttribute("aria-label","Hours of notice");
+
+    // Weekly hours: the planner's working hours, or this type's own.
+    const planner = settings?.();
+    const schedule = element("select");
+    schedule.append(new Option("Your working hours" + (planner ? " (" + hoursLabel(null,planner) + ")" : ""),"working",false,!type.hours),
+      new Option("Custom hours for this type","custom",false,Boolean(type.hours)));
+    const week = element("div","booking-week");
+    const rows = DAYS.map(([key,name,letter],i) => {
+      const own = type.hours?.[key]?.[0];
+      const working = planner?.workDays.includes(i+1);
+      const on = type.hours ? Boolean(own) : Boolean(working);
+      const row = element("div","booking-day");
+      const available = check(name,on);
+      available.wrap.classList.add("booking-day-name");
+      available.wrap.title = name;
+      const badge = element("span","booking-day-badge",letter);
+      badge.setAttribute("aria-hidden","true");
+      available.wrap.prepend(badge);
+      const from = input("time",own?.start ?? planner?.startTime ?? "09:00",{"aria-label":name + " from",required:""});
+      const to = input("time",own?.end ?? planner?.endTime ?? "17:00",{"aria-label":name + " until",required:""});
+      const off = element("span","booking-day-off","Unavailable");
+      const paint = () => { from.hidden = to.hidden = dash.hidden = !available.box.checked; off.hidden = available.box.checked; from.disabled = to.disabled = !available.box.checked; };
+      const dash = element("span","booking-day-dash","–");
+      available.box.addEventListener("change",paint);
+      row.append(available.wrap,from,dash,to,off);
+      paint();
+      week.append(row);
+      return {key,name,box:available.box,from,to};
+    });
+    const paintSchedule = () => { week.hidden = schedule.value !== "custom"; };
+    schedule.addEventListener("change",paintSchedule);
+    paintSchedule();
+    const zoneNote = element("p","hint","Times are in " + (zone?.() || "your planner’s time zone").replaceAll("_"," ") + ". Busy times on your calendars are always left out.");
+
+    const hidden = check("Hidden",type.hidden," Left off your page. Only people with its link can book it.");
+    const wiki = check("Notes may be copied to the company wiki",type.notesToWiki," Off keeps notes of these meetings out of the wiki.");
+
+    const error = element("p","field-error booking-panel-error");
+    error.setAttribute("role","alert");
+    error.hidden = true;
+
+    form.append(
+      section("Name",field("Title",title),field("Link",slug,base + (type.slug || "…")),field("Description",description)),
+      section("Duration",field("Length (min)",duration),lengths),
+      section("Location",element("p","booking-fixed","Google Meet. Each booking gets its own link, sent in Google’s invitation.")),
+      section("Availability",range,pair(field("Offer a start every (min)",step),field("Gap between meetings (min)",gap)),field("Weekly hours",schedule),week,zoneNote),
+      section("Options",hidden.wrap,wiki.wrap),
+      error);
+
+    const foot = element("footer","booking-panel-foot");
+    const save = element("button","primary",isNew ? "Create meeting type" : "Save changes");
+    save.type = "submit";
+    const href = !isNew && linkFor(type.slug);
+    if (!isNew) {
+      const remove = element("button","text-button booking-delete","Delete");
+      remove.type = "button";
+      remove.disabled = view.types.length < 2;
+      remove.title = remove.disabled ? "Keep at least one meeting type" : "";
+      remove.addEventListener("click",async () => {
+        if (!window.confirm("Delete “" + type.title + "”? Its link stops working. Meetings already booked stay in your calendar.")) return;
+        if (await send({types:view.types.filter((_,i) => i !== index)},"Meeting type deleted.")) closePanel();
+      });
+      foot.append(remove);
+    }
+    if (href) {
+      const preview = element("a","outside-link booking-preview","Preview");
+      preview.href = href;
+      preview.target = "_blank";
+      preview.rel = "noopener noreferrer";
+      foot.append(preview);
+    }
+    foot.append(save);
+    form.append(foot);
+
+    form.addEventListener("submit",async event => {
+      event.preventDefault();
+      panelError();
+      let hours = null;
+      if (schedule.value === "custom") {
+        hours = {};
+        for (const row of rows) {
+          if (!row.box.checked) continue;
+          if (row.from.value >= row.to.value) return panelError(row.name + " must end after it starts.");
+          hours[row.key] = [{start:row.from.value,end:row.to.value}];
+        }
+        if (!Object.keys(hours).length) return panelError("Choose at least one day, or use your working hours.");
+      }
+      const next = {slug:slug.value.trim(),title:title.value.trim(),description:description.value.trim(),durationMin:Number(duration.value),
+        slotStepMin:Number(step.value),bufferMin:Number(gap.value),minNoticeMin:Math.round(Number(notice.value) * 60),maxDaysAhead:Number(ahead.value),
+        hidden:hidden.box.checked,notesToWiki:wiki.box.checked,hours};
+      const types = isNew ? [...view.types,next] : view.types.map((known,i) => i === index ? next : known);
+      save.disabled = true;
+      if (await send({types},isNew ? "Meeting type created." : "Meeting type saved.")) closePanel();
+      else save.disabled = false;
+    });
+
+    panel.append(head,form);
+    // Beside the tab's content, not inside it: redrawing the tab must not close an open editor.
+    root.parentElement.append(panel);
+    panel.showModal();
+    title.focus();
+  }
+
+  // ------------------------------------------------------------- lists
+  function upcomingList() {
+    const section = element("section","booking-section");
+    section.append(element("h2","booking-heading","Upcoming booked meetings"));
+    const timeZone = zone?.() || undefined;
+    const day = new Intl.DateTimeFormat([],{weekday:"short",month:"short",day:"numeric",timeZone});
+    const time = new Intl.DateTimeFormat([],{hour:"2-digit",minute:"2-digit",hourCycle:"h23",timeZone});
+    if (!view.upcoming.length) section.append(element("p","hint","Nobody has booked a meeting yet."));
+    else {
+      const list = element("ul","booking-type-list");
+      for (const meeting of view.upcoming) {
+        const row = element("li","booking-type");
+        const text = element("div","booking-type-text");
+        text.append(element("strong","",meeting.type + " with " + meeting.name),element("span","booking-type-facts",meeting.email));
+        row.append(text,element("span","booking-when",day.format(meeting.start) + " · " + time.format(meeting.start) + "–" + time.format(meeting.end)));
+        list.append(row);
+      }
+      section.append(list);
+    }
+    return section;
+  }
+
+  function noticeList() {
+    const section = element("section","booking-section");
+    section.append(element("h2","booking-heading","Requests that were not booked"));
+    for (const notice of view.notices) {
+      const row = element("div","booking-notice");
+      const when = notice.start ? new Date(notice.start).toLocaleString([],{weekday:"short",month:"short",day:"numeric",hour:"2-digit",minute:"2-digit",hourCycle:"h23"}) : "";
+      const text = element("p","",notice.name + " (" + notice.email + ") asked for " + notice.type + (when ? " on " + when : "") + ". Not booked: " +
+        (reasons[notice.reason] || reasons.unavailable) + ".");
+      const dismiss = element("button","text-button","Dismiss");
+      dismiss.type = "button";
+      dismiss.addEventListener("click",async () => {
+        dismiss.disabled = true;
+        try { view = await api("/api/booking/notices","POST",{id:notice.id}); render(); onChange?.(); }
+        catch (error) { fail(error.message); dismiss.disabled = false; }
+      });
+      row.append(text,dismiss);
+      section.append(row);
+    }
+    return section;
+  }
+
+  function render() {
+    if (!view) { root.replaceChildren(element("p","hint","Loading your booking page…")); return; }
+    const types = element("section","booking-section");
+    const bar = element("div","booking-section-bar");
+    const create = action("primary","New meeting type","plus");
+    create.addEventListener("click",() => openPanel(-1));
+    create.disabled = view.types.length >= 20;
+    bar.append(element("h2","booking-heading","Meeting types"),create);
+    const cards = element("ul","booking-cards");
+    view.types.forEach((type,index) => cards.append(typeCard(type,index)));
+    types.append(bar,cards);
+    const parts = [pageBox(),types];
+    if (view.enabled) parts.push(upcomingList());
+    if (view.notices.length) parts.push(noticeList());
+    parts.push(element("p","hint booking-privacy","The public page shows your name, these meeting types and the start times that are free. Meeting details, tasks and Google access stay on this Mac."));
+    root.replaceChildren(...parts);
   }
 
   return {
@@ -309,22 +453,17 @@ export function createBookingSettings({api,toast,fail,connect,zone,onChange}) {
       try {
         const next = await api("/api/booking");
         if (current !== sequence) return;
-        accept(next);
-        editing = -1;
+        view = next;
         render();
       } catch (error) { fail(error.message); }
     },
-    // Coming back from Google's consent page: show the new access without discarding unsaved edits.
+    // Coming back from Google's consent page: show the new access. An open editor keeps its unsaved input.
     async refresh() {
-      if (!view || saving || !root.querySelector("#booking-enabled")) return;
+      if (!view || saving) return;
       try {
         const next = await api("/api/booking");
         if (saving) return;
-        collect();
-        const kept = draft, open = editing;
-        accept(next);
-        draft = kept;
-        editing = open;
+        view = next;
         render();
       } catch { /* The next visit to this tab shows the error. */ }
     }

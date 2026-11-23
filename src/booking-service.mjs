@@ -15,14 +15,15 @@ export const ID_PREFIX_WIKI = 'bkb';
 export const ID_PREFIX_PRIVATE = 'bkp';
 // A request that waited for a sleeping Mac is still confirmed this close to its start, not closer.
 export const CONFIRM_LEAD = 30 * MINUTE;
-const typeFields = ['slug', 'title', 'description', 'durationMin', 'slotStepMin', 'bufferMin', 'minNoticeMin', 'maxDaysAhead', 'hidden', 'notesToWiki'];
+const typeFields = ['slug', 'title', 'description', 'durationMin', 'slotStepMin', 'bufferMin', 'minNoticeMin', 'maxDaysAhead', 'hidden', 'notesToWiki', 'hours'];
+const CLOCK = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const whole = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
 const line = (value, max) => typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, max) : '';
 const iso = ms => new Date(ms).toISOString();
 
 export function defaultBooking() {
   const type = (slug, title, description, durationMin, slotStepMin, extra = {}) => ({ slug, title, description, durationMin, slotStepMin,
-    bufferMin: 15, minNoticeMin: 12 * 60, maxDaysAhead: 45, hidden: false, notesToWiki: true, ...extra });
+    bufferMin: 15, minNoticeMin: 12 * 60, maxDaysAhead: 45, hidden: false, notesToWiki: true, hours: null, ...extra });
   return {
     enabled: false, published: false, owner: { name: '', headline: 'Antaia' }, accountSub: null, calendarId: null, notices: [],
     types: [
@@ -71,9 +72,31 @@ function checkedTypes(input) {
     if (!whole(t.minNoticeMin, 0, 30 * 24 * 60)) throw invalid('“' + title + '” needs a minimum notice of at most 30 days.');
     if (!whole(t.maxDaysAhead, 1, 90)) throw invalid('“' + title + '” can be booked between 1 and 90 days ahead.');
     return { slug: t.slug, title, description: line(t.description, 300), durationMin: t.durationMin, slotStepMin: t.slotStepMin,
-      bufferMin: t.bufferMin, minNoticeMin: t.minNoticeMin, maxDaysAhead: t.maxDaysAhead, hidden: t.hidden === true, notesToWiki: t.notesToWiki !== false };
+      bufferMin: t.bufferMin, minNoticeMin: t.minNoticeMin, maxDaysAhead: t.maxDaysAhead, hidden: t.hidden === true, notesToWiki: t.notesToWiki !== false,
+      hours: checkedHours(t.hours, title) };
   });
 }
+
+// A meeting type can keep its own weekly hours. Without them it follows the
+// planner's working hours. Either way, busy calendars still block time.
+function checkedHours(input, title) {
+  if (input == null) return null;
+  const problem = invalid('“' + title + '” needs weekly hours with a start before the end on at least one day.');
+  if (typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(day => !WEEKDAYS.includes(day))) throw problem;
+  const hours = {};
+  for (const day of WEEKDAYS) {
+    const windows = input[day] ?? [];
+    if (!Array.isArray(windows) || windows.length > 3) throw problem;
+    for (const window of windows) {
+      if (!window || !CLOCK.test(window.start) || !(CLOCK.test(window.end) || window.end === '24:00') || window.start >= window.end) throw problem;
+    }
+    if (windows.length) hours[day] = windows.map(({ start, end }) => ({ start, end }));
+  }
+  if (!Object.keys(hours).length) throw problem;
+  return hours;
+}
+
+const hoursFor = (type, settings) => type.hours ?? bookingHours(settings);
 
 export function updateBooking(service, input) {
   const state = bookingState(service);
@@ -167,10 +190,9 @@ export async function bookingSnapshot(service, now = service.clock().getTime()) 
     if (!target || !canWriteBookings(account)) return { page: { ...page, paused: 'setup' } };
     const horizon = Math.max(...state.types.map(t => t.maxDaysAhead));
     const busy = await bookingBusy(service, now, now + (horizon + 1) * DAY);
-    const hours = bookingHours(settings);
     for (const type of state.types) {
       // The receiver stores at most 3,000 start times per type; the nearest ones come first.
-      page.slots[type.slug] = computeSlots({ type: { ...type, hours, dateOverrides: {} }, ownerTimeZone: settings.timeZone,
+      page.slots[type.slug] = computeSlots({ type: { ...type, hours: hoursFor(type, settings), dateOverrides: {} }, ownerTimeZone: settings.timeZone,
         fromMs: now, toMs: now + type.maxDaysAhead * DAY, nowMs: now, busy }).slice(0, 3000);
     }
     const events = await service.google.listBookingEvents(await service.token(target.sub), { calendarId: target.providerId, timeMin: iso(now) });
@@ -215,7 +237,7 @@ async function stillFree(service, type, start, end, now) {
   const settings = service.data.settings, gap = type.bufferMin * MINUTE;
   const busy = await bookingBusy(service, start - gap, end + gap, { confirm: true });
   // The guest met the minimum notice when asking; a Mac that slept must not undo that.
-  return computeSlots({ type: { ...type, minNoticeMin: 0, hours: bookingHours(settings), dateOverrides: {} }, ownerTimeZone: settings.timeZone,
+  return computeSlots({ type: { ...type, minNoticeMin: 0, hours: hoursFor(type, settings), dateOverrides: {} }, ownerTimeZone: settings.timeZone,
     fromMs: start, toMs: start + 1, nowMs: now, busy }).includes(start);
 }
 

@@ -9,7 +9,21 @@ import { developmentVault, openStore } from '../src/store.mjs';
 import { DaylineService } from '../src/service.mjs';
 import { startServer } from '../src/http.mjs';
 
+import { daysLabel, hoursLabel } from '../web/booking-settings.js';
+
 const webRoot = fileURLToPath(new URL('../web/', import.meta.url));
+
+test('a meeting type card says in one line when the type can be booked', () => {
+  assert.equal(daysLabel(['mon', 'tue', 'wed', 'thu', 'fri']), 'Mon–Fri');
+  assert.equal(daysLabel(['fri', 'mon', 'wed']), 'Mon, Wed, Fri');
+  assert.equal(daysLabel(['mon', 'tue', 'thu', 'fri', 'sat', 'sun']), 'Mon, Tue, Thu–Sun');
+  const planner = { workDays: [1, 2, 3, 4, 5], startTime: '09:00', endTime: '17:00' };
+  assert.equal(hoursLabel(null, planner), 'Mon–Fri, 09:00–17:00');
+  assert.equal(hoursLabel(null, undefined), 'Your working hours');
+  const range = (start, end) => [{ start, end }];
+  assert.equal(hoursLabel({ tue: range('13:00', '15:00'), sat: range('13:00', '15:00') }, planner), 'Tue, Sat, 13:00–15:00');
+  assert.equal(hoursLabel({ mon: range('08:30', '20:20'), tue: range('09:00', '12:00'), wed: range('08:30', '20:20') }, planner), 'Mon–Wed, hours vary');
+});
 
 test('booking settings load, validate and save for a paired planner only', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'dayline-booking-'));

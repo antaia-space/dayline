@@ -191,6 +191,31 @@ test("synced tasks: Dayline's own flexible task events do not block a booking", 
   assert.equal((await settleBooking(service, request(at('11:00'), { id: 'b'.repeat(24), token: 'b'.repeat(24) + '.' + 'S'.repeat(27) }), { pageUrl, now })).reason, 'taken');
 });
 
+test('a meeting type can keep its own weekly hours instead of the working hours', async () => {
+  const { service } = await ready();
+  const [intro, meeting] = defaultBooking().types;
+  const bad = hours => assert.throws(() => updateBooking(service, { types: [{ ...meeting, hours }] }), /needs weekly hours/, JSON.stringify(hours));
+  bad({});
+  bad({ funday: [{ start: '09:00', end: '10:00' }] });
+  bad({ tue: [{ start: '15:00', end: '13:00' }] });
+  bad({ tue: [{ start: '9', end: '10:00' }] });
+  bad({ tue: 'all day' });
+  bad([]);
+  // Tuesday afternoon and Saturday only, although Saturday is not a working day; the other type keeps working hours.
+  updateBooking(service, { types: [intro, { ...meeting, hours: { tue: [{ start: '13:00', end: '15:00' }], sat: [{ start: '10:00', end: '11:00' }], mon: [] } }] });
+  assert.deepEqual(service.data.booking.types.map(t => t.hours), [null, { tue: [{ start: '13:00', end: '15:00' }], sat: [{ start: '10:00', end: '11:00' }] }]);
+  const { page } = await bookingSnapshot(service, now);
+  const days = slots => [...new Set(slots.filter(ms => ms < at('00:00', 30)).map(ms => iso(ms).slice(0, 10)))];
+  assert.deepEqual(tuesday(page.slots.meeting), ['13:00', '13:30', '14:00', '14:30']);
+  assert.deepEqual(days(page.slots.meeting), ['2026-11-24', '2026-11-28']);
+  assert.deepEqual(days(page.slots.intro), ['2026-11-24', '2026-11-25', '2026-11-26', '2026-11-27']);
+  // The page object never receives the hours themselves, only the start times they allow.
+  assert.ok(!JSON.stringify(page.types).includes('hours'));
+  // A request outside the type's own hours is refused even inside working hours.
+  assert.equal((await settleBooking(service, request(at('10:00')), { pageUrl, now })).reason, 'taken');
+  assert.equal((await settleBooking(service, request(at('13:30')), { pageUrl, now })).ok, true);
+});
+
 test('requests are checked again on the Mac, whatever the receiver says', async () => {
   const { service, google } = await ready();
   const refused = async (extra, reason) => assert.equal((await settleBooking(service, request(at('10:00'), extra), { pageUrl, now })).reason, reason, JSON.stringify(extra));
