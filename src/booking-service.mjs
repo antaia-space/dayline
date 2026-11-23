@@ -103,7 +103,7 @@ export function dismissBookingNotice(service, id) {
   service.store.save();
 }
 
-/** What the Booking tab shows. Nothing here is a secret. */
+/** What the Bookings tab shows. Nothing here is a secret. */
 export function publicBooking(service) {
   const state = bookingState(service);
   const account = service.data.accounts.find(a => a.sub === state.accountSub);
@@ -175,7 +175,11 @@ export async function bookingSnapshot(service, now = service.clock().getTime()) 
     }
     const events = await service.google.listBookingEvents(await service.token(target.sub), { calendarId: target.providerId, timeMin: iso(now) });
     const bookings = events.filter(e => SLUG.test(e.type)).map(e => ({ id: e.eventId.slice(3), type: e.type, start: e.start, end: e.end }));
-    return { page, bookings };
+    // For the Bookings tab on this Mac only: who booked what. The receiver gets `bookings`, which names nobody.
+    const titles = new Map(state.types.map(t => [t.slug, t.title]));
+    const upcoming = events.map(e => ({ id: e.eventId, type: titles.get(e.type) || 'Meeting', start: e.start, end: e.end, name: e.name, email: e.email }))
+      .sort((a, b) => a.start - b.start);
+    return { page, bookings, upcoming };
   } catch (error) {
     if (transient(error)) throw error; // The last published times stay until Google answers again.
     const reconnect = error.status === 401 || error.status === 409 || /invalid_grant|insufficientScopes|unexpectedScopes/.test(error.reason || '');
@@ -195,7 +199,7 @@ function notice(service, kind, reason, request, type) {
 function access(service) {
   const state = bookingState(service);
   const target = bookingTarget(service), account = service.data.accounts.find(a => a.sub === state.accountSub);
-  if (!state.enabled || !target || !canWriteBookings(account)) throw invalid('Booked meetings need a calendar with event access. Check Settings → Booking.', 409);
+  if (!state.enabled || !target || !canWriteBookings(account)) throw invalid('Booked meetings need a calendar with event access. Check the Bookings tab.', 409);
   return { target, account };
 }
 

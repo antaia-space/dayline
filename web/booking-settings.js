@@ -1,5 +1,5 @@
-// Settings → Booking: the public booking page, where booked meetings go, and
-// the meeting types a guest can pick.
+// The Bookings tab: the public booking page, the meetings booked through it,
+// where they go, and the meeting types a guest can pick.
 import { element } from "./ui.js";
 
 const slugOf = text => text.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"").slice(0,40);
@@ -31,7 +31,7 @@ function check(label,checked,hint) {
   return {wrap,box};
 }
 
-export function createBookingSettings({api,toast,errorAt,connect}) {
+export function createBookingSettings({api,toast,fail,connect,zone,onChange}) {
   const root = document.getElementById("booking-settings");
   let view = null;
   let draft = null;
@@ -155,7 +155,7 @@ export function createBookingSettings({api,toast,errorAt,connect}) {
     event.preventDefault();
     if (saving) return;
     collect();
-    errorAt("settings-error");
+    fail();
     saving = true;
     editing = -1;
     render();
@@ -164,7 +164,8 @@ export function createBookingSettings({api,toast,errorAt,connect}) {
       if (draft.calendarId) changes.calendarId = draft.calendarId;
       accept(await api("/api/booking","PATCH",changes));
       toast(view.enabled ? "Booking links saved." : "Booking links are off.");
-    } catch (error) { errorAt("settings-error",error.message); }
+      onChange?.();
+    } catch (error) { fail(error.message); }
     finally { saving = false; render(); }
   }
 
@@ -205,6 +206,47 @@ export function createBookingSettings({api,toast,errorAt,connect}) {
       line.setAttribute("role","status");
       box.append(line);
       form.append(box);
+
+      // Read from Google Calendar on this Mac; guests' names are not kept on the receiver.
+      const upcoming = element("fieldset","booking-upcoming");
+      upcoming.append(element("legend","","Upcoming booked meetings"));
+      const timeZone = zone?.() || undefined;
+      const day = new Intl.DateTimeFormat([],{weekday:"short",month:"short",day:"numeric",timeZone});
+      const time = new Intl.DateTimeFormat([],{hour:"numeric",minute:"2-digit",timeZone});
+      if (!view.upcoming.length) upcoming.append(element("p","hint","Nobody has booked a meeting yet."));
+      else {
+        const list = element("ul","booking-type-list");
+        for (const meeting of view.upcoming) {
+          const row = element("li","booking-type");
+          const text = element("div","booking-type-text");
+          text.append(element("strong","",meeting.type + " with " + meeting.name),element("span","booking-type-facts",meeting.email));
+          row.append(text,element("span","booking-when",day.format(meeting.start) + " · " + time.format(meeting.start) + "–" + time.format(meeting.end)));
+          list.append(row);
+        }
+        upcoming.append(list);
+      }
+      form.append(upcoming);
+    }
+
+    if (view.notices.length) {
+      const notices = element("fieldset","booking-notices");
+      notices.append(element("legend","","Requests that were not booked"));
+      for (const notice of view.notices) {
+        const row = element("div","booking-notice");
+        const when = notice.start ? new Date(notice.start).toLocaleString([],{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) : "";
+        const text = element("p","",notice.name + " (" + notice.email + ") asked for " + notice.type + (when ? " on " + when : "") + ". Not booked: " +
+          (reasons[notice.reason] || reasons.unavailable) + ".");
+        const dismiss = element("button","text-button","Dismiss");
+        dismiss.type = "button";
+        dismiss.addEventListener("click",async () => {
+          dismiss.disabled = true;
+          try { collect(); const kept = draft; accept(await api("/api/booking/notices","POST",{id:notice.id})); draft = kept; render(); onChange?.(); }
+          catch (error) { fail(error.message); dismiss.disabled = false; }
+        });
+        row.append(text,dismiss);
+        notices.append(row);
+      }
+      form.append(notices);
     }
 
     const name = input("text",draft.owner.name,{id:"booking-name",maxlength:"100",autocomplete:"name"});
@@ -250,36 +292,12 @@ export function createBookingSettings({api,toast,errorAt,connect}) {
     types.append(list,add);
     form.append(types);
 
-    if (view.notices.length) {
-      const notices = element("fieldset","booking-notices");
-      notices.append(element("legend","","Requests that were not booked"));
-      for (const notice of view.notices) {
-        const row = element("div","booking-notice");
-        const when = notice.start ? new Date(notice.start).toLocaleString([],{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) : "";
-        const text = element("p","",notice.name + " (" + notice.email + ") asked for " + notice.type + (when ? " on " + when : "") + ". Not booked: " +
-          (reasons[notice.reason] || reasons.unavailable) + ".");
-        const dismiss = element("button","text-button","Dismiss");
-        dismiss.type = "button";
-        dismiss.addEventListener("click",async () => {
-          dismiss.disabled = true;
-          try { collect(); const kept = draft; accept(await api("/api/booking/notices","POST",{id:notice.id})); draft = kept; render(); }
-          catch (error) { errorAt("settings-error",error.message); dismiss.disabled = false; }
-        });
-        row.append(text,dismiss);
-        notices.append(row);
-      }
-      form.append(notices);
-    }
-
     form.append(element("p","hint","The public page shows your name, these meeting types and the start times that are free. Meeting details, tasks and Google access stay on this Mac."));
     const actions = element("div","dialog-actions");
-    const cancel = element("button","secondary close-dialog","Cancel");
-    cancel.type = "button";
-    cancel.addEventListener("click",() => root.closest("dialog").close());
     const submit = element("button","primary",saving ? "Saving…" : "Save booking");
     submit.type = "submit";
     submit.disabled = saving;
-    actions.append(cancel,submit);
+    actions.append(submit);
     form.append(actions);
     root.replaceChildren(form);
   }
@@ -294,7 +312,7 @@ export function createBookingSettings({api,toast,errorAt,connect}) {
         accept(next);
         editing = -1;
         render();
-      } catch (error) { errorAt("settings-error",error.message); }
+      } catch (error) { fail(error.message); }
     },
     // Coming back from Google's consent page: show the new access without discarding unsaved edits.
     async refresh() {

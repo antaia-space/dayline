@@ -1,4 +1,11 @@
-/* Settings → Booking. Colours and spacing come from styles.css. */
+/* The Bookings tab. Colours and spacing come from styles.css. */
+#planner[data-view="bookings"] > :not(#bookings-section):not(#service-error) { display: none !important; }
+.bookings .booking-view { max-width: 42rem; padding-inline: 0; }
+.bookings .form-body.booking-view { padding-top: 0; }
+.bookings .dialog-actions { justify-content: flex-start; }
+.bookings .hint { max-width: 38rem; }
+.form-body .booking-upcoming { margin-top: 1.25rem; }
+.booking-when { flex: none; color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; text-align: right; }
 .form-body label.booking-check:not(.file-button) { display: flex; align-items: flex-start; gap: .55rem; margin-top: .8rem; font-weight: 450; cursor: pointer; }
 .form-body label.booking-check input { margin-top: .22rem; flex: none; }
 .booking-field-hint { display: block; color: var(--muted); font-size: .8rem; font-weight: 400; line-height: 1.45; }

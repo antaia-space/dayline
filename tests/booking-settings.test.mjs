@@ -1,4 +1,4 @@
-// Settings → Booking through the local planner server, as the Mac app and the paired browser use it.
+// The Bookings tab through the local planner server, as the Mac app and the paired browser use it.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -24,7 +24,7 @@ test('booking settings load, validate and save for a paired planner only', async
   assert.equal((await fetch(app.origin + '/api/booking')).status, 401);
   assert.equal((await write('/api/booking', 'PATCH', { enabled: false }, { cookie, Origin: 'https://elsewhere.example' })).status, 403);
   const first = await read();
-  assert.deepEqual([first.enabled, first.status.state, first.calendars, first.notices], [false, 'off', [], []]);
+  assert.deepEqual([first.enabled, first.status.state, first.calendars, first.notices, first.upcoming], [false, 'off', [], [], []]);
   assert.deepEqual(first.types.map(type => type.slug), ['intro', 'meeting', 'deep-dive', 'private']);
   assert.deepEqual((await (await fetch(app.origin + '/api/state', { headers: { cookie } })).json()).booking, { enabled: false, notices: 0 });
 
@@ -47,9 +47,10 @@ test('booking settings load, validate and save for a paired planner only', async
   assert.equal((await (await fetch(app.origin + '/api/state', { headers: { cookie } })).json()).booking.notices, 1);
   assert.deepEqual((await (await write('/api/booking/notices', 'POST', { id: 'a'.repeat(24) })).json()).notices, []);
 
-  // The Booking tab ships with the planner page.
+  // Bookings is a third tab beside Week and Day agenda, not a Settings section.
   const html = await (await fetch(app.origin + '/', { headers: { cookie } })).text();
-  assert.match(html, /id="tab-booking"/);
+  assert.match(html, /id="view-bookings"[^>]*>.*Bookings<\/button>/);
+  assert.doesNotMatch(html, /id="tab-booking"/);
   assert.match(html, /id="booking-settings"/);
   assert.equal((await fetch(app.origin + '/booking-settings.js', { headers: { cookie } })).status, 200);
   assert.equal((await fetch(app.origin + '/booking-settings.css', { headers: { cookie } })).status, 200);

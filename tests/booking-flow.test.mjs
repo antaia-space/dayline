@@ -140,6 +140,9 @@ test('a guest books, reschedules and cancels while the Mac is awake', async t =>
   assert.ok(event.description.includes('<a href="' + origin + '/urs/booking/' + token + '">Reschedule or cancel</a>'));
   assert.ok(event.description.includes('About the &lt;b&gt;engine&lt;/b&gt;'), 'guest notes cannot add markup to the calendar');
 
+  // The Bookings tab on the Mac lists who booked, read from Google Calendar.
+  assert.deepEqual(w.desk.upcoming, [{ id: 'bkb' + id, type: 'Meeting', start: at(12), end: at(12, 30), name: 'Ada Guest', email: 'ada@example.test' }]);
+
   // Once the Mac has answered, the receiver keeps no guest details.
   const ledger = w.stored.get('urs/ledger');
   assert.deepEqual(ledger[id], { id, type: 'meeting', start: at(12), end: at(12, 30), status: 'confirmed', createdAt: w.now(), handed: true, confirmedAt: w.now() });
