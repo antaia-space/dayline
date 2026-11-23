@@ -146,3 +146,82 @@ test('the visible Tuesday presentation moves to real local today from the screen
   const restarted = new DaylineService({ store:{state:structuredClone(store.state),save(){}}, clock:()=>now, vault:{} });
   assert.deepEqual(restarted.runPlannerCommand({...incomplete, ...second}).taskIds,[presentation]);
 });
+
+test('a compound capture previews the full model proposal, then applies it once to the existing task',async t => {
+  let calls = 0;
+  const {service,send} = await paired(t,async request => {
+    calls++;
+    assert.equal(request.model,picked.model);
+    assert.equal(request.input.planner.viewDay,'2026-11-24');
+    assert.equal(request.input.planner.today,'2026-11-23');
+    const task = request.input.planner.tasks.find(row => /orbital/i.test(row.title)).alias;
+    return {model:picked.model,output:{intent:'plan',message:'',actions:[
+      {op:'update',task,day:'2026-11-25',time:null,title:null,minutes:null,deltaMinutes:10},
+      {op:'subtask.add',task,title:'Rehearse the opening'}
+    ]},usage:{inputTokens:320,outputTokens:42}};
+  });
+  const idTask = await service.createTask({text:'Prepare orbital slides for 30 minutes',day:'2026-11-24'});
+  const old = structuredClone(service.findTask(idTask));
+  const request = {requestId:id(60),text:'Move orbital slides to Wednesday, give it ten extra minutes and add a rehearsal subtask',contextDay:'2026-11-24'};
+  const preview = await (await send(request)).json();
+  assert.equal(preview.status,'preview');
+  assert.equal(preview.steps.length,2);
+  assert.equal(preview.agent.model,picked.model);
+  assert.deepEqual(service.findTask(idTask),old);
+  assert.equal((await (await send(request)).json()).planId,preview.planId);
+  assert.equal((await (await send({...request,forceCreate:true})).json()).status,'preview');
+  assert.equal((await send({...request,applyPlanId:id(33)})).status,409);
+  const apply = {...request,applyPlanId:preview.planId};
+  const saved = await Promise.all([send(apply),send(apply)]);
+  for (const result of saved) assert.deepEqual((await result.json()).taskIds,[idTask]);
+  assert.equal((await (await send(request)).json()).status,'applied');
+  assert.match(service.findTask(idTask).start,/^2026-11-25/);
+  assert.equal(service.findTask(idTask).minutes,40);
+  assert.equal(service.findTask(idTask).subtasks.filter(step=>step.title==='Rehearse the opening').length,1);
+  assert.equal(service.data.tasks.length,1);
+  assert.equal(calls,1);
+});
+
+test('Ask planner accepts arbitrary phrasing, answers once and requires a choice to capture a new task', async t => {
+  let calls = 0;
+  const {service,send} = await paired(t,async request => {
+    assert.ok(request.input.planner);
+    calls++;
+    const answer = request.input.text.includes('attention');
+    return {model:picked.model,output:{intent:answer ? 'answer' : 'create',actions:[],
+      message:answer ? 'The sample review is the only task on this day.' : ''}};
+  });
+  await service.createTask({text:'Sample review for 20 minutes'});
+  const request = {text:'Something deserving my attention',requestId:id(70),askPlanner:true};
+  for (let i=0;i<2;i++) {
+    const answer = await (await send(request)).json();
+    assert.equal(answer.status,'answer');
+    assert.match(answer.message,/sample review/);
+  }
+  const maybe = {text:'Review the launch checklist',requestId:id(71),askPlanner:true};
+  assert.equal((await (await send(maybe)).json()).status,'clarify');
+  assert.equal(service.data.tasks.length,1);
+  assert.equal((await send({...maybe,forceCreate:true})).status,202);
+  assert.equal((await send(maybe)).status,202);
+  assert.equal(calls,2);
+  const ordinary = {...maybe,askPlanner:false,requestId:id(72)};
+  assert.equal((await send(ordinary)).status,202);
+  assert.equal(calls,2);
+});
+
+test('escalating a local no-match uses the selected agent once and a failed model request survives replay',async t => {
+  let calls=0, available=true;
+  const {send}=await paired(t,async () => {
+    calls++;
+    if (!available) throw Error('Test connection dropped');
+    return {model:picked.model,output:{intent:'clarify',message:'Which existing task should I move?',actions:[]}};
+  });
+  const base = {text:'Move the sample briefing to Wednesday',requestId:id(80)};
+  assert.equal((await (await send(base)).json()).status,'unmatched');
+  const ask = {...base,askPlanner:true};
+  for (let i=0;i<2;i++) assert.match((await (await send(ask)).json()).message,/Which existing task/);
+  available=false;
+  const other = {...ask,requestId:id(81)};
+  for (let i=0;i<2;i++) assert.match((await (await send(other)).json()).message,/sign-in/);
+  assert.equal(calls,2);
+});

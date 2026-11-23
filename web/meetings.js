@@ -79,7 +79,8 @@ export function meetingCard(entry,day,agenda) {
   const name = event.title || "Calendar busy";
   const row = element("div",agenda ? "agenda-block meeting-card agenda-meeting" : "meeting-card week-meeting");
   if (nonblockingMeeting(event)) row.classList.add("meeting-free");
-  const title = button("meeting-title","meeting-details","Meeting details for " + name,name);
+  const title = button("meeting-title","meeting-details","Meeting details for " + name);
+  title.append(element("span","meeting-name",name));
   title.dataset.id = event.id;
   title.dataset.focus = (agenda ? "agenda-" : "week-") + day + "-meeting-" + event.id;
   title.setAttribute("aria-haspopup","dialog"); title.setAttribute("aria-expanded","false");
@@ -126,17 +127,19 @@ function guestList(event) {
   return section;
 }
 
-// One nonmodal, anchored panel serves pointer previews, keyboard focus and touch.
-// Clicking the title keeps it open while its links or guest list are explored.
+// Hover previews follow the inline name, including its individual wrapped
+// lines. Activating the title button pins the details for keyboard and touch.
 export function createMeetingDetails({root,find,zone,authorized = () => true}) {
   const panel = element("div","meeting-popover");
   panel.id = "meeting-popover"; panel.setAttribute("popover","manual");
   panel.setAttribute("role","dialog"); panel.setAttribute("aria-labelledby","meeting-popover-title");
   panel.hidden = true; document.body.append(panel);
-  let anchor = null, pinned = false, timer, suppressed = null, signature = "", bounds = null, painting = false;
+  let anchor = null, pinned = false, timer, signature = "", bounds = null, painting = false;
   function trigger(node) {
-    if (!(node instanceof Element) || node.closest("a")) return null;
-    return node.closest(".meeting-card")?.querySelector('button[data-action="meeting-details"]');
+    return node instanceof Element ? node.closest('button[data-action="meeting-details"]') : null;
+  }
+  function nameAt(node) {
+    return node instanceof Element && node.closest(".meeting-name") ? trigger(node) : null;
   }
   function close(restore = false) {
     clearTimeout(timer);
@@ -148,9 +151,7 @@ export function createMeetingDetails({root,find,zone,authorized = () => true}) {
     panel.hidden = true; panel.replaceChildren();
     if (restore) {
       const target = previous.isConnected ? previous : document.getElementById("quick-text");
-      suppressed = target;
       target?.focus({preventScroll:true});
-      queueMicrotask(() => { suppressed = null; });
     }
   }
   function position() {
@@ -226,23 +227,19 @@ export function createMeetingDetails({root,find,zone,authorized = () => true}) {
   }
   function delayClose() { if (!pinned) { clearTimeout(timer); timer = setTimeout(() => close(),180); } }
   root.addEventListener("pointerover",event => {
-    const target = trigger(event.target);
-    if (!target || trigger(event.relatedTarget) === target || event.pointerType === "touch" || pinned) return;
+    const target = nameAt(event.target);
+    if (!target || nameAt(event.relatedTarget) === target || event.pointerType === "touch" || pinned) return;
     clearTimeout(timer); timer = setTimeout(() => show(target),180);
   });
   root.addEventListener("pointerout",event => {
-    const target = trigger(event.target);
-    if (target && trigger(event.relatedTarget) !== target && !panel.contains(event.relatedTarget)) delayClose();
-  });
-  root.addEventListener("focusin",event => {
-    const target = trigger(event.target);
-    if (target && target !== suppressed && !pinned) show(target);
+    const target = nameAt(event.target);
+    if (target && nameAt(event.relatedTarget) !== target && !panel.contains(event.relatedTarget)) delayClose();
   });
   root.addEventListener("focusout",event => {
     if (trigger(event.target) && !panel.contains(event.relatedTarget)) delayClose();
   });
   root.addEventListener("click",event => {
-    const target = trigger(event.target);
+    const target = event.detail === 0 ? trigger(event.target) : nameAt(event.target);
     if (target) show(target,true);
   });
   panel.addEventListener("pointerenter",() => clearTimeout(timer));
@@ -251,7 +248,7 @@ export function createMeetingDetails({root,find,zone,authorized = () => true}) {
     if (!painting && !panel.contains(event.relatedTarget) && !trigger(event.relatedTarget)) close();
   });
   document.addEventListener("pointerdown",event => {
-    if (anchor && !panel.contains(event.target) && !trigger(event.target)) close();
+    if (anchor && !panel.contains(event.target) && !nameAt(event.target)) close();
   });
   document.addEventListener("keydown",event => {
     if (anchor && event.key === "Escape") { event.preventDefault(); close(pinned || panel.contains(document.activeElement)); }

@@ -7,7 +7,8 @@ import { createAgentSettings, estimateSource } from "./agent.js";
 import { createComposer } from "./composer.js";
 import { createDurationControls } from "./duration.js";
 import { createTaskOrder } from "./task-order.js";
-import { createSubtaskControls, overrunNote } from "./subtasks.js";
+import { createMovePicker, nextMoveCheck } from "./task-moves.js";
+import { createSubtaskControls, overrunNote, restoreSubtaskCaret, subtaskCaret } from "./subtasks.js";
 import { createMeetingDetails, createMeetingFeed } from "./meetings.js";
 import { createCalendarUpdates } from "./calendar-updates.js";
 import { localRead,localWrite } from "./outbox.js";
@@ -27,6 +28,7 @@ let lastToday;
 let view = pref.get("view") === "day" ? "day" : "week";
 let weekends;
 let syncRefreshTimer;
+let moveEndTimer;
 const compact = matchMedia("(max-width: 720px)");
 let editingTask = null;
 const retryingEstimates = new Set();
@@ -51,7 +53,12 @@ const composer = createComposer({
 });
 const durationControls = createDurationControls({api,refresh,getState:() => state,notify:toast});
 const taskOrder = createTaskOrder({root:byId("planner"),api,refresh,getState:() => state,notify:toast,repaint:render});
-const subtaskControls = createSubtaskControls({api,refresh,getState:() => state,notify:toast,editor:byId("editor-checklist")});
+const subtaskControls = createSubtaskControls({api,refresh,getState:() => state,repaint:render,editor:byId("editor-checklist")});
+const movePicker = createMovePicker({api,refresh,getState:() => state,notify:toast,focusMarker:slotId => {
+  if (!slotId || document.querySelector("dialog[open]")) return;
+  const marker = [...byId("planner").querySelectorAll("[data-moved-slot]")].find(node => node.dataset.movedSlot === slotId && node.getClientRects().length);
+  marker?.focus({preventScroll:true});
+}});
 const meetings = createMeetingFeed({read:(url,signal) => api(url,"GET",undefined,signal),
   changed:() => {
     if (calendarPaint?.request === lastRequest && calendarPaint.generation === calendarGeneration) calendarPaint.changed = true;
@@ -155,6 +162,9 @@ async function refresh(force = false, forceMeetings = false) {
     state.calendars ||= [];
     state.categories ||= [];
     today = day;
+    window.clearTimeout(moveEndTimer);
+    const nextEnd = nextMoveCheck(next);
+    if (nextEnd !== null) moveEndTimer = window.setTimeout(() => { if (!document.hidden) refresh(); },nextEnd);
     window.clearTimeout(syncRefreshTimer);
     if ((!calendarUpdates.connected && next.connection.syncing) || next.tasks.some(task => task.estimateState === "queued" || task.estimateState === "estimating")) {
       syncRefreshTimer = window.setTimeout(() => refresh(),1100);
@@ -198,7 +208,9 @@ async function refresh(force = false, forceMeetings = false) {
     if (byId("action-dialog").open) renderCalendarAction();
     if (byId("task-dialog").open && editingTask && !retryingEstimates.has(editingTask.id)) {
       const latest = state.tasks.find(task => task.id === editingTask.id);
-      const changed = latest && (latest.estimateState !== editingTask.estimateState || latest.minutes !== editingTask.minutes ||
+      const changed = latest && (latest.title !== editingTask.title || latest.text !== editingTask.text || latest.category !== editingTask.category ||
+        latest.earliestDay !== editingTask.earliestDay || latest.latestDay !== editingTask.latestDay ||
+        latest.estimateState !== editingTask.estimateState || latest.minutes !== editingTask.minutes ||
         latest.done !== editingTask.done || latest.start !== editingTask.start || latest.end !== editingTask.end || latest.completedDay !== editingTask.completedDay ||
         latest.calendarProgressMinutes !== editingTask.calendarProgressMinutes || latest.overrunMinutes !== editingTask.overrunMinutes ||
         latest.calendarFit?.originalMinutes !== editingTask.calendarFit?.originalMinutes);
@@ -218,9 +230,10 @@ async function refresh(force = false, forceMeetings = false) {
 }
 
 function render() {
-  if (!state || taskOrder.deferRender()) return;
+  if (!state || taskOrder.deferRender() || subtaskControls.deferRender()) return;
   const active = document.activeElement;
   const bookmark = active?.dataset.focus;
+  const caret = subtaskCaret(active);
   const weekView = view === "week";
   const context = {monday,selected:selectedDay,today,weekends,events:meetings.update(state,monday).events};
   byId("view-week").setAttribute("aria-pressed",String(weekView));
@@ -251,7 +264,6 @@ function render() {
   }
   renderBacklog(state);
   taskOrder.paint();
-  subtaskControls.paint();
   durationControls.paint();
   composer.update();
   renderKey(state.categories);
@@ -277,8 +289,14 @@ function render() {
   meetingDetails.sync();
   if (bookmark && !active.isConnected) {
     const matches = document.querySelectorAll('[data-focus="' + CSS.escape(bookmark) + '"]');
-    const visible = [...matches].find(node => !node.disabled && node.getClientRects().length);
+    let visible = [...matches].find(node => !node.disabled && node.getClientRects().length);
+    const parentId = active.closest("details[data-checklist]")?.dataset.checklist;
+    if (!visible && parentId) {
+      const editors = document.querySelectorAll('[data-action="edit-task"][data-id="' + CSS.escape(parentId) + '"]');
+      visible = [...editors].find(node => node.getClientRects().length);
+    }
     visible?.focus({preventScroll:true});
+    restoreSubtaskCaret(visible,caret);
   }
 }
 
@@ -389,6 +407,21 @@ byId("planner").addEventListener("click",async (event) => {
   if (action === "calendar-settings") return openSettings("calendars");
   const task = state.tasks.find(({id}) => id === target.dataset.id);
   if (!task) return;
+  if (action === "move-later") return movePicker.open(task);
+  if (action === "move-destination") {
+    switchView("day");
+    navigateTo(target.dataset.day);
+    const controls = [...byId("agenda").querySelectorAll("button[data-id]")].filter(node => node.dataset.id === task.id);
+    let next = controls.find(node => node.dataset.action === "edit-task") || controls.find(node => node.dataset.action === "move-destination");
+    if (!next && !task.start && !task.done) {
+      byId("backlog-content").hidden = false;
+      byId("backlog-toggle").setAttribute("aria-expanded","true");
+      next = [...byId("backlog-content").querySelectorAll("[data-action='edit-task']")].find(node => node.dataset.id === task.id);
+    }
+    if (!next) { next = byId("period-title"); next.tabIndex = -1; }
+    next.focus();
+    return;
+  }
   if (action === "adjust-duration") return durationControls.adjust(task,Number(target.dataset.delta));
   if (action === "edit-task") return openEditor(task);
   if (action === "toggle-task") {
@@ -797,7 +830,10 @@ function openEditor(task) {
 function updateEditorControls(task) {
   const deleting = task.syncStatus === "deleting";
   const retrying = retryingEstimates.has(task.id);
-  for (const field of byId("task-form").querySelectorAll("textarea,input,select,button[type='submit'],#delete-task")) field.disabled = deleting || retrying;
+  for (const field of byId("task-form").querySelectorAll("textarea,input,select,button[type='submit'],#delete-task")) {
+    if (!field.closest("#editor-checklist")) field.disabled = deleting || retrying;
+  }
+  byId("editor-checklist").inert = deleting || retrying;
   if (task.pendingEstimate) {
     byId("task-minutes").disabled = true;
     byId("task-category").disabled = true;
@@ -868,14 +904,17 @@ byId("task-form").addEventListener("submit",async (event) => {
   if (changes.text === "") return errorAt("task-error","Enter the task you want to schedule.");
   const day = byId("task-day").value;
   if (day && !editingTask.start && !editingTask.pendingEstimate && editingTask.syncStatus === "attention") changes.day = day;
-  if (!Object.keys(changes).length) return byId("task-dialog").close();
+  const taskId = editingTask.id;
   submit.disabled = true;
   errorAt("task-error");
   try {
-    await api("/api/tasks/" + encodeURIComponent(editingTask.id),"PATCH",changes);
-    await refresh(true);
-    byId("task-dialog").close();
-    toast("Task updated.");
+    if (!await subtaskControls.saveEditorDrafts(taskId)) return errorAt("task-error","Review the checklist change above before saving.");
+    if (Object.keys(changes).length) {
+      await api("/api/tasks/" + encodeURIComponent(taskId),"PATCH",changes);
+      await refresh(true);
+    }
+    if (editingTask?.id === taskId && byId("task-dialog").open) byId("task-dialog").close();
+    if (Object.keys(changes).length) toast("Task updated.");
   } catch (error) { errorAt("task-error",error.message); }
   finally { submit.disabled = false; }
 });

@@ -6,11 +6,12 @@ import * as googleCalendar from './google.mjs';
 import { readCalendarMeetings } from './meetings.mjs';
 import { MeetingAgenda, meetingRange } from './meeting-agenda.mjs';
 import { CATEGORIES, estimateTask, explicitStartFor, findSlot, planningRange, resizedClockWindow } from './planner.mjs';
-import { executePlannerCommand, guardCommandCapture, protectedCommandAppointment, settlePlannerClarification } from './planner-command-service.mjs';
+import { executePlannerCommand, guardCommandCapture, protectedCommandAppointment, revisePlannerTask, settlePlannerClarification } from './planner-command-service.mjs';
 import { canMoveLocalTask, explicitSchedulingIssue, nextFlexibleSlot, planFlexibleSlots, planTaskSlots } from './priority.mjs';
 import { fullTaskMinutes } from './calendar-fit.mjs';
 import { releaseCompletedTime, reopenCompletedTask } from './completion.mjs';
-import { setChecklistCompletion, updateSubtasks } from './subtasks.mjs';
+import { canMoveLater, checkMoveLater, movedFromCurrentSlot, publicMovedSlot, recordElapsedMove } from './moved-slots.mjs';
+import { editChecklist, setChecklistCompletion, updateSubtasks } from './subtasks.mjs';
 import { capOverrun, observeOverrun, proposeOverrun } from './overrun.mjs';
 import { localTaskTitle, recordDurationFeedback } from './task-learning.mjs';
 import { adjustTaskDuration, previewAdjustedSlot, setManualDuration } from './duration.mjs';
@@ -57,12 +58,13 @@ function capturedAt(value, fallback) {
 
 const completedBesideMeeting = task => task.done && task.remote?.calendarAppointment && task.completedPlannedSlot;
 
-function safeTask(task) {
-  const { remote, dirty, intent, pausedSync, lastLocalSlot, held, deleting, estimateJob, estimateOverrides, orderRequestedAt,
-    estimateRequestedAt, estimateRetryIds, estimateRemoteTitle, durationRequests, durationCheckPending, overrunWatchStart, commandEventPending, commandMovedAt, ...visible } = task;
+function safeTask(task, now) {
+  const { remote, dirty, intent, pausedSync, lastLocalSlot, held, deleting, estimateJob, estimateOverrides, orderRequestedAt, subtaskEdits, subtaskRequests,
+    estimateRequestedAt, estimateRetryIds, estimateRemoteTitle, durationRequests, durationCheckPending, overrunWatchStart, commandEventPending, commandMovedAt, movedSlots, ...visible } = task;
   const text = estimateJob?.text ?? task.text;
   const active = task.estimateState === 'queued' || task.estimateState === 'estimating';
-  return { ...visible, ...(completedBesideMeeting(task) && { start: null, end: null }),
+  return { ...visible, ...((completedBesideMeeting(task) || movedFromCurrentSlot(task)) && { start: null, end: null }),
+    canMoveLater:canMoveLater(task,now), movedSlots:(movedSlots || []).map(publicMovedSlot),
     text, title: task.title || localTaskTitle(text), allDay: Boolean(remote?.allDay), hasCalendarEvent: Boolean(remote),
     estimateState: task.estimateState ?? (task.pendingEstimate ? 'failed' : null),
     ...(active && estimateJob && { estimateAgent: { ...estimateJob.selection } }) };
@@ -302,7 +304,7 @@ export class DaylineService {
       sub: account.sub, email: account.email, mode: account.mode, meetingDetails: this.canReadMeetings(account)
     }));
     return {
-      tasks: this.data.tasks.map(task => ({ ...safeTask(task), canReorder: this.canReorderTask(task, now) })),
+      tasks: this.data.tasks.map(task => ({ ...safeTask(task, now), canReorder: this.canReorderTask(task, now) })),
       settings: structuredClone(this.data.settings),
       categories: CATEGORIES,
       calendars: this.calendars.map(publicCalendar),
@@ -334,6 +336,16 @@ export class DaylineService {
     const task = this.data.tasks.find(item => item.id === taskId);
     if (!task) throw invalid('This task is no longer in this planner.', 404);
     return task;
+  }
+
+  moveTaskLater(taskId, input) {
+    const task = this.findTask(taskId), now = this.clock();
+    const saved = checkMoveLater(task,input,now,this.data.settings);
+    if (saved) return {id:taskId,day:saved.toDay,movedSlot:saved};
+    const changed = revisePlannerTask(this,task,'move',{day:input.day,moveRequestId:input.requestId},{},now);
+    const movedSlot = publicMovedSlot(changed.movedSlots.at(-1));
+    this.commitEdit(task,changed);
+    return {id:taskId,day:input.day,movedSlot};
   }
 
   canReorderTask(task, now) {
@@ -718,8 +730,8 @@ export class DaylineService {
     return executePlannerCommand(this, input, options);
   }
 
-  settlePlannerClarification(input, message) {
-    return settlePlannerClarification(this, input, message);
+  settlePlannerClarification(input, message, options) {
+    return settlePlannerClarification(this, input, message, options);
   }
 
   adjustDuration(taskId, input) {
@@ -756,23 +768,34 @@ export class DaylineService {
   }
 
   setSubtaskDone(taskId, subtaskId, done) {
+    return this.changeSubtask(taskId, { kind: 'check', subtaskId, done });
+  }
+
+  changeSubtask(taskId, operation) {
     const task = this.findTask(taskId);
-    if (typeof done !== 'boolean') throw invalid('Choose complete or open for this subtask.');
-    if (task.deleting) throw invalid('This task is waiting for its calendar entry to be removed.', 409);
+    const { requestId } = operation;
+    let signature;
+    if (requestId !== undefined) {
+      if (typeof requestId !== 'string' || !/^[a-f0-9]{32}$/.test(requestId)) throw invalid('Invalid step request identifier.');
+      signature = createHash('sha256').update(JSON.stringify(['kind', 'subtaskId', 'title', 'done', 'expectedTitle', 'expectedDone']
+        .map(k => operation[k] ?? null))).digest('hex');
+      const previous = task.subtaskRequests?.[requestId];
+      if (previous) {
+        if (previous !== signature) throw invalid('This request was used for a different step change.', 409);
+        return { id: task.id, subtaskId: operation.subtaskId, done: task.done, changed: false, completionChanged: false };
+      }
+    }
     const changed = structuredClone(task);
-    const item = changed.subtasks?.find(child => child.id === subtaskId);
-    if (!item) throw invalid('This subtask is no longer on the task.', 404);
-    if (item.done === done) return { id: task.id, done: task.done, completionChanged: false };
-    item.done = done;
-    const complete = changed.subtasks.every(child => child.done);
-    const completionChanged = complete !== task.done;
+    const result = editChecklist(changed, operation);
+    if (requestId) (changed.subtaskRequests ||= {})[requestId] = signature;
+    const completionChanged = result.completion !== null;
     if (completionChanged) {
-      this.setTaskCompletion(changed, complete, false);
+      this.setTaskCompletion(changed, result.completion, false);
       this.saveEdit(task, changed);
-    } else {
+    } else if (result.changed || requestId) {
       this.commitEdit(task, changed);
     }
-    return { id: task.id, done: complete, completionChanged };
+    return { id: task.id, subtaskId: result.subtaskId, done: task.done, changed: result.changed, completionChanged };
   }
 
   async editTask(taskId, input, queueEstimate = false) {
@@ -793,7 +816,7 @@ export class DaylineService {
     this.applyTaskFields(changed, input);
     const learning = this.data.durationLearning;
     if (owns(input, 'minutes') && task.minutes !== changed.minutes) recordDurationFeedback(this.data, task, changed);
-    try { this.saveEdit(task, changed, { durationOnly: Object.keys(input).length === 1 && owns(input, 'minutes') }); }
+    try { this.saveEdit(task, changed, { durationOnly: Object.keys(input).length === 1 && owns(input, 'minutes'), moveDay:input.day }); }
     catch (error) { this.data.durationLearning = learning; throw error; }
     if (queueEstimate) this.wakeEstimateWorker();
     return taskId;
@@ -831,7 +854,8 @@ export class DaylineService {
     if (owns(input, 'done')) this.setTaskCompletion(changed, input.done);
   }
 
-  prepareSavedEdit(task, changed, { durationOnly = false } = {}) {
+  prepareSavedEdit(task, changed, { durationOnly = false,moveDay,moveRequestId,now } = {}) {
+    if (moveDay) recordElapsedMove(task,changed,moveDay,now || this.clock(),this.data.settings,moveRequestId);
     if (changed.pendingEstimate) {
       waitForEstimate(changed);
       return;

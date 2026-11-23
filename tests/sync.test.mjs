@@ -191,6 +191,28 @@ async function create(h, text = 'Write notes for 30 minutes') {
   return task;
 }
 
+test('an explicitly moved elapsed reservation retains one Google event ID and a separate local history marker, and a newly shared appointment stays untouched', async () => {
+  const h=fixture(), created=await create(h), service=h.service;
+  const task=service.findTask(created.id), eventId=task.remote.eventId;
+  service.clock=()=>new Date(at('11:00'));
+  const input={day:'2026-11-24',sourceStart:task.start,sourceEnd:task.end,requestId:'1'.repeat(32)};
+  const moved=service.moveTaskLater(task.id,input);
+  assert.equal(service.snapshot().tasks[0].start,null);
+  assert.deepEqual(h.google.events.get(eventId).start,input.sourceStart);
+  await successfulSync(service);
+  assert.equal(h.google.events.size,1); assert.equal(task.remote.eventId,eventId);
+  assert.equal(h.google.events.get(eventId).start,'2026-11-24T09:00:00.000Z');
+  assert.deepEqual(service.snapshot().tasks[0].movedSlots,[moved.movedSlot]);
+  service.clock=()=>new Date('2026-11-24T11:00:00Z');
+  service.moveTaskLater(task.id,{day:'2026-11-25',sourceStart:task.start,sourceEnd:task.end,requestId:'2'.repeat(32)});
+  h.google.change(eventId,{calendarAppointment:true});
+  const writes=h.google.eventCalls.filter(call=>call.method==='putTaskEvent').length;
+  await service.queueSync();
+  assert.equal(h.google.events.get(eventId).start,'2026-11-24T09:00:00.000Z');
+  assert.equal(h.google.eventCalls.filter(call=>call.method==='putTaskEvent').length,writes);
+  assert.equal(h.google.events.size,1); assert.equal(service.snapshot().tasks[0].canMoveLater,false);
+});
+
 test('scheduling combines both accounts and a read-only calendar, then writes to the chosen account', async () => {
   const h = fixture();
   h.google.meetings = [

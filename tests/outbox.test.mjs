@@ -40,6 +40,25 @@ function browser(t) {
 const task = (id,text) => ({id:id.repeat(32),text,day:'2026-11-24',implicit:false,createdAt:1795500000000});
 const make = api => createCaptureOutbox({api,onChange() {},onAccepted() {},onRemoteChange() {}});
 
+test('an agent proposal survives a reload and only its exact reviewed plan can be applied',async t => {
+  const env = browser(t), sent = [], entry={...task('6','Give the workshop a rehearsal'),askPlanner:true};
+  const planId='8'.repeat(32);
+  const api = async (_url,_method,body) => {
+    sent.push(body);
+    return body.applyPlanId ? {kind:'command',status:'applied',message:'Applied the change.',taskIds:[]} :
+      {kind:'command',status:'preview',message:'Review one change.',planId,steps:['Add rehearsal to workshop.'],taskIds:[]};
+  };
+  const first=make(api);
+  first.add(entry); await env.tick();
+  const restored=make(api);
+  assert.deepEqual(restored.entries()[0].command.steps,['Add rehearsal to workshop.']);
+  assert.equal(restored.decide(entry.id,{applyPlanId:'9'.repeat(32)}),false);
+  assert.equal(restored.decide(entry.id,{applyPlanId:planId}),true);
+  await env.tick();
+  assert.deepEqual(sent.map(body=>[body.askPlanner,body.applyPlanId]),[[true,undefined],[true,planId]]);
+  assert.deepEqual(restored.entries(),[]);
+});
+
 test('a burst survives window restart and two windows deliver the three captures in order',async t => {
   const env = browser(t);
   const sends = [];

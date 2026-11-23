@@ -7,6 +7,7 @@ import { findCli, openProviderLogin } from './cli.mjs';
 import { codexEstimate, codexModel, codexStatus } from './codex.mjs';
 import { googleAgent } from './google.mjs';
 import { claudeEstimate, claudeStatus } from './claude.mjs';
+import { planningInstructions, planningSchema, readPlanningOutput } from './planning.mjs';
 
 export { codexModel };
 const instructions = readFileSync(new URL('./instructions.md', import.meta.url), 'utf8');
@@ -124,12 +125,14 @@ export class TaskAgents {
     return { message: 'In the official client, choose ' + choice + '. Finish sign-in, then choose Check sign-in in Dayline.' };
   }
 
-  async interpretCommand(text, { now, timeZone, selection = this.selected }) {
+  async interpretCommand(text, { now, timeZone, selection = this.selected, planner }) {
     const {provider,model} = selection;
     if (provider === 'local') return { intent:'clarify' };
     const when = DateTime.fromJSDate(now,{zone:timeZone});
     const input = { text, today:when.toISODate(), currentTime:when.toFormat('HH:mm'), timeZone };
-    const response = await this.adapters[provider].estimate({model,instructions:commandInstructions,input,schema:commandSchema});
+    if (planner) input.planner = planner;
+    const response = await this.adapters[provider].estimate({model,input,
+      instructions:planner ? planningInstructions : commandInstructions, schema:planner ? planningSchema : commandSchema});
     if (provider === 'codex' && (response.model !== model || response.effort !== 'low')) {
       throw new Error('Codex did not confirm the requested model and reasoning effort.');
     }
@@ -137,6 +140,7 @@ export class TaskAgents {
     if (model && response.model !== model && !claudeAlias) throw new Error('The agent did not confirm the selected model.');
     const agent = { ...selection, model:response.model || model, ...usageFields(response.usage) };
     const output = response.output;
+    if (planner) return readPlanningOutput(output,agent);
     if (output?.intent === 'create') return {intent:'create',agent};
     if (output?.intent !== 'change' || typeof output.subject !== 'string' || !output.subject.trim() ||
         typeof output.instruction !== 'string' || !output.instruction.trim() || output.instruction.length > 1000) return { intent:'clarify',agent };

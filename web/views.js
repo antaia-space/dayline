@@ -5,6 +5,7 @@ import {
 import { meetingCard, nonblockingMeeting, rangeOnDay } from "./meetings.js";
 import { addOrderHandle } from "./task-order.js";
 import { overrunNote, taskChecklist } from "./subtasks.js";
+import { moveLaterButton, movedMarker, movesByDay } from "./task-moves.js";
 
 const id = (key) => document.getElementById(key);
 
@@ -51,7 +52,7 @@ export function fittedDuration(task) {
   };
 }
 
-function taskButtons(task,view) {
+function taskButtons(task,view,displayName) {
   const name = task.title || task.text;
   const checkbox = button("task-toggle","toggle-task",(task.done ? "Reopen " : "Mark complete — ") + name);
   checkbox.dataset.id = task.id;
@@ -60,7 +61,9 @@ function taskButtons(task,view) {
   checkbox.title = task.done ? "Reopen task" : "Mark complete";
   checkbox.disabled = task.syncStatus === "deleting";
   if (task.done) checkbox.append(icon("check"));
-  const title = button("task-title","edit-task","Edit " + name,name);
+  const title = button("task-title","edit-task","Edit " + name);
+  title.append(element("span","task-name",displayName || name),icon("pencil"));
+  title.title = "Edit task";
   title.dataset.id = task.id;
   title.dataset.focus = view + "-edit-" + task.id;
   return [checkbox,title];
@@ -115,6 +118,8 @@ function taskControls(task, state, view,openChecklist = false) {
     group.append(decrease,value,increase); details.append(group);
   }
   content.append(details);
+  const move = moveLaterButton(task,view);
+  if (move) content.append(move);
   const fit = fittedDuration(task);
   if (fit) {
     const note = element("span","task-fit",fit.label);
@@ -191,14 +196,13 @@ function completedSection(tasks,day,view,slotZone) {
   }
   for (const task of tasks) {
     const row = element("div","completed-row");
-    const [toggle,title] = taskButtons(task,view), content = element("div","completed-content");
+    const [toggle,title] = taskButtons(task,view,slotZone && shortCompletedTitle(task.title || task.text)), content = element("div","completed-content");
     content.append(title);
     row.append(toggle,content);
     if (slotZone) {
       const {start,end} = task.completedPlannedSlot;
       const original = "Originally " + instantTime(start,slotZone) + "–" + instantTime(end,slotZone);
       const fullTitle = task.title || task.text;
-      title.textContent = shortCompletedTitle(fullTitle);
       title.title = fullTitle + " · " + original;
       title.setAttribute("aria-description",original);
       content.append(element("span","sr-only",original));
@@ -249,13 +253,15 @@ function ordered(tasks) {
   return [...tasks].sort((a,b) => String(a.start || a.createdAt).localeCompare(String(b.start || b.createdAt)) || a.text.localeCompare(b.text));
 }
 
-function dayStrip(container, days, selected, today, tasksByDay, calendar) {
+function dayStrip(container, days, selected, today, tasksByDay, calendar, moves) {
   const buttons = days.map((day) => {
     const label = formatDay(day,{weekday:"long",month:"long",day:"numeric",year:"numeric"});
     const count = tasksByDay.get(day)?.length || 0;
     const meetings = calendar.get(day)?.meetings.length || 0;
-    const suffix = [count && count + (count === 1 ? " task" : " tasks"),meetings && meetings + (meetings === 1 ? " meeting" : " meetings")].filter(Boolean);
-    const select = button(count || meetings ? "has-tasks" : "","pick-day",[label,...suffix].join(", "));
+    const moved = moves.get(day)?.length || 0;
+    const suffix = [count && count + (count === 1 ? " task" : " tasks"),meetings && meetings + (meetings === 1 ? " meeting" : " meetings"),
+      moved && moved + (moved === 1 ? " moved task" : " moved tasks")].filter(Boolean);
+    const select = button(suffix.length ? "has-tasks" : "","pick-day",[label,...suffix].join(", "));
     select.dataset.day = day;
     select.dataset.focus = container.id + "-" + day;
     select.setAttribute("aria-pressed",String(day === selected));
@@ -272,15 +278,18 @@ export function renderWeek(state,{monday,selected,today,weekends,events = []}) {
   const fullWeek = Array.from({length:7},(_,i) => addDays(monday,i));
   const days = weekends ? fullWeek : fullWeek.slice(0,5);
   const tasksByDay = groupWeek(ordered(state.tasks),fullWeek,zone);
+  const moves = movesByDay(state.tasks,fullWeek,zone);
   const calendar = new Map(days.map(day => [day,calendarEntriesForDay(state,events,day,zone)]));
   const visible = new Set(days.flatMap(day => tasksByDay.get(day)));
   const hiddenWeekendTasks = new Set(fullWeek.slice(days.length).flatMap(day => tasksByDay.get(day)).filter(task => !visible.has(task))).size;
   summary(id("week-summary"),[...visible],new Set(days.flatMap(day => calendar.get(day).meetings.map(entry => entry.meeting.id))).size);
-  if (hiddenWeekendTasks) {
-    const showWeekends = button("summary-link","show-weekends","Show weekend tasks",hiddenWeekendTasks + (hiddenWeekendTasks === 1 ? " weekend task" : " weekend tasks"));
+  const weekendHistory = fullWeek.slice(days.length).some(day => moves.get(day).length);
+  if (hiddenWeekendTasks || weekendHistory) {
+    const showWeekends = button("summary-link","show-weekends","Show weekend days",hiddenWeekendTasks
+      ? hiddenWeekendTasks + (hiddenWeekendTasks === 1 ? " weekend task" : " weekend tasks") : "Weekend move history");
     id("week-summary").append(element("span","middle-dot","·"),showWeekends);
   }
-  dayStrip(id("week-strip"),days,selected,today,tasksByDay,calendar);
+  dayStrip(id("week-strip"),days,selected,today,tasksByDay,calendar,moves);
   const columns = days.map((day) => {
     const isToday = day === today;
     const off = !state.settings.workDays.includes(dayIndex(day));
@@ -307,9 +316,10 @@ export function renderWeek(state,{monday,selected,today,weekends,events = []}) {
     const {meetings,anonymous} = calendar.get(day);
     const completed = tasksByDay.get(day).filter(task => !task.start && task.done);
     const entries = tasksByDay.get(day).filter(task => task.start).map(task => ({task,...rangeOnDay(task,day,zone)}));
-    for (const entry of [...entries,...meetings,...anonymous].sort(entryOrder)) {
+    for (const entry of [...entries,...meetings,...anonymous,...moves.get(day)].sort(entryOrder)) {
       if (entry.task) body.append(taskRow(entry.task,state,day,"board"));
       else if (entry.meeting) body.append(meetingCard(entry,day,false));
+      else if (entry.kind === "moved") body.append(movedMarker(entry,"board"));
       else {
         const row = element("div","week-busy");
         const time = entry.start === 0 && entry.end === 1440 ? "All day" : displayTime(entry.start) + "–" + displayTime(entry.end);
@@ -391,7 +401,7 @@ function agendaTask(entry,state,day) {
   const {task} = entry;
   const card = element("div","agenda-block agenda-task" + (task.done ? " is-done" : ""));
   card.style.setProperty("--task-color",categoryColor(categoryOf(state,task).color));
-  const openChecklist = !task.done && task.subtasks?.length <= 3 && entry.end-entry.start >= 30;
+  const openChecklist = !task.done && task.subtasks?.length > 0 && task.subtasks.length <= 3 && entry.end-entry.start >= 30;
   addOrderHandle(card,task,day,"agenda");
   card.append(...taskControls(task,state,"agenda",openChecklist));
   return card;
@@ -418,8 +428,9 @@ export function renderAgenda(state,{monday,selected,today,events = []}) {
   const zone = state.settings.timeZone;
   const days = Array.from({length:7},(_,i) => addDays(monday,i));
   const tasksByDay = groupWeek(state.tasks,days,zone);
+  const moves = movesByDay(state.tasks,days,zone);
   const calendar = new Map(days.map(day => [day,calendarEntriesForDay(state,events,day,zone)]));
-  dayStrip(id("agenda-strip"),days,selected,today,tasksByDay,calendar);
+  dayStrip(id("agenda-strip"),days,selected,today,tasksByDay,calendar,moves);
   const taskEntries = state.tasks.flatMap((task) => {
     const range = task.start && task.end && !task.pendingEstimate && rangeOnDay(task,selected,zone);
     return range ? [{...range,kind:"task",task}] : [];
@@ -435,14 +446,20 @@ export function renderAgenda(state,{monday,selected,today,events = []}) {
     const free = subtractRanges(hours,mergeRanges([...booked,...occupied]));
     entries.push(...freeTimeRows(free,selected,state.now || Date.now(),zone));
   }
-  entries.sort(entryOrder);
   const released = groupReleasedSlots(completed,entries,selected,zone);
+  entries.push(...moves.get(selected));
+  entries.sort(entryOrder);
   summary(id("agenda-summary"),[...taskEntries.map((entry) => entry.task),...completed],meetings.length);
   if (!entries.length && !completed.length) {
     id("agenda").replaceChildren(element("p","agenda-empty",workday ? "No time blocks for this day." : "Outside your working days. No tasks are scheduled."));
     return;
   }
   const rows = entries.map((entry) => {
+    if (entry.kind === "moved") {
+      const row = element("div","agenda-slot agenda-moved");
+      row.append(element("span","agenda-start",instantTime(entry.move.start,entry.zone)),movedMarker(entry,"agenda"));
+      return row;
+    }
     const row = element("div","agenda-slot");
     const size = agendaBlockSize(entry,selected,zone);
     row.style.setProperty("--agenda-block-height",size.minimumRem + "rem");

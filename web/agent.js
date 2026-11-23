@@ -149,7 +149,7 @@ export function createAgentSettings({api,toast,errorAt,onSaved}) {
     id("agent-check").textContent = record.installed ? "Check sign-in" : "Check installation";
     id("agent-check").title = remote ? "Check " + definition.client + " on this Mac" : "";
     const sharing = remote
-      ? "Each estimate sends the task text and date/time hints to " + definition.service + " through " + definition.client + ", using your signed-in subscription’s quota."
+      ? "Estimates use " + definition.service + " through " + definition.client + " with your subscription quota. Planner requests can share relevant Dayline task titles, checklist items, durations and scheduling times. Google meeting details stay on this Mac."
       : "Task estimation runs on this Mac.";
     shown(id("agent-sharing"),sharing);
     const notes = Array.isArray(record.durationNotes) ? record.durationNotes.filter(note => typeof note === "string" && note.trim()) : [];

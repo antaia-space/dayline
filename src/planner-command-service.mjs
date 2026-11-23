@@ -34,7 +34,7 @@ function commandDay(input) {
 // namespace. A delayed normal capture cannot turn a completed edit into a task.
 export function guardCommandCapture(data, input) {
   const entry = input.requestId && data.plannerCommands?.[input.requestId];
-  if (entry && (entry.text !== originalText(input) || entry.receipt.kind === 'applied' || input.forceCreate !== true)) {
+  if (entry && (entry.text !== originalText(input) || ['applied','preview','answer'].includes(entry.receipt.kind) || input.forceCreate !== true)) {
     throw fail('This entry already belongs to a planner instruction.', 409);
   }
 }
@@ -90,7 +90,8 @@ function revise(service, before, action, changes, learning, now) {
     service.applyTaskFields(changed, { title:changes.title });
   } else throw fail('This planner instruction is unsupported.');
   if (before.remote || before.pausedSync?.remote) changed.commandEventPending = true;
-  service.prepareSavedEdit(before, changed, { durationOnly:action === 'duration' });
+  service.prepareSavedEdit(before, changed, { durationOnly:action === 'duration',
+    ...(action === 'move' && {moveDay:changes.day,moveRequestId:changes.moveRequestId,now}) });
   return changed;
 }
 
@@ -133,6 +134,8 @@ function persist(service, item, receipt, tasks, learning) {
   return structuredClone(receipt);
 }
 
+export { revise as revisePlannerTask, cannotEdit as plannerEditIssue, persist as persistPlannerReceipt };
+
 function clarification(service, parsed) {
   const zone = service.data.settings.timeZone;
   const candidates = (parsed.candidates || []).flatMap(({ id }) => {
@@ -154,12 +157,13 @@ function clarification(service, parsed) {
     ...(parsed.choiceRole && { choiceRole:parsed.choiceRole }), ...(parsed.counterpartId && { counterpartId:parsed.counterpartId }) };
 }
 
-export function settlePlannerClarification(service, input, message) {
+export function settlePlannerClarification(service, input, message, { kind = 'clarification', reason = 'syntax', agent } = {}) {
   const text = originalText(input), { requestId } = input;
   if (typeof requestId !== 'string' || !ID.test(requestId)) throw fail('Invalid planner request identifier.');
   const saved = service.data.plannerCommands?.[requestId];
   if (saved && saved.text !== text) throw fail('This request identifier belongs to a different planner instruction.', 409);
-  if (saved && saved.receipt.kind !== 'unparsed') return structuredClone(saved.receipt);
+  const canReinterpret = reason === 'agent' && ['no-match','clarification'].includes(saved?.receipt.kind) && saved.receipt.reason !== 'agent';
+  if (saved && saved.receipt.kind !== 'unparsed' && !canReinterpret) return structuredClone(saved.receipt);
   if (service.data.tasks.some(task => task.id === requestId) || service.data.deletedTaskIds?.includes(requestId)) return { kind:'create', id:requestId };
   const details = saved || { id:requestId, text, ...service.captureContext(input) };
   const request = { id:requestId, text, at:details.at, timeZone:details.timeZone };
@@ -167,8 +171,8 @@ export function settlePlannerClarification(service, input, message) {
   const day = details.contextDay ?? commandDay(input);
   if (day) request.contextDay = day;
   if (details.matchRetryIds) request.matchRetryIds = details.matchRetryIds;
-  const summary = typeof message === 'string' && message.trim() ? message.trim().slice(0, 500) : 'Name the task and the change you want.';
-  return persist(service, request, { kind:'clarification', reason:'syntax', message:summary, taskIds:[] });
+  const summary = typeof message === 'string' && message.trim() ? message.trim().slice(0, kind === 'answer' ? 1500 : 500) : 'Name the task and the change you want.';
+  return persist(service, request, { kind, reason, message:summary, taskIds:[], ...(agent && {agent}) });
 }
 
 // Called on the service's serialized write queue. Only the server supplies an
@@ -184,7 +188,7 @@ export function executePlannerCommand(service, input, { interpretedText } = {}) 
   const enteredDay = commandDay(input);
   const saved = requestId && service.data.plannerCommands?.[requestId];
   if (saved && saved.text !== text) throw fail('This request identifier belongs to a different planner instruction.', 409);
-  if (saved?.receipt.kind === 'applied') return structuredClone(saved.receipt);
+  if (['applied','preview','answer'].includes(saved?.receipt.kind)) return structuredClone(saved.receipt);
   if (requestId && (service.data.tasks.some(task => task.id === requestId) || service.data.deletedTaskIds?.includes(requestId))) return { kind:'create', id:requestId };
   if (input.forceCreate === true) return { kind:'create' };
   if (chosenTaskId && (!saved || saved.receipt.kind !== 'needs-choice' || !saved.receipt.candidates.some(item => item.id === chosenTaskId))) {

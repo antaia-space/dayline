@@ -83,7 +83,10 @@ test('each task surface puts the reorder button first and keeps duration buttons
   renderWeek(state,context); renderAgenda(state,context); renderBacklog(state);
   for (const [container,id] of [['week-board','movable'],['agenda','movable'],['backlog-content','waiting']]) {
     const row=each(elements.get(container)).find(part=>part.dataset.orderItem===id);
-    const actions=each(row).filter(part=>part.tag==='button').map(part=>part.dataset.action);
+    const actions=each(row).filter(part=>part.tag==='button' && part.dataset.action).map(part=>part.dataset.action);
+    const editor=each(row).find(part=>part.dataset.action==='edit-task');
+    assert.deepEqual(editor.children.map(child=>child.tag),['span','svg']);
+    assert.equal(editor.title,'Edit task');
     assert.deepEqual(actions,['task-order','toggle-task','edit-task','adjust-duration','adjust-duration']);
     const group=each(row).find(part=>part.attributes.role==='group');
     assert.equal(group.dataset.durationFor,id);

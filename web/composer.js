@@ -29,6 +29,13 @@ function shortTitle(text) {
 export function createComposer({api,refresh,context,showLocation,openTask}) {
   const form = byId("quick-add"), input = byId("quick-text"), picker = byId("quick-day");
   let draft = restoreDraft();
+  const mode = byId("entry-mode");
+  mode.value = draft ? (draft.askPlanner ? "planner" : "auto") : (localRead("sessionStorage","dayline.entryMode") === "planner" ? "planner" : "auto");
+  function showMode() {
+    input.placeholder = mode.value === "planner" ? "Ask about your plan or describe a change" : "Add a task or change your plan";
+    byId("add-label").textContent = mode.value === "planner" ? "Ask" : "Send";
+  }
+  showMode();
   let selected = draft?.day || null, implicit = Boolean(selected && draft?.implicit);
   let lastContext = "", choicesKey = "", issueKey = "", legacyChecked = false;
   let receipt = readJSON(localRead("sessionStorage",receiptKey) ?? localRead("localStorage",receiptKey));
@@ -41,8 +48,9 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
     edit(item) {
       if (input.value.trim() && draft?.revises !== item.id) { error("Finish your current entry before editing this request."); focusInput(); return; }
       selected = item.day || null; implicit = Boolean(item.implicit);
+      mode.value = item.askPlanner || item.command?.contextual ? "planner" : "auto"; showMode();
       input.value = item.text;
-      storeDraft({id:crypto.randomUUID().replaceAll("-",""),text:item.text,day:selected,implicit,revises:item.id,updatedAt:Date.now()});
+      storeDraft({id:crypto.randomUUID().replaceAll("-",""),text:item.text,day:selected,implicit,askPlanner:mode.value === "planner",revises:item.id,updatedAt:Date.now()});
       error(); update(); focusInput();
     },
     dismiss(item) {
@@ -54,7 +62,8 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
       }
       update(); focusInput();
     },
-    retry:id => outbox.retry(id),focusInput
+    retry:id => outbox.retry(id),focusInput,
+    canAskPlanner:() => Boolean(context().state?.selectedAgent && context().state.selectedAgent.provider !== "local")
   });
   input.value = draft?.text || "";
   const latestResult = readJSON(localRead("localStorage",resultKey));
@@ -85,8 +94,9 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
   }
   function capture() {
     if (!input.value.trim()) { if (draft) storeDraft(null); return; }
-    if (draft?.text === input.value && draft.day === selected && Boolean(draft.implicit) === implicit) return;
-    storeDraft({id:crypto.randomUUID().replaceAll("-",""),text:input.value,day:selected,implicit,
+    const askPlanner = mode.value === "planner";
+    if (draft?.text === input.value && draft.day === selected && Boolean(draft.implicit) === implicit && Boolean(draft.askPlanner) === askPlanner) return;
+    storeDraft({id:crypto.randomUUID().replaceAll("-",""),text:input.value,day:selected,implicit,askPlanner,
       ...(draft?.revises && {revises:draft.revises}),updatedAt:Date.now()});
   }
   function remember(item) {
@@ -144,6 +154,7 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
         edit.addEventListener("click",() => {
           if (input.value.trim()) { error("Finish the current draft before editing this saved task."); input.focus(); return; }
           input.value = item.text; selected = item.day || null; implicit = Boolean(item.implicit);
+          mode.value = item.askPlanner ? "planner" : "auto"; showMode();
           capture(); outbox.remove(item.id); update(); input.focus();
         });
         row.append(edit);
@@ -200,7 +211,8 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
       } else if (task.syncStatus === "pending" && ctx.state.connection.connected) message = "Checking calendar availability for " + title + "…";
       else message = title + " is in Unscheduled." + (task.issue ? " " + task.issue : "");
     } else if (unsent?.command) {
-      message = unsent.decision ? "Saving your choice…" : "Your planner request needs a response below.";
+      message = unsent.decision ? "Saving your choice…" : unsent.command.status === "answer" ? "" :
+        unsent.command.status === "preview" ? "Review the proposed changes below." : "Your planner request needs a response below.";
     } else if (command?.status === "applied") {
       message = command.message;
     } else if (unsent) {
@@ -224,6 +236,10 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
     if (focus) input.focus();
   }
   input.addEventListener("input",() => { capture(); error(); });
+  mode.addEventListener("change",() => {
+    localWrite("sessionStorage","dayline.entryMode",mode.value);
+    showMode(); capture(); focusInput();
+  });
   picker.addEventListener("change",() => {
     const fromView = picker.value.startsWith("view:");
     choose(fromView ? picker.value.slice(5) : picker.value,false,fromView);
@@ -246,7 +262,7 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
     const agent = ctx.state.selectedAgent || {};
     const item = {id:draft.id,text:draft.text.trim(),day:draft.day,implicit:Boolean(draft.implicit),createdAt:Date.now(),
       captureTimeZone:ctx.state.settings.timeZone,contextDay:ctx.selectedDay,provider:agent.provider,model:agent.model,effort:agent.effort,
-      ...(draft.revises && {revises:draft.revises})};
+      ...(draft.askPlanner && {askPlanner:true}),...(draft.revises && {revises:draft.revises})};
     const saved = outbox.add(item);
     remember(item);
     if (saved) { storeDraft(null); input.value = ""; lastContext = ""; }

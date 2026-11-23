@@ -85,14 +85,100 @@ export function subtaskLabels(text, proposed) {
 }
 
 export function updateSubtasks(task, proposed) {
-  const previous = new Map((task.subtasks || []).map(item => [keyFor(item.title), item]));
-  const labels = subtaskLabels(task.text, proposed);
-  task.subtasks = labels.map(title => {
+  const before = Array.isArray(task.subtasks) ? task.subtasks : [];
+  const edits = task.subtaskEdits || {};
+  const previous = new Map(before.map(item => [item.id, item]));
+  const generated = new Map(before.filter(item => !edits[item.id]).map(item => [keyFor(item.title || item.text || ''), item.id]));
+  const aliases = new Map(), removed = new Set();
+  for (const [id, edit] of Object.entries(edits)) {
+    for (const name of [edit.sourceTitle, edit.title]) {
+      if (!name) continue;
+      if (edit.removed) removed.add(labelKey(name));
+      else aliases.set(labelKey(name), id);
+    }
+  }
+  const next = new Map(), usedNames = new Set();
+  function include(id, title) {
+    const name = labelKey(title);
+    if (next.has(id) || usedNames.has(name)) return;
+    usedNames.add(name);
+    next.set(id, { id, title, done: Boolean(task.done || previous.get(id)?.done) });
+  }
+  for (const title of subtaskLabels(task.text, proposed)) {
     const key = keyFor(title);
-    const existing = previous.get(key);
-    const id = existing?.id || createHash('sha256').update(task.id + '\0' + key).digest('hex').slice(0, 32);
-    return { id, title, done: Boolean(task.done || existing?.done) };
-  });
+    const inferredId = generated.get(key) || createHash('sha256').update(task.id + '\0' + key).digest('hex').slice(0, 32);
+    const id = edits[inferredId] ? inferredId : aliases.get(labelKey(title)) || inferredId;
+    const edit = edits[id];
+    if (edit?.removed || edit?.added || (!edit && removed.has(labelKey(title)))) continue;
+    include(id, edit?.title || title);
+  }
+  // Keep deliberate additions and renames, even when the agent's next list
+  // omits them. Existing manual steps retain their relative order.
+  for (const { id } of before) if (edits[id] && !edits[id].removed) include(id, edits[id].title);
+  task.subtasks = [...next.values()];
+}
+
+const labelKey = value => value.normalize('NFC').toLowerCase().replace(/\s+/gu, ' ').trim();
+const checklistError = (message, status = 400) => Object.assign(new Error(message), { status });
+
+function manualTitle(value) {
+  const title = typeof value === 'string' ? value.trim() : '';
+  if (!title || [...title].length > labelLength || /[\p{Cc}\p{Zl}\p{Zp}]/u.test(title)) {
+    throw checklistError('Enter a one-line step between 1 and 160 characters.');
+  }
+  return title;
+}
+
+// Apply one user operation to a proposed task. The caller commits this clone
+// atomically with a parent completion transition or with other planner edits.
+export function editChecklist(task, { kind, subtaskId, title, done, expectedTitle, expectedDone }) {
+  if (!['add', 'rename', 'remove', 'check'].includes(kind)) throw checklistError('Unknown subtask change.');
+  if (typeof subtaskId !== 'string' || !/^[a-f0-9]{32}$/.test(subtaskId)) throw checklistError('Choose a valid step.');
+  if (task.deleting) throw checklistError('This task is waiting for its calendar entry to be removed.', 409);
+  const changed = { changed: true, completion: null, subtaskId };
+  const unchanged = { ...changed, changed: false };
+  const list = Array.isArray(task.subtasks) ? task.subtasks : [];
+  const item = list.find(step => step.id === subtaskId);
+  const edit = task.subtaskEdits?.[subtaskId];
+  if (kind === 'add' || kind === 'rename') title = manualTitle(title);
+  if (kind === 'check' && typeof done !== 'boolean') throw checklistError('Choose complete or open for this subtask.');
+  if (kind === 'add' && done !== undefined && typeof done !== 'boolean') throw checklistError('Choose complete or open for this subtask.');
+  if (expectedTitle !== undefined && typeof expectedTitle !== 'string') throw checklistError('Choose a valid previous step title.');
+  if (expectedDone !== undefined && typeof expectedDone !== 'boolean') throw checklistError('Choose a valid previous step state.');
+  if (kind === 'add') {
+    // Keep the initial title with its stable client ID. A delayed POST must
+    // neither undo a rename nor resurrect a deleted step.
+    if (edit?.added && edit.sourceTitle === title) return unchanged;
+    if (item || edit) throw checklistError('This step identifier is already in use. Refresh the task.', 409);
+  } else if (!item) {
+    if (kind === 'remove' && edit?.removed) return unchanged;
+    throw checklistError('This subtask is no longer on the task.', 404);
+  }
+  if ((kind === 'rename' && item.title === title) || (kind === 'check' && item.done === done)) return unchanged;
+  if ((expectedTitle !== undefined && expectedTitle !== item?.title) || (expectedDone !== undefined && expectedDone !== item?.done)) {
+    throw checklistError('Another window changed this step. Refresh the task and try again.', 409);
+  }
+  if ((kind === 'add' || kind === 'rename') && list.some(step => step.id !== subtaskId && labelKey(step.title || step.text || '') === labelKey(title))) {
+    throw checklistError('A step with that name already exists on this task.', 409);
+  }
+  if (kind === 'check') item.done = done;
+  else {
+    const edits = task.subtaskEdits ||= {};
+    if (kind === 'add') {
+      edits[subtaskId] = { added: true, sourceTitle: title, title };
+      task.subtasks = [...list, { id: subtaskId, title, done: done === true }];
+    } else {
+      const prior = item.title || item.text || '';
+      const override = edits[subtaskId] ||= { sourceTitle: prior, title: prior };
+      if (kind === 'rename') { override.title = title; item.title = title; }
+      else { override.removed = true; task.subtasks = list.filter(step => step.id !== subtaskId); }
+    }
+  }
+  if (kind !== 'rename' && task.subtasks?.length) {
+    const complete = task.subtasks.every(step => step.done);
+    if (task.done !== complete) changed.completion = complete;
+  }
+  return changed;
 }
 
 export function setChecklistCompletion(task, done) {

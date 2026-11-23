@@ -3,13 +3,17 @@ const keyFor = id => prefix + id;
 const waitingToSend = item => !item.blocked && (!item.command || item.decision);
 
 function commandResult(result) {
-  if (result?.kind !== "command" || !["applied","choice","unmatched","clarify"].includes(result.status) ||
+  if (result?.kind !== "command" || !["applied","choice","unmatched","clarify","preview","answer"].includes(result.status) ||
       typeof result.message !== "string" || !result.message.trim()) return null;
+  if (result.status === "preview" && (!/^[a-f0-9]{32}$/.test(result.planId) || !Array.isArray(result.steps) ||
+      !result.steps.length || !result.steps.every(step => typeof step === "string" && step.trim()))) return null;
   const choices = (Array.isArray(result.choices) ? result.choices : [])
     .filter(choice => typeof choice?.id === "string" && typeof choice.title === "string")
     .map(({id,title,detail}) => ({id,title,...(typeof detail === "string" && detail && {detail})}));
   const taskIds = [...new Set(Array.isArray(result.taskIds) ? result.taskIds.filter(id => typeof id === "string") : [])];
-  return {kind:"command",status:result.status,message:result.message,choices,taskIds};
+  return {kind:"command",status:result.status,message:result.message,choices,taskIds,...(result.contextual && {contextual:true}),
+    ...(typeof result.agent?.model === "string" && {agent:result.agent}),
+    ...(result.status === "preview" && {planId:result.planId,steps:result.steps})};
 }
 
 export function localRead(area,key) {
@@ -63,13 +67,15 @@ export function createCaptureOutbox({api,onChange,onAccepted,onRemoteChange}) {
   }
   async function send(item) {
     const request = {requestId:item.id,text:item.text};
+    if (item.askPlanner || item.decision?.askPlanner) request.askPlanner = true;
     if (Number.isFinite(item.createdAt)) request.capturedAt = item.createdAt;
     if (item.captureTimeZone) request.captureTimeZone = item.captureTimeZone;
     if (item.contextDay) request.contextDay = item.contextDay;
-    if (item.provider) request.captureAgent = {provider:item.provider,model:item.model || "",...(item.effort ? {effort:item.effort} : {})};
+    if (item.provider && !item.decision?.askPlanner) request.captureAgent = {provider:item.provider,model:item.model || "",...(item.effort ? {effort:item.effort} : {})};
     if (item.day) request[item.implicit ? "viewDay" : "day"] = item.day;
     if (item.decision?.chosenTaskId) request.chosenTaskId = item.decision.chosenTaskId;
     if (item.decision?.forceCreate === true) request.forceCreate = true;
+    if (item.decision?.applyPlanId) request.applyPlanId = item.decision.applyPlanId;
     if (item.decision?.retryMatch === true) {
       request.retryMatch = true;
       request.retryMatchId = item.decision.retryMatchId;
@@ -143,6 +149,8 @@ export function createCaptureOutbox({api,onChange,onAccepted,onRemoteChange}) {
       const choice = decision?.chosenTaskId && item.command.choices.some(option => option.id === decision.chosenTaskId);
       let answer;
       if (choice) answer = {chosenTaskId:decision.chosenTaskId};
+      else if (item.command.status === "preview" && decision?.applyPlanId === item.command.planId) answer = {applyPlanId:item.command.planId};
+      else if (decision?.askPlanner === true && !item.command.contextual && ["unmatched","clarify"].includes(item.command.status)) answer = {askPlanner:true};
       else if (decision?.forceCreate === true) answer = {forceCreate:true};
       else if (decision?.retryMatch === true && ["unmatched","clarify"].includes(item.command.status)) {
         answer = {retryMatch:true,retryMatchId:crypto.randomUUID().replaceAll("-","")};

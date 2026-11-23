@@ -14,8 +14,21 @@ const TASK_ROUTE = /^\/api\/tasks\/([a-f0-9]{32})$/;
 const ESTIMATE_ROUTE = /^\/api\/tasks\/([a-f0-9]{32})\/estimate$/;
 const DURATION_ROUTE = /^\/api\/tasks\/([a-f0-9]{32})\/duration$/;
 const ORDER_ROUTE = /^\/api\/tasks\/([a-f0-9]{32})\/order$/;
-const SUBTASK_ROUTE = /^\/api\/tasks\/([a-f0-9]{32})\/subtasks\/([a-f0-9]{32})$/;
+const MOVE_LATER_ROUTE = /^\/api\/tasks\/([a-f0-9]{32})\/move-later$/;
+const SUBTASK_ROUTE = /^\/api\/tasks\/([a-f0-9]{32})\/subtasks(?:\/([a-f0-9]{32}))?$/;
 const ACTION_ROUTE = /^\/action\/([a-f0-9]{32})$/;
+
+function subtaskOperation(method, member, body) {
+  let kind, allowed;
+  if (!member && method === 'POST') { kind = 'add'; allowed = ['id', 'title', 'done']; }
+  else if (member && method === 'DELETE') { kind = 'remove'; allowed = ['expectedTitle', 'expectedDone', 'requestId']; }
+  else if (member && method === 'PATCH' && Object.hasOwn(body, 'title')) { kind = 'rename'; allowed = ['title', 'expectedTitle', 'requestId']; }
+  else if (member && method === 'PATCH' && Object.hasOwn(body, 'done')) { kind = 'check'; allowed = ['done', 'expectedDone', 'requestId']; }
+  else throw invalid('Choose a step to add, rename, remove or check.');
+  if (Object.keys(body).some(k => !allowed.includes(k))) throw invalid('Unknown subtask change.');
+  const { id, ...fields } = body;
+  return { kind, subtaskId: member || id, ...fields };
+}
 
 async function jsonInput(req) {
   if (req.headers['content-type']?.split(';')[0] !== 'application/json') throw invalid('Send a JSON request.', 415);
@@ -119,6 +132,7 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
       const retry = ESTIMATE_ROUTE.exec(pathname);
       const duration = DURATION_ROUTE.exec(pathname);
       const order = ORDER_ROUTE.exec(pathname);
+      const moveLater = MOVE_LATER_ROUTE.exec(pathname);
       const subtask = SUBTASK_ROUTE.exec(pathname);
       let status = 200;
       let syncAfter = true;
@@ -138,10 +152,12 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
         result.id = await service.run(() => service.enqueueRetry(retry[1], body));
         status = 202;
         syncAfter = false;
-      } else if (req.method === 'PATCH' && subtask) {
-        if (Object.keys(body).some(key => key !== 'done')) throw invalid('Unknown subtask change.');
-        result = await service.run(() => service.setSubtaskDone(subtask[1], subtask[2], body.done));
+      } else if (subtask) {
+        const operation = subtaskOperation(req.method, subtask[2], body);
+        result = await service.run(() => service.changeSubtask(subtask[1], operation));
         syncAfter = result.completionChanged;
+      } else if (req.method === 'POST' && moveLater) {
+        result = await service.run(() => service.moveTaskLater(moveLater[1],body));
       } else if (req.method === 'POST' && order) {
         result = await service.run(() => service.reorderTask(order[1], body));
         if (service.data.accounts.length) await service.queueSync();

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createMeetingFeed, rangeOnDay, safeMeetingLink } from '../web/meetings.js';
+import { createMeetingDetails, createMeetingFeed, meetingCard, rangeOnDay, safeMeetingLink } from '../web/meetings.js';
 import { calendarEntriesForDay } from '../web/views.js';
 
 const monday = '2026-11-23', nextWeek = '2026-11-30';
@@ -11,6 +11,50 @@ function snapshot() {
   return {connection:{connected:true,lastSync:'first',accounts:[{sub:'work',mode:'availability',meetingDetails:true}]},
     settings:{calendarMode:'availability',timeZone:'UTC',excludedCalendarIds:[]},busy:[],tasks:[]};
 }
+
+test('only the actual meeting name previews details in Day and Week, while keyboard activation stays available',t => {
+  class Control {
+    constructor(tag) { this.tag=tag; this.dataset={}; this.children=[]; this.listeners={}; }
+    append(...children) { for (const child of children) { child.parent=this; this.children.push(child); } }
+    setAttribute(name,value) { this[name]=value; }
+    addEventListener(type,listener) { this.listeners[type]=listener; }
+    closest(selector) {
+      for (let node=this;node;node=node.parent) {
+        if (selector === '.meeting-name' && node.className === 'meeting-name') return node;
+        if (selector === 'button[data-action="meeting-details"]' && node.tag === 'button' && node.dataset.action === 'meeting-details') return node;
+      }
+      return null;
+    }
+    contains(node) { return Boolean(node) && (node === this || this.children.some(child => child.contains(node))); }
+  }
+  const doc = new Control('document');
+  doc.body = new Control('body'); doc.createElement = tag=>new Control(tag);
+  for (const [key,value] of Object.entries({document:doc,window:new Control('window'),Element:Control})) {
+    const previous=Object.getOwnPropertyDescriptor(globalThis,key);
+    Object.defineProperty(globalThis,key,{configurable:true,value});
+    t.after(()=>{ if (previous) Object.defineProperty(globalThis,key,previous); else delete globalThis[key]; });
+  }
+  t.mock.timers.enable({apis:['setTimeout']});
+  for (const agenda of [true,false]) {
+    const root=new Control('main'), lookedUp=[];
+    createMeetingDetails({root,zone:()=> 'UTC',find:id=>{lookedUp.push(id); return null;}});
+    const card=meetingCard({meeting:{id:'weekly',title:'Weekly review',joinUrl:'https://meet.google.com/sample'},start:540,end:600},monday,agenda);
+    const [title,meta]=card.children, name=title.children[0], [time,join]=meta.children;
+    root.append(card);
+    const hover = (target,pointerType='mouse')=>root.listeners.pointerover({target,pointerType,relatedTarget:null});
+    for (const target of [card,title,meta,time,join]) { hover(target); t.mock.timers.tick(250); }
+    hover(name,'touch'); t.mock.timers.tick(250);
+    root.listeners.focusin?.({target:title});
+    root.listeners.click({target:time,detail:1});
+    assert.deepEqual(lookedUp,[]);
+    hover(name); root.listeners.pointerout({target:name,relatedTarget:time}); t.mock.timers.tick(250);
+    assert.deepEqual(lookedUp,[]);
+    hover(name); t.mock.timers.tick(250);
+    root.listeners.click({target:title,detail:0});
+    root.listeners.click({target:name,detail:1});
+    assert.deepEqual(lookedUp,['weekly','weekly','weekly']);
+  }
+});
 
 test('only the current authorized week can publish events and revoking access clears guest details immediately',async () => {
   const state = snapshot(), calls = [];

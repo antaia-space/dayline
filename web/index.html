@@ -52,6 +52,7 @@
     </form>
     <p id="quick-error" class="field-error" role="alert" hidden></p>
     <div class="entry-meta">
+      <label class="entry-mode"><span class="sr-only">Entry mode</span><select id="entry-mode" title="Quick entry captures tasks and recognizes plan changes. Ask planner sends any request to your selected agent."><option value="auto">Quick entry</option><option value="planner">Ask planner</option></select></label>
       <div id="entry-feedback" class="entry-feedback" hidden><span id="entry-status" role="status" aria-live="polite"></span><button id="view-added" type="button" class="summary-link" hidden>View task</button></div>
       <button id="entry-agent" type="button" class="agent-link" hidden>Task agent</button>
     </div>
@@ -190,6 +191,15 @@
     </form></div>
   </dialog>
 
+  <dialog id="move-dialog" aria-labelledby="move-heading" aria-describedby="move-task move-source" class="panel small">
+    <div class="dialog-heading"><h2 id="move-heading">Move task</h2><button type="button" class="icon-button close-dialog" aria-label="Close move dialog"><span data-icon="x"></span></button></div>
+    <div class="dialog-scroll"><form id="move-form" class="form-body">
+      <p id="move-task" class="action-task"></p><p id="move-source" class="hint"></p>
+      <label>Move to<input type="date" id="move-day" required></label>
+      <p id="move-error" class="field-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button type="button" class="secondary close-dialog">Cancel</button><button type="submit" id="move-submit" class="primary">Move</button></div>
+    </form></div>
+  </dialog>
   <dialog id="action-dialog" aria-labelledby="action-heading" class="panel small">
     <div class="dialog-heading"><div><p class="eyebrow">Calendar action</p><h2 id="action-heading">Mark complete</h2></div><button class="icon-button close-dialog" aria-label="Close calendar action"><span data-icon="x"></span></button></div>
     <div class="dialog-scroll"><div class="form-body">
