@@ -9,6 +9,7 @@
   <title>Dayline</title>
   <link rel="icon" href="/mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/week-grid.css">
   <link rel="stylesheet" href="/booking-settings.css">
   <script type="module" src="/app.js"></script>
 </head>
@@ -68,7 +69,7 @@
         <label id="weekend-label" class="toggle-label"><input id="show-weekends" type="checkbox"><span class="switch" aria-hidden="true"></span>Weekends</label>
       </div>
       <div id="week-strip" class="day-strip compact-strip" aria-label="Select a day"></div>
-      <div id="week-board" class="week-board" aria-label="Tasks by day"></div>
+      <div id="week-board" class="week-board week-grid" aria-label="Tasks by day"></div>
     </section>
     <section id="day-section" aria-label="Day agenda" hidden>
       <div id="agenda-strip" class="day-strip" aria-label="Select a day"></div>

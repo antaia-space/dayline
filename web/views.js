@@ -292,6 +292,17 @@ export function renderWeek(state,{monday,selected,today,weekends,events = []}) {
     id("week-summary").append(element("span","middle-dot","·"),showWeekends);
   }
   dayStrip(id("week-strip"),days,selected,today,tasksByDay,calendar,moves);
+  // The week is a time grid: one hour axis, and every block as tall as it is long.
+  const plans = new Map(days.map(day => {
+    const {meetings,anonymous} = calendar.get(day);
+    const entries = tasksByDay.get(day).filter(task => task.start).map(task => ({task,...rangeOnDay(task,day,zone)}));
+    const all = groupOverlappingMeetings([...entries,...meetings,...anonymous,...moves.get(day)]).sort(entryOrder);
+    return [day,{banners:all.filter(wholeDay),timed:all.filter(entry => !wholeDay(entry)),
+      completed:tasksByDay.get(day).filter(task => !task.start && task.done)}];
+  }));
+  const hours = weekHours(state.settings,[...plans.values()].flatMap(plan => plan.timed));
+  const work = {start:hhmmMinutes(state.settings.startTime),end:hhmmMinutes(state.settings.endTime)};
+  const anyBanner = [...plans.values()].some(plan => plan.banners.length);
   const columns = days.map((day) => {
     const isToday = day === today;
     const off = !state.settings.workDays.includes(dayIndex(day));
@@ -304,7 +315,7 @@ export function renderWeek(state,{monday,selected,today,weekends,events = []}) {
     jump.dataset.day = day;
     jump.dataset.focus = "week-head-" + day;
     jump.title = "View day agenda";
-    jump.append(element("span","day-name",weekdayNames[dayIndex(day)-1]),element("span","day-number",formatDay(day,{day:"numeric"})));
+    jump.append(element("span","day-name",weekdayNames[dayIndex(day)-1].slice(0,3)),element("span","day-number",formatDay(day,{day:"numeric"})));
     const add = button("icon-button day-add","add-day","Add a task on " + label);
     add.dataset.day = day;
     add.dataset.focus = "add-" + day;
@@ -314,31 +325,95 @@ export function renderWeek(state,{monday,selected,today,weekends,events = []}) {
     endControls.append(add);
     if (isToday) endControls.append(element("span","today-tag","Today"));
     head.append(jump,endControls);
+    const {banners,timed,completed} = plans.get(day);
+    const rowFor = entry => {
+      if (entry.task) return taskRow(entry.task,state,day,"board");
+      if (entry.kind === "overlap") return meetingColumns(entry,day,undefined,true);
+      if (entry.meeting) return meetingCard(entry,day,false);
+      if (entry.kind === "moved") return movedMarker(entry,"board",categoryOf(state,entry.parent).color);
+      const row = element("div","week-busy");
+      const time = entry.start === 0 && entry.end === 1440 ? "All day" : displayTime(entry.start) + "–" + displayTime(entry.end);
+      row.append(element("span","","Calendar busy"),element("small","",time));
+      return row;
+    };
+    const allDay = element("div","week-allday");
+    for (const entry of banners) allDay.append(timelineBlock(rowFor(entry),entry));
     const body = element("div","day-body");
     body.dataset.clockDay = day;
-    const {meetings,anonymous} = calendar.get(day);
-    const completed = tasksByDay.get(day).filter(task => !task.start && task.done);
-    const entries = tasksByDay.get(day).filter(task => task.start).map(task => ({task,...rangeOnDay(task,day,zone)}));
-    for (const entry of groupOverlappingMeetings([...entries,...meetings,...anonymous,...moves.get(day)]).sort(entryOrder)) {
-      let row;
-      if (entry.task) row=taskRow(entry.task,state,day,"board");
-      else if (entry.kind === "overlap") row=meetingColumns(entry,day);
-      else if (entry.meeting) row=meetingCard(entry,day,false);
-      else if (entry.kind === "moved") row=movedMarker(entry,"board",categoryOf(state,entry.parent).color);
-      else {
-        row=element("div","week-busy");
-        const time = entry.start === 0 && entry.end === 1440 ? "All day" : displayTime(entry.start) + "–" + displayTime(entry.end);
-        row.append(element("span","","Calendar busy"),element("small","",time));
-      }
-      body.append(timelineBlock(row,entry));
+    body.style.setProperty("--grid-minutes",String(hours.end-hours.start));
+    body.style.setProperty("--work-from",String(off ? 0 : Math.max(0,work.start-hours.start)));
+    body.style.setProperty("--work-to",String(off ? 0 : Math.max(0,work.end-hours.start)));
+    // An empty stretch of the day still has a place for the current-time line.
+    const ruler = element("div","week-ruler");
+    ruler.setAttribute("aria-hidden","true");
+    body.append(timelineBlock(ruler,{kind:"available",start:hours.start,end:hours.end}));
+    const lanes = weekLanes(timed);
+    for (const entry of timed) {
+      const length = Math.max(entry.end-entry.start,WEEK_SHORTEST), task = entry.task;
+      const kind = task ? "task" + (task.done ? " is-done" : "") : entry.kind === "overlap" ? "overlap" : entry.meeting ? "meeting" : entry.kind;
+      const slot = element("div","week-slot is-" + kind + (length <= 15 ? " is-brief" : length <= 30 ? " is-short" : ""));
+      const {lane,count} = lanes.get(entry);
+      slot.style.setProperty("--from",String(entry.start-hours.start));
+      slot.style.setProperty("--minutes",String(length));
+      slot.style.setProperty("--lane",String(lane));
+      slot.style.setProperty("--lanes",String(count));
+      if (task) slot.style.setProperty("--task-color",categoryColor(categoryOf(state,task).color));
+      slot.append(timelineBlock(rowFor(entry),entry));
+      body.append(slot);
     }
-    if (completed.length) body.append(timelineBlock(completedSection(completed,day,"board"),{kind:"banner"}));
-    column.append(head,body);
+    const foot = element("div","week-foot");
+    if (completed.length) foot.append(timelineBlock(completedSection(completed,day,"board"),{kind:"banner"}));
+    column.append(head,allDay,body,foot);
     return column;
   });
+  const axis = element("div","week-hours");
+  axis.setAttribute("aria-hidden","true");
+  const scale = element("div","week-hours-scale");
+  for (let minute = hours.start; minute <= hours.end; minute += 60) {
+    const mark = element("span","week-hour",displayTime(minute));
+    mark.style.setProperty("--from",String(minute-hours.start));
+    scale.append(mark);
+  }
+  axis.append(element("div","week-hours-head"),element("div","week-hours-allday",anyBanner ? "All day" : ""),scale,element("div","week-foot"));
   const board = id("week-board");
   board.style.setProperty("--columns",String(days.length));
-  board.replaceChildren(...columns);
+  board.replaceChildren(axis,...columns);
+}
+
+const WEEK_SHORTEST = 10;
+const wholeDay = entry => Boolean(entry.task?.allDay || entry.meeting?.allDay || (entry.kind === "busy" && entry.start === 0 && entry.end === 1440));
+
+// The hours every column shows: working hours, widened to whole hours around anything earlier or later.
+export function weekHours(settings,timed) {
+  let start = hhmmMinutes(settings.startTime), end = hhmmMinutes(settings.endTime);
+  for (const entry of timed) {
+    start = Math.min(start,entry.start);
+    end = Math.max(end,entry.end);
+  }
+  return {start:Math.floor(start/60)*60,end:Math.min(1440,Math.ceil(end/60)*60)};
+}
+
+// Blocks that share time sit side by side. A block is drawn at least ten
+// minutes tall, so a five-minute task also takes a lane beside its neighbour.
+export function weekLanes(entries) {
+  const placed = new Map();
+  let group = [], ends = [], latest = -Infinity;
+  const close = () => {
+    for (const entry of group) placed.get(entry).count = ends.length;
+    group = []; ends = []; latest = -Infinity;
+  };
+  for (const entry of [...entries].sort((a,b) => a.start-b.start || b.end-a.end)) {
+    const until = Math.max(entry.end,entry.start+WEEK_SHORTEST);
+    if (group.length && entry.start >= latest) close();
+    let lane = ends.findIndex(end => end <= entry.start);
+    if (lane === -1) lane = ends.length;
+    ends[lane] = until;
+    latest = Math.max(latest,until);
+    placed.set(entry,{lane,count:1});
+    group.push(entry);
+  }
+  close();
+  return placed;
 }
 
 function mergeRanges(ranges) {

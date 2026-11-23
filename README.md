@@ -62,9 +62,15 @@ For a planning question or a request with several parts, type it in your own wor
 
 The day you’re viewing helps identify the task, including when your wording uses a familiar abbreviation, a typo or a checklist item. When viewing tomorrow, **“Move the IC presentation prep to today”** moves the matching task to your actual local date. For an earlier unmatched request, choose **Try matching again**.
 
+### Read the week
+
+**Week** is a time grid. Hours run down the left edge and each day is a column. A task or meeting sits at its time and is as tall as it is long, so a free hour looks like a free hour. Meetings are grey. Tasks carry their category colour and a checkbox. Meetings that overlap share the column side by side. Time outside your working hours is tinted, and a red line marks the current time. All-day entries sit in a row above the grid. Tasks you finished early are listed under their day.
+
+Select a task’s title to open it and change its text, duration, type or day. Select a day’s name to open **Day agenda**, where each task also shows its reorder grip, five-minute buttons and checklist. From the keyboard, Tab into a task block in **Week** to open those controls in place.
+
 ### Reorder the day
 
-Drag the grip on the left edge of a flexible task to the top of its day, or drop it above or below another task. You can also click the grip and choose **Move to top**, **Move earlier** or **Move later**. With the grip focused, press **Home** to move to the top or use the up and down arrow keys to move one place. The same controls let you prioritize tasks in **Unscheduled**. The desktop and browser save one order. Working hours, time windows, fixed tasks and Google meetings determine where that order fits.
+In **Day agenda**, drag the grip on the left edge of a flexible task to the top of its day, or drop it above or below another task. You can also click the grip and choose **Move to top**, **Move earlier** or **Move later**. With the grip focused, press **Home** to move to the top or use the up and down arrow keys to move one place. The same controls let you prioritize tasks in **Unscheduled**. The desktop and browser save one order. Working hours, time windows, fixed tasks and Google meetings determine where that order fits.
 
 Dayline packs flexible work into the earliest available slots and replans when a meeting appears, moves or disappears. Already-queued work can start at the end of the preceding block when a refresh comes a few minutes later and that task would still be underway. A newly entered task starts from its capture time or later. Short blocks in the day agenda take less vertical space than long ones.
 

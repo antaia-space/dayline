@@ -55,7 +55,9 @@ export function groupOverlappingMeetings(entries) {
   return result;
 }
 
-export function meetingColumns(group,day,blockSize) {
+// `toScale` is for the week's time grid, where the group has a fixed height
+// and each row takes its share of it by minutes.
+export function meetingColumns(group,day,blockSize,toScale = false) {
   const agenda = Boolean(blockSize);
   const grid = element("div","meeting-overlap");
   if (group.columns > 2) grid.classList.add("dense-meetings");
@@ -74,6 +76,7 @@ export function meetingColumns(group,day,blockSize) {
   grid.style.gridTemplateRows = times.slice(1).map((end,i) => {
     const start = times[i];
     const minutes = Number.isFinite(end-start) ? (end-start)/60000 : clocks.get(end)-clocks.get(start);
+    if (toScale) return "minmax(0," + Math.max(1,minutes) + "fr)";
     const height = Math.min(agenda ? 3.9 : 2,Math.max(.35,minutes*(agenda ? .065 : .033)));
     return "minmax(" + height.toFixed(3) + "rem,auto)";
   }).join(" ");
