@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#fafaf7">
+  <meta name="color-scheme" content="light">
+  <title>Dayline</title>
+  <link rel="icon" href="/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#quick-text">Skip to task entry</a>
+  <header class="masthead">
+    <div class="masthead-inner">
+      <a href="/" class="wordmark" aria-label="Dayline planner"><img src="/mark.svg" width="29" height="29" alt="">Dayline</a>
+      <nav class="views" aria-label="Planner view">
+        <button id="view-week" type="button" aria-pressed="true"><span data-icon="week"></span>Week</button>
+        <button id="view-day" type="button" aria-pressed="false"><span data-icon="agenda"></span>Day agenda</button>
+      </nav>
+      <div class="toolbar-end">
+        <button id="connection-status" class="connection" title="Calendar connections"><span data-icon="device"></span><span id="connection-text">Local planner</span></button>
+        <span class="toolbar-divider" aria-hidden="true"></span>
+        <button id="settings-open" class="icon-button" aria-label="Open settings" title="Settings"><span data-icon="settings"></span></button>
+      </div>
+    </div>
+  </header>
+
+  <main id="planner" class="page" aria-busy="true">
+    <div id="service-error" class="service-error" role="alert" hidden><span id="service-error-text"></span><button id="retry-load" type="button">Try again</button></div>
+    <section class="period" aria-label="Displayed dates">
+      <div class="period-label">
+        <p id="period-context" class="eyebrow">Weekly planner</p>
+        <h1 id="period-title">Your week</h1>
+      </div>
+      <div class="navigation" role="group" aria-label="Change displayed dates">
+        <button id="previous" class="icon-button" type="button" aria-label="Previous week" title="Previous week"><span data-icon="left"></span></button>
+        <button id="today" type="button" class="today-button">Today</button>
+        <button id="next" class="icon-button" type="button" aria-label="Next week" title="Next week"><span data-icon="right"></span></button>
+      </div>
+    </section>
+
+    <form id="quick-add" class="composer" autocomplete="off">
+      <span class="composer-symbol" data-icon="pencil" aria-hidden="true"></span>
+      <label for="quick-text" class="sr-only">Task to schedule</label>
+      <input id="quick-text" name="text" type="text" required maxlength="1000" placeholder="Add a task, e.g. review the deck for 45 minutes tomorrow" aria-describedby="quick-error">
+      <button id="quick-day" type="button" class="day-chip" title="Clear the preferred day" hidden><span></span><span data-icon="x"></span></button>
+      <kbd id="entry-shortcut" title="Focus task entry">/</kbd>
+      <button id="add-button" class="primary" type="submit"><span data-icon="plus"></span>Add task</button>
+    </form>
+    <p id="quick-error" class="field-error" role="alert" hidden></p>
+
+    <section id="week-section" aria-label="Weekly task board">
+      <div class="section-bar">
+        <div id="week-summary" class="summary"></div>
+        <label id="weekend-label" class="toggle-label"><input id="show-weekends" type="checkbox"><span class="switch" aria-hidden="true"></span>Weekends</label>
+      </div>
+      <div id="week-strip" class="day-strip compact-strip" aria-label="Select a day"></div>
+      <div id="week-board" class="week-board" aria-label="Tasks by day"></div>
+    </section>
+    <section id="day-section" aria-label="Day agenda" hidden>
+      <div id="agenda-strip" class="day-strip" aria-label="Select a day"></div>
+      <div class="section-bar agenda-bar"><div id="agenda-summary" class="summary"></div><button id="agenda-add" class="text-button" type="button"><span data-icon="plus"></span>Add to this day</button></div>
+      <div id="agenda" class="agenda"></div>
+    </section>
+
+    <div id="category-key" class="category-key" aria-label="Task colors"></div>
+    <div id="planning-note" class="planning-note" hidden></div>
+    <section id="backlog" class="backlog" aria-labelledby="backlog-title">
+      <div class="backlog-head">
+        <button id="backlog-toggle" type="button" aria-expanded="true" aria-controls="backlog-content"><span class="backlog-icon" data-icon="tray"></span><span id="backlog-title">Unscheduled</span><span id="backlog-count" class="count">0</span><span class="disclosure" data-icon="down"></span></button>
+      </div>
+      <div id="backlog-content"></div>
+    </section>
+
+    <footer class="page-foot">
+      <button id="hours-open" type="button" class="foot-button"><span data-icon="clock"></span><span id="hours-summary">Working hours</span></button>
+      <button id="sync-now" type="button" class="foot-button" hidden><span data-icon="sync"></span><span id="sync-label">Sync now</span></button>
+    </footer>
+  </main>
+
+  <dialog id="settings" aria-labelledby="settings-title" class="panel">
+    <div class="dialog-heading"><div><p class="eyebrow">Dayline</p><h2 id="settings-title">Settings</h2></div><button class="icon-button close-dialog" aria-label="Close settings"><span data-icon="x"></span></button></div>
+    <div class="settings-tabs" role="group" aria-label="Settings section"><button id="tab-work" type="button" aria-pressed="true">Working hours</button><button id="tab-calendars" type="button" aria-pressed="false">Calendars</button></div>
+    <div class="dialog-scroll">
+      <form id="work-form" class="form-body">
+        <fieldset><legend>Working days</legend><div id="work-days" class="work-days"></div></fieldset>
+        <div class="field-pair"><label>Start time<input id="work-start" type="time" required></label><label>End time<input id="work-end" type="time" required></label></div>
+        <label>Time zone<input id="work-zone" list="time-zones" required autocomplete="off"><datalist id="time-zones"></datalist></label>
+        <p class="hint">Dayline fits new tasks inside these hours, around your existing calendar commitments.</p>
+        <div class="dialog-actions"><button type="button" class="secondary close-dialog">Cancel</button><button type="submit" class="primary">Save hours</button></div>
+      </form>
+      <section id="calendar-settings" class="form-body" hidden>
+        <div id="calendar-accounts"></div>
+        <p id="calendar-health" class="hint" hidden></p>
+        <div id="setup-box" class="setup-box">
+          <h3>Connect Google Calendar</h3>
+          <p class="hint">Choose your company's Google Desktop OAuth client file to enable calendar connections on this Mac.</p>
+          <p class="setup-link"><a class="outside-link" href="https://github.com/antaia-space/dayline#google-calendar-setup" target="_blank" rel="noopener noreferrer">Google Calendar setup guide</a></p>
+          <label for="oauth-file" class="file-button"><span data-icon="file"></span>Choose client file<input id="oauth-file" type="file" accept=".json,application/json"></label>
+        </div>
+        <div id="google-login" hidden>
+          <button id="connect-account" type="button" class="secondary connect-button"><span data-icon="plus"></span><span>Connect Google account</span></button>
+          <button id="change-client" type="button" class="text-button change-client" hidden>Change client file</button>
+          <a id="continue-google" class="outside-link" target="_blank" rel="noopener noreferrer" hidden>Continue in your browser</a>
+        </div>
+        <form id="calendar-form" hidden>
+          <label>Calendar for new tasks<select id="target-calendar"></select></label>
+          <fieldset><legend>Check for conflicts on</legend><div id="calendar-list" class="calendar-list"></div></fieldset>
+          <div class="dialog-actions"><button type="button" class="secondary close-dialog">Cancel</button><button type="submit" class="primary">Save calendars</button></div>
+        </form>
+      </section>
+      <p id="settings-error" class="field-error dialog-error" role="alert" hidden></p>
+    </div>
+  </dialog>
+
+  <dialog id="task-dialog" aria-labelledby="task-heading" class="panel">
+    <div class="dialog-heading"><div><p class="eyebrow">Task details</p><h2 id="task-heading">Edit task</h2></div><button class="icon-button close-dialog" aria-label="Close task details"><span data-icon="x"></span></button></div>
+    <div class="dialog-scroll"><form id="task-form" class="form-body">
+      <label>Task<textarea id="task-text" required maxlength="1000" rows="2"></textarea></label>
+      <div class="field-pair"><label>Duration in minutes<input id="task-minutes" type="number" min="1" max="1440" step="1" required></label><label>Type<select id="task-category" required></select></label></div>
+      <label>Schedule on a day <span class="optional">Optional</span><input id="task-day" type="date"></label>
+      <p id="estimate-reason" class="hint"></p>
+      <div id="task-status" class="task-status"></div>
+      <p id="task-error" class="field-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button type="button" id="delete-task" class="text-button danger push-left" hidden>Delete task</button><button type="button" class="secondary close-dialog">Cancel</button><button type="submit" class="primary">Save task</button></div>
+    </form></div>
+  </dialog>
+
+  <dialog id="action-dialog" aria-labelledby="action-heading" class="panel small">
+    <div class="dialog-heading"><div><p class="eyebrow">Calendar action</p><h2 id="action-heading">Mark complete</h2></div><button class="icon-button close-dialog" aria-label="Close calendar action"><span data-icon="x"></span></button></div>
+    <div class="dialog-scroll"><div class="form-body">
+      <p id="action-task" class="action-task"></p><p id="action-description" class="hint"></p><p id="action-error" class="field-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button type="button" class="secondary close-dialog">Close</button><button type="button" id="confirm-action" class="primary">Mark complete</button></div>
+    </div></div>
+  </dialog>
+
+  <div id="notification" class="notification" role="status" aria-live="polite" hidden></div>
+  <noscript><p class="service-error">Enable JavaScript to use the planner.</p></noscript>
+</body>
+</html>

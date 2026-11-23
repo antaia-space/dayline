@@ -1,0 +1,11 @@
+node_modules/
+build/
+dist/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.sqlite*
+oauth-client*.json
+desktop/resources/estimator
+desktop/resources/google-client.json

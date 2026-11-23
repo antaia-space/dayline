@@ -1,0 +1,254 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  authorizationUrl, exchangeCode, refreshToken, getProfile, listCalendars, getBusy,
+  getTaskEvent, listTaskEvents, putTaskEvent, deleteTaskEvent,
+} from '../src/google.mjs';
+
+const token = 'test-access';
+const eventId = '0123456789abcdeffedcba9876543210';
+const calendarId = 'team/name@example.test';
+const start = '2026-11-24T09:00:00.000Z';
+const end = '2026-11-24T10:00:00.000Z';
+const task = { id: eventId, text: 'Review the brief', done: false, category: 'focus', start, end };
+const actionUrl = 'http://127.0.0.1:43127/action/' + eventId + '?done=1';
+const write = { calendarId, eventId, task, actionUrl, expectedEtag: null };
+
+function event(overrides = {}) {
+  return {
+    id: eventId, etag: '"v1"', summary: task.text, colorId: '9',
+    start: { dateTime: start }, end: { dateTime: end },
+    extendedProperties: { private: { dayline: '1', daylineTaskId: task.id } }, ...overrides,
+  };
+}
+
+function reply(data, status = 200, headers) {
+  return new Response(status === 204 ? null : JSON.stringify(data), { status, headers });
+}
+
+function failure(status, reason) {
+  return reply({ error: { code: status, message: reason, errors: [{ reason }] } }, status);
+}
+
+function simulate(t, ...handlers) {
+  let index = 0;
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    const handler = handlers[index++];
+    assert.ok(handler, 'Unexpected request to ' + new URL(url).pathname);
+    return typeof handler === 'function' ? handler(new URL(url), init) : handler;
+  });
+  t.after(() => assert.equal(index, handlers.length));
+}
+
+test('desktop authorization is offline, uses PKCE and posts secrets only to the token endpoint', async t => {
+  const redirectUri = 'http://127.0.0.1:43127/oauth/callback';
+  const url = new URL(authorizationUrl({ clientId: 'client', redirectUri, state: 'state', codeChallenge: 'challenge' }));
+  assert.equal(url.origin, 'https://accounts.google.com');
+  assert.equal(url.searchParams.get('state'), 'state');
+  assert.equal(url.searchParams.get('code_challenge_method'), 'S256');
+  assert.equal(url.searchParams.get('code_challenge'), 'challenge');
+  assert.equal(url.searchParams.get('access_type'), 'offline');
+  assert.equal(url.searchParams.get('redirect_uri'), redirectUri);
+  assert.equal(url.searchParams.has('client_secret'), false);
+  const scope = url.searchParams.get('scope');
+  assert.ok(scope.includes('calendar.events.freebusy'));
+  assert.ok(scope.includes('calendar.calendarlist.readonly'));
+
+  simulate(t,
+    (endpoint, init) => {
+      assert.equal(endpoint.href, 'https://oauth2.googleapis.com/token');
+      assert.equal(init.method, 'POST');
+      assert.equal(init.body.get('grant_type'), 'authorization_code');
+      assert.equal(init.body.get('code_verifier'), 'verifier');
+      assert.equal(init.body.get('client_secret'), 'test-secret');
+      return reply({ access_token: token, refresh_token: 'test-refresh', expires_in: 3600, scope });
+    },
+    (endpoint, init) => {
+      assert.equal(init.body.get('grant_type'), 'refresh_token');
+      assert.equal(init.body.get('refresh_token'), 'test-refresh');
+      assert.equal(init.body.has('client_secret'), false);
+      return reply({ access_token: 'refreshed', expires_in: 3600 });
+    },
+    (endpoint, init) => {
+      assert.equal(endpoint.href, 'https://openidconnect.googleapis.com/v1/userinfo');
+      assert.equal(init.headers.Authorization, 'Bearer ' + token);
+      return reply({ sub: 'abc', email: 'person@example.test', email_verified: true });
+    },
+    reply({ sub: 'abc', email: 'person@example.test', email_verified: false }),
+  );
+  const tokens = await exchangeCode({ clientId: 'client', clientSecret: 'test-secret', redirectUri, code: 'code', verifier: 'verifier' });
+  assert.equal(tokens.refresh_token, 'test-refresh');
+  const refreshed = await refreshToken({ clientId: 'client', refreshToken: tokens.refresh_token });
+  assert.equal(refreshed.access_token, 'refreshed');
+  assert.deepEqual(await getProfile(token), { sub: 'abc', email: 'person@example.test' });
+  await assert.rejects(getProfile(token), { status: 403, reason: 'unverifiedProfile' });
+});
+
+test('a revoked refresh grant and a partially authorized scope set surface actionable errors', async t => {
+  simulate(t, reply({ error: 'invalid_grant', error_description: 'Token was revoked.' }, 400),
+    reply({ access_token: token, scope: 'openid email' }));
+  await assert.rejects(refreshToken({ clientId: 'client', refreshToken: 'revoked' }),
+    { status: 400, reason: 'invalid_grant', message: 'Token was revoked.' });
+  await assert.rejects(exchangeCode({ clientId: 'client', redirectUri: 'http://127.0.0.1', code: 'code', verifier: 'verifier' }),
+    { status: 403, reason: 'insufficientScopes' });
+});
+
+test('calendar discovery includes hidden and availability-only calendars, across pages', async t => {
+  simulate(t,
+    url => {
+      assert.equal(url.searchParams.get('showHidden'), 'true');
+      assert.equal(url.searchParams.has('minAccessRole'), false);
+      return reply({ items: [{ id: 'z', summary: 'Zulu', accessRole: 'freeBusyReader', hidden: true }], nextPageToken: 'next/+?' });
+    },
+    url => {
+      assert.equal(url.searchParams.get('pageToken'), 'next/+?');
+      return reply({ items: [
+        { id: 'primary-id', summary: 'Work', accessRole: 'owner', primary: true, backgroundColor: '#779999' },
+        { id: 'room', summaryOverride: 'A room', summary: 'Room', accessRole: 'writerWithoutPrivateAccess' },
+        { id: 'removed', deleted: true },
+      ] });
+    },
+  );
+  const list = await listCalendars(token);
+  assert.deepEqual(list.map(({ id, writable }) => [id, writable]), [['primary-id', true], ['room', true], ['z', false]]);
+  assert.equal(list[1].name, 'A room');
+});
+
+test('free/busy queries deduplicate IDs, batch by 50, and return UTC intervals', async t => {
+  const ids = Array.from({ length: 54 }, (_, index) => 'cal-' + index);
+  const calls = [ids.slice(0, 50), ids.slice(50)].map(batch => (url, init) => {
+    assert.equal(url.pathname, '/calendar/v3/freeBusy');
+    const body = JSON.parse(init.body);
+    assert.equal(body.timeMin, start);
+    assert.equal(body.timeMax, end);
+    assert.deepEqual(body.items, batch.map(id => ({ id })));
+    const calendars = Object.fromEntries(batch.map(id => [id, { busy: [] }]));
+    if (batch.includes('cal-53')) calendars['cal-53'].busy.push({ start: '2026-11-24T10:00:00+01:00', end });
+    return reply({ calendars });
+  });
+  simulate(t, ...calls);
+  assert.deepEqual(await getBusy(token, { calendarIds: [...ids, ids[0]], start, end }), [{ start, end }]);
+});
+
+test('incomplete availability never silently frees a slot', async t => {
+  simulate(t,
+    reply({ calendars: { a: { busy: [] } } }),
+    reply({ calendars: { a: { busy: [] }, b: { errors: [{ reason: 'notFound' }] } } }),
+    reply({ calendars: { a: { busy: [{ start, end: 'unreadable' }] }, b: { busy: [] } } }),
+  );
+  const request = () => getBusy(token, { calendarIds: ['a', 'b'], start, end });
+  await assert.rejects(request(), { status: 503, reason: 'missingAvailability' });
+  await assert.rejects(request(), { status: 503, reason: 'notFound' });
+  await assert.rejects(request(), { status: 502, reason: 'invalidResponse' });
+});
+
+test('insert uses a persistent ID, category color, task marker, and local calendar action', async t => {
+  simulate(t, (url, init) => {
+    assert.ok(url.pathname.includes('team%2Fname%40example.test'));
+    assert.equal(init.method, 'POST');
+    const body = JSON.parse(init.body);
+    assert.equal(body.id, task.id);
+    assert.equal(body.colorId, '9');
+    assert.equal(body.summary, task.text);
+    assert.deepEqual(body.extendedProperties.private, { dayline: '1', daylineTaskId: task.id });
+    assert.ok(body.description.includes('<a href="' + actionUrl + '">Mark complete</a>'));
+    assert.deepEqual(body.start, { dateTime: start });
+    return reply({ ...body, etag: '"new"' });
+  });
+  const result = await putTaskEvent(token, { ...write, eventId: undefined });
+  assert.deepEqual(result, { eventId, taskId: task.id, done: false, text: task.text, owned: true, start, end, etag: '"new"' });
+});
+
+test('an uncertain insertion adopts the original event and preserves later edits in Google', async t => {
+  const later = event({ summary: 'Changed by teammate ✓', etag: '"new"' });
+  simulate(t, failure(409, 'duplicate'), reply(later));
+  const result = await putTaskEvent(token, write);
+  assert.equal(result.text, 'Changed by teammate');
+  assert.equal(result.done, true);
+  assert.equal(result.etag, '"new"');
+});
+
+test('colliding IDs and mismatched ownership never change another event', async t => {
+  const foreign = event({ extendedProperties: { private: { dayline: '1', daylineTaskId: 'another-task' } } });
+  simulate(t, failure(409, 'duplicate'), reply(foreign), reply(foreign), reply(foreign));
+  await assert.rejects(putTaskEvent(token, write), { status: 409, reason: 'ownershipMismatch' });
+  await assert.rejects(putTaskEvent(token, { ...write, expectedEtag: '"v1"' }), { reason: 'ownershipMismatch' });
+  await assert.rejects(deleteTaskEvent(token, { calendarId, eventId, taskId: task.id, expectedEtag: '"v1"' }),
+    { reason: 'ownershipMismatch' });
+});
+
+test('a completion patch preserves calendar notes, guests, and time-zone representation', async t => {
+  const previous = event({
+    description: 'Handwritten note<br><a href="' + actionUrl + '">Mark complete</a> in Dayline on this Mac.',
+    start: { dateTime: '2026-11-24T10:00:00+01:00', timeZone: 'Europe/Zurich' },
+    attendees: [{ email: 'person@example.test' }],
+  });
+  simulate(t, reply(previous), (url, init) => {
+    assert.equal(init.method, 'PATCH');
+    assert.equal(init.headers['If-Match'], previous.etag);
+    const changes = JSON.parse(init.body);
+    assert.deepEqual(Object.keys(changes).sort(), ['description', 'summary']);
+    assert.equal(changes.summary, '✓ ' + task.text);
+    assert.ok(changes.description.includes('Handwritten note<br>'));
+    assert.ok(changes.description.includes('?done=0">Reopen task</a>'));
+    return reply({ ...previous, ...changes, etag: '"next"' });
+  });
+  const updated = await putTaskEvent(token, { ...write, task: { ...task, done: true }, expectedEtag: '"v1"' });
+  assert.equal(updated.done, true);
+});
+
+test('concurrent calendar edits survive app writes and deletions', async t => {
+  simulate(t, reply(event({ etag: '"later"' })), reply(event()), failure(412, 'conditionNotMet'), reply(event({ etag: '"later"' })));
+  const patch = { ...write, task: { ...task, done: true }, expectedEtag: '"v1"' };
+  await assert.rejects(putTaskEvent(token, patch), { status: 412 });
+  await assert.rejects(putTaskEvent(token, patch), { status: 412 });
+  await assert.rejects(deleteTaskEvent(token, { calendarId, eventId, taskId: task.id, expectedEtag: '"v1"' }), { status: 412 });
+});
+
+test('Google title checkmarks and removing the marker both round-trip', async t => {
+  const titles = ['✓ Triage', 'Triage ✔️', '☑️ Triage', '[X] Triage', 'Triage [x]', 'Triage'];
+  simulate(t, ...titles.map(summary => reply(event({ summary }))));
+  for (const title of titles) {
+    const result = await getTaskEvent(token, { calendarId, eventId, taskId: task.id });
+    assert.equal(result.text, 'Triage');
+    assert.equal(result.done, title !== 'Triage');
+  }
+});
+
+test('reconciliation pages through owned events, including an empty final page', async t => {
+  simulate(t, url => {
+    assert.equal(url.searchParams.get('privateExtendedProperty'), 'dayline=1');
+    return reply({ items: [event(), event({ status: 'cancelled' }), event({ extendedProperties: {} })], nextPageToken: 'page2' });
+  }, url => {
+    assert.equal(url.searchParams.get('pageToken'), 'page2');
+    return reply({ kind: 'calendar#events' });
+  });
+  const events = await listTaskEvents(token, { calendarId });
+  assert.deepEqual(events.map(e => e.taskId), [task.id]);
+});
+
+test('confirmed deletion, lost calendar access, and temporary provider failures stay distinct', async t => {
+  simulate(t,
+    failure(404, 'notFound'), reply({ id: calendarId, accessRole: 'owner' }),
+    failure(404, 'notFound'), failure(404, 'notFound'),
+    reply({ id: eventId, status: 'cancelled' }), failure(410, 'deleted'),
+    reply({ error: { errors: [{ reason: 'rateLimitExceeded' }], message: 'Slow down' } }, 429, { 'Retry-After': '60' }),
+  );
+  const read = () => getTaskEvent(token, { calendarId, eventId });
+  assert.equal(await read(), null);
+  await assert.rejects(read(), { status: 403, reason: 'calendarUnavailable' });
+  assert.equal(await read(), null);
+  assert.equal(await read(), null);
+  await assert.rejects(read(), { status: 429, reason: 'rateLimitExceeded', retryAfterSeconds: 60 });
+});
+
+test('explicit deletion uses a verified version and can be retried after success', async t => {
+  simulate(t, reply(event()), (url, init) => {
+    assert.equal(init.method, 'DELETE');
+    assert.equal(init.headers['If-Match'], '"v1"');
+    return reply(null, 204);
+  }, failure(404, 'notFound'), reply({ id: calendarId, accessRole: 'owner' }));
+  const remove = () => deleteTaskEvent(token, { calendarId, eventId, taskId: task.id, expectedEtag: '"v1"' });
+  await remove();
+  await remove();
+});
