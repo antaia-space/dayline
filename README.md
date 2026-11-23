@@ -4,12 +4,27 @@ Dayline finds time for your to-do list. Write a task in plain English and it est
 
 ![An example week in Dayline with nine tasks across five working days](docs/example-week.png)
 
+## Using Dayline outside Antaia
+
+Dayline was built for Antaia’s team. The code is public so others can run it, with these limits today.
+
+| Part | Outside Antaia |
+| --- | --- |
+| Planner, task agents, Week and Day agenda | Work. Nothing to set up beyond the app. |
+| Reading Google calendars | Works with your own Google OAuth client. Create a Google Cloud project, enable the Google Calendar API and create an OAuth client of type **Desktop app**, as described under [Google Calendar setup](#google-calendar-setup). Choose its JSON file in **Settings → Calendars**. |
+| Google’s sign-in warning | A client that Google has not verified shows “Google hasn’t verified this app”. Choose **Advanced**, then continue. A client in **Testing** also ends each sign-in after seven days. |
+| Live calendar updates | Antaia’s receiver accepts accounts in Antaia’s Google Workspace only. Without one, Dayline checks Google on a timer instead, so changes arrive a little later. |
+| Booking links | Not available yet. The public booking page runs on Antaia’s receiver, which serves Antaia accounts only. Running your own receiver needs changes in `relay/receiver.mjs`, where the Workspace domain is fixed. |
+| Opening the Mac app | The build is not notarized by Apple. macOS blocks it on first open: allow it under **System Settings → Privacy & Security**, or [run from source](#run-from-source). |
+
+There is no licence file yet. Until one is added, all rights stay with Antaia: you may read the code, and you need Antaia’s permission to use or change it.
+
 ## Install on a Mac
 
-1. Sign in to GitHub with access to the Antaia repository. Download the universal Mac ZIP for an Apple silicon or Intel Mac running macOS 13 or later. [Latest Mac release](https://github.com/antaia-space/dayline/releases/latest)
+1. Download the universal Mac ZIP for an Apple silicon or Intel Mac running macOS 13 or later. [Latest Mac release](https://github.com/antaia-space/dayline/releases/latest)
 2. Unzip the download, drag **Dayline.app** to **Applications**, and open it. To use the same planner in your browser, choose **File → Open in Browser** in the Mac app. Both views follow your system’s light or dark appearance.
 
-The internal build uses an ad hoc signature and has not been notarized by Apple. If your Mac’s launch policy requires approval, follow Antaia’s approved procedure or run the app from source below.
+The internal build uses an ad hoc signature and has not been notarized by Apple. If macOS blocks it, allow it under **System Settings → Privacy & Security**, or run the app from source below. On an Antaia Mac, follow Antaia’s approved procedure.
 
 ## Connect your calendars
 
@@ -187,7 +202,7 @@ The receiver does not store guests’ IP addresses and writes no logs. The live 
 
 ## Run from source
 
-With Node.js 22.13 or later and access to the private repository, run these commands on your Mac.
+With Node.js 22.13 or later, run these commands on your Mac.
 
 ```sh
 git clone https://github.com/antaia-space/dayline.git

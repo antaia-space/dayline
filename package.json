@@ -3,7 +3,7 @@
   "productName": "Dayline",
   "version": "1.9.2",
   "private": true,
-  "description": "A private, local-first weekly task planner for Antaia.",
+  "description": "A local-first weekly task planner for macOS, built at Antaia.",
   "author": "Antaia",
   "type": "module",
   "main": "desktop/main.cjs",
