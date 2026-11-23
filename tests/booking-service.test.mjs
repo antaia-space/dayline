@@ -35,7 +35,7 @@ class Google {
     return [{ id: account + '-primary', name: account, primary: true, writable: true, accessRole: 'owner', canCheckAvailability: true, canInspectReservations: true }];
   }
   occupied(account, start, end, withTasks) {
-    const blocks = [...this.meetings.filter(m => m.account === account), ...[...this.bookings.values()].filter(() => account === 'work'),
+    const blocks = [...this.meetings.filter(m => m.account === account), ...[...this.bookings.values()].filter(b => b.account === account),
       ...(withTasks && account === 'work' ? this.taskEvents.values() : [])];
     return blocks.filter(b => Date.parse(b.end) > Date.parse(start) && Date.parse(b.start) < Date.parse(end)).map(b => ({ start: b.start, end: b.end }));
   }
@@ -44,15 +44,26 @@ class Google {
     for (const ref of reservations) assert.equal(this.taskEvents.get(ref.eventId)?.start, ref.start);
     return this.occupied(account, start, end, false);
   }
-  listBookingEvents() { return [...this.bookings.values()].map(b => ({ ...b, start: Date.parse(b.start), end: Date.parse(b.end) })); }
-  getBookingEvent(_access, { eventId }) {
-    const b = this.bookings.get(eventId);
-    return b ? { ...b, start: Date.parse(b.start), end: Date.parse(b.end) } : null;
+  // A booked event lives in one account's calendar and is visible only through that account.
+  held(access, calendarId) { return [...this.bookings.values()].filter(b => b.account === access && b.calendarId === calendarId); }
+  found(b) { return { eventId: b.eventId, type: b.type, name: b.name, email: b.email, start: Date.parse(b.start), end: Date.parse(b.end) }; }
+  listBookingEvents(access, { calendarId }) { return this.held(access, calendarId).map(b => this.found(b)); }
+  getBookingEvent(access, { calendarId, eventId }) {
+    const b = this.held(access, calendarId).find(event => event.eventId === eventId);
+    return b ? this.found(b) : null;
   }
   bookingDescription({ manageUrl }) { return manageUrl; }
-  createBookingEvent(_access, { eventId, start, end, type, title, description }) {
-    this.bookings.set(eventId, { eventId, type, title, description, start: iso(start), end: iso(end) });
+  createBookingEvent(access, { calendarId, eventId, start, end, type, title, description, ownerEmail, guest }) {
+    this.bookings.set(eventId, { account: access, calendarId, eventId, type, title, description, ownerEmail, name: guest.name, email: guest.email, start: iso(start), end: iso(end) });
     return { eventId, type, start, end };
+  }
+  moveBookingEvent(access, { calendarId, eventId, start, end }) {
+    const [b] = this.held(access, calendarId).filter(event => event.eventId === eventId);
+    Object.assign(b, { start: iso(start), end: iso(end) });
+    return this.found(b);
+  }
+  cancelBookingEvent(access, { calendarId, eventId }) {
+    if (this.held(access, calendarId).some(event => event.eventId === eventId)) this.bookings.delete(eventId);
   }
 }
 
@@ -89,7 +100,7 @@ test('booking settings start from the meet defaults and are validated', async ()
 
   const bad = (input, message) => assert.throws(() => updateBooking(service, input), message);
   bad({ enabled: true }, /Enter the name guests should see/);
-  bad({ owner: { name: 'Urs' }, enabled: true }, /Choose the calendar that receives booked meetings/);
+  assert.throws(() => updateBooking(planner({ accounts: [] }).service, { owner: { name: 'Urs' }, enabled: true }), /Connect a Google account/);
   bad({ calendarId: 'unknown' }, /Choose a calendar you can add meetings to/);
   bad({ secret: 'x' }, /Unknown booking setting/);
   const type = defaultBooking().types[0];
@@ -109,8 +120,8 @@ test('booking settings start from the meet defaults and are validated', async ()
   assert.deepEqual(service.store.saved.booking.owner, { name: 'Urs Wilcke', headline: 'Antaia' });
   assert.deepEqual([service.store.saved.booking.accountSub, service.store.saved.booking.types[0].title], ['work', 'Intro']);
   const shown = publicBooking(service);
-  assert.deepEqual(shown.account, { sub: 'work', email: 'urs@antaia.space', access: true });
-  assert.deepEqual(shown.calendars.map(c => [c.sub, c.access]), [['work', true], ['home', false]]);
+  assert.deepEqual(shown.addresses.map(a => [a.sub, a.email, a.access, a.calendarId === work.id || a.calendars.length]), [['work', 'urs@antaia.space', true, true], ['home', 'urs@example.test', false, 1]]);
+  assert.deepEqual(shown.types.map(t => t.accountSub), ['work']);
 });
 
 test('booking asks Google for event access on the booking account only', async () => {
@@ -216,6 +227,54 @@ test('a meeting type can keep its own weekly hours instead of the working hours'
   assert.equal((await settleBooking(service, request(at('13:30')), { pageUrl, now })).ok, true);
 });
 
+test('each address has its own meeting types, and a booking lands in the calendar of the address it was booked with', async () => {
+  const both = [{ sub: 'work', email: 'urs@antaia.space', secret: 'work', mode: 'availability', booking: true },
+    { sub: 'home', email: 'urs@example.test', secret: 'home', mode: 'availability', booking: true }];
+  const { service, google } = await ready({ accounts: both });
+  const [intro, meeting] = defaultBooking().types;
+  assert.throws(() => updateBooking(service, { types: [{ ...intro, accountSub: 'nobody' }] }), /Choose a connected Google address/);
+  const workCalendar = service.calendars.find(c => c.sub === 'work').id, homeCalendar = service.calendars.find(c => c.sub === 'home').id;
+  assert.throws(() => updateBooking(service, { calendars: { home: workCalendar } }), /Choose a calendar of that Google address/);
+  // A type saved without an address belongs to the first one; the other is booked with the private address.
+  updateBooking(service, { types: [intro, { ...meeting, accountSub: 'home' }], calendars: { home: homeCalendar } });
+  const shown = publicBooking(service);
+  assert.deepEqual(shown.types.map(t => [t.slug, t.accountSub]), [['intro', 'work'], ['meeting', 'home']]);
+  assert.deepEqual(shown.addresses.map(a => [a.email, a.access, a.calendarId]), [['urs@antaia.space', true, workCalendar], ['urs@example.test', true, homeCalendar]]);
+
+  // Both addresses now need event access, and each type gets times from the same shared busy time.
+  google.meetings.push({ account: 'work', start: iso(at('11:00')), end: iso(at('12:00')) });
+  const before = await bookingSnapshot(service, now);
+  assert.deepEqual(google.refreshModes.slice(-2).sort(), ['home:booking', 'work:booking']);
+  assert.ok(tuesday(before.page.slots.meeting).includes('10:00') && !tuesday(before.page.slots.meeting).includes('11:00'), 'a work meeting blocks the private address too');
+
+  const viaHome = await settleBooking(service, request(at('10:00')), { pageUrl, now });
+  const viaWork = await settleBooking(service, request(at('13:00'), { id: 'b'.repeat(24), token: 'b'.repeat(24) + '.' + 'S'.repeat(27), type: 'intro', end: at('13:15') }), { pageUrl, now });
+  assert.deepEqual([viaHome.ok, viaWork.ok], [true, true]);
+  const booked = id => { const { account, calendarId, ownerEmail } = google.bookings.get('bkb' + id.repeat(24)); return [account, calendarId, ownerEmail]; };
+  assert.deepEqual(booked('a'), ['home', 'home-primary', 'urs@example.test']);
+  assert.deepEqual(booked('b'), ['work', 'work-primary', 'urs@antaia.space']);
+
+  // The Bookings tab lists both, each with the address it was booked with; the page object gets no address at all.
+  const after = await bookingSnapshot(service, now);
+  assert.deepEqual(after.upcoming.map(m => [m.type, m.address]), [['Meeting', 'urs@example.test'], ['Intro call', 'urs@antaia.space']]);
+  assert.deepEqual(after.bookings.map(b => b.id).sort(), ['a'.repeat(24), 'b'.repeat(24)]);
+  assert.ok(!JSON.stringify(after.page).includes('example.test') && !JSON.stringify(after.page).includes('accountSub'));
+  assert.ok(!tuesday(after.page.slots.intro).includes('10:00'), 'a booking with one address blocks that time for the other');
+
+  // Reschedule and cancel find the event in whichever calendar holds it.
+  const moved = await settleBooking(service, { kind: 'move', id: 'a'.repeat(24), start: at('15:00'), end: at('15:30') }, { pageUrl, now });
+  assert.deepEqual([moved.ok, google.bookings.get('bkb' + 'a'.repeat(24)).start], [true, iso(at('15:00'))]);
+  assert.equal((await settleBooking(service, { kind: 'cancel', id: 'a'.repeat(24) }, { pageUrl, now })).ok, true);
+  assert.deepEqual([...google.bookings.keys()], ['bkb' + 'b'.repeat(24)]);
+
+  // An address that may not write events offers no times, and a request for it waits instead of landing elsewhere.
+  service.data.accounts.find(a => a.sub === 'home').booking = false;
+  const partly = await bookingSnapshot(service, now);
+  assert.deepEqual([partly.page.paused, partly.page.slots.meeting, partly.page.slots.intro.length > 0], [null, [], true]);
+  await assert.rejects(settleBooking(service, request(at('16:00'), { id: 'c'.repeat(24), token: 'c'.repeat(24) + '.' + 'S'.repeat(27) }), { pageUrl, now }), /event access/);
+  assert.equal(google.bookings.size, 1);
+});
+
 test('requests are checked again on the Mac, whatever the receiver says', async () => {
   const { service, google } = await ready();
   const refused = async (extra, reason) => assert.equal((await settleBooking(service, request(at('10:00'), extra), { pageUrl, now })).reason, reason, JSON.stringify(extra));
@@ -252,7 +311,7 @@ test('no times are published when a calendar cannot be read', async () => {
   google.failRefresh = failure(503, 'backendError');
   await assert.rejects(bookingSnapshot(service, now), /backendError/);
   // No calendar with event access: nothing to offer yet.
-  const setup = planner();
+  const setup = planner({ accounts: [{ sub: 'work', email: 'urs@antaia.space', secret: 'work', mode: 'availability' }] });
   bookingState(setup.service).owner.name = 'Urs';
   assert.equal((await bookingSnapshot(setup.service, now)).page.paused, 'setup');
 });

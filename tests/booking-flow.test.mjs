@@ -141,7 +141,7 @@ test('a guest books, reschedules and cancels while the Mac is awake', async t =>
   assert.ok(event.description.includes('About the &lt;b&gt;engine&lt;/b&gt;'), 'guest notes cannot add markup to the calendar');
 
   // The Bookings tab on the Mac lists who booked, read from Google Calendar.
-  assert.deepEqual(w.desk.upcoming, [{ id: 'bkb' + id, type: 'Meeting', start: at(12), end: at(12, 30), name: 'Ada Guest', email: 'ada@example.test' }]);
+  assert.deepEqual(w.desk.upcoming, [{ id: 'bkb' + id, type: 'Meeting', start: at(12), end: at(12, 30), name: 'Ada Guest', email: 'ada@example.test', address: 'urs@antaia.space' }]);
 
   // Once the Mac has answered, the receiver keeps no guest details.
   const ledger = w.stored.get('urs/ledger');

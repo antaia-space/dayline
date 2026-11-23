@@ -111,7 +111,7 @@ export class BookingDesk {
   fingerprint() {
     const { service } = this, { settings } = service.data, state = bookingState(service);
     const fixed = service.data.tasks.filter(t => t.start && !t.done && !t.deleting && explicitStartFor(t, settings.timeZone)).map(t => [t.start, t.end]);
-    return JSON.stringify([state.owner, state.calendarId, state.accountSub, state.types, settings.timeZone, settings.workDays, settings.startTime,
+    return JSON.stringify([state.owner, state.calendarId, state.accountSub, state.calendars, state.types, settings.timeZone, settings.workDays, settings.startTime,
       settings.endTime, settings.calendarMode, settings.excludedCalendarIds, service.busy, fixed]);
   }
 

@@ -15,7 +15,7 @@ export const ID_PREFIX_WIKI = 'bkb';
 export const ID_PREFIX_PRIVATE = 'bkp';
 // A request that waited for a sleeping Mac is still confirmed this close to its start, not closer.
 export const CONFIRM_LEAD = 30 * MINUTE;
-const typeFields = ['slug', 'title', 'description', 'durationMin', 'slotStepMin', 'bufferMin', 'minNoticeMin', 'maxDaysAhead', 'hidden', 'notesToWiki', 'hours'];
+const typeFields = ['slug', 'title', 'description', 'durationMin', 'slotStepMin', 'bufferMin', 'minNoticeMin', 'maxDaysAhead', 'hidden', 'notesToWiki', 'hours', 'accountSub'];
 const CLOCK = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const whole = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
 const line = (value, max) => typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, max) : '';
@@ -44,19 +44,40 @@ export function canWriteBookings(account) {
   return account?.booking === true || account?.mode === 'sync';
 }
 
+// Every meeting type is booked with one connected Google address: the meeting
+// lands in that account's calendar and Google invites the guest from it. A type
+// saved before addresses had their own types belongs to the first address chosen.
+function firstAddress(service) {
+  const state = service.data.booking, accounts = service.data.accounts;
+  if (accounts.some(a => a.sub === state?.accountSub)) return state.accountSub;
+  return (accounts.find(a => a.email?.toLowerCase().endsWith('@antaia.space')) ?? accounts[0])?.sub ?? null;
+}
+
+export function addressOf(service, type) {
+  return service.data.accounts.some(a => a.sub === type.accountSub) ? type.accountSub : firstAddress(service);
+}
+
 /** True while this account's access token must be able to create booked meetings. */
 export function writesBookings(service, account) {
   const state = service.data.booking;
-  return Boolean(state?.enabled && state.accountSub === account.sub && canWriteBookings(account));
+  return Boolean(state?.enabled && canWriteBookings(account) && state.types.some(type => addressOf(service, type) === account.sub));
 }
 
-export function bookingTarget(service) {
+/**
+ * For each connected address: the calendar its bookings go to, and whether
+ * Dayline may write there. Without a choice, bookings go to the primary calendar.
+ */
+export function bookingTargets(service) {
   const state = bookingState(service);
-  const calendar = service.calendars.find(c => c.id === state.calendarId && c.sub === state.accountSub);
-  return calendar?.writable ? calendar : null;
+  const chosen = { ...(state.accountSub && state.calendarId && { [state.accountSub]: state.calendarId }), ...state.calendars };
+  return new Map(service.data.accounts.map(account => {
+    const own = service.calendars.filter(c => c.sub === account.sub && c.writable);
+    const calendar = own.find(c => c.id === chosen[account.sub]) ?? own.find(c => c.primary) ?? null;
+    return [account.sub, { account, calendar, ready: Boolean(calendar && canWriteBookings(account)) }];
+  }));
 }
 
-function checkedTypes(input) {
+function checkedTypes(service, input) {
   if (!Array.isArray(input) || !input.length || input.length > 20) throw invalid('Keep between 1 and 20 meeting types.');
   const seen = new Set();
   return input.map(t => {
@@ -71,9 +92,10 @@ function checkedTypes(input) {
     if (!whole(t.bufferMin, 0, 240)) throw invalid('“' + title + '” needs a gap between 0 minutes and 4 hours.');
     if (!whole(t.minNoticeMin, 0, 30 * 24 * 60)) throw invalid('“' + title + '” needs a minimum notice of at most 30 days.');
     if (!whole(t.maxDaysAhead, 1, 90)) throw invalid('“' + title + '” can be booked between 1 and 90 days ahead.');
+    if (t.accountSub != null && !service.data.accounts.some(a => a.sub === t.accountSub)) throw invalid('Choose a connected Google address for “' + title + '”.');
     return { slug: t.slug, title, description: line(t.description, 300), durationMin: t.durationMin, slotStepMin: t.slotStepMin,
       bufferMin: t.bufferMin, minNoticeMin: t.minNoticeMin, maxDaysAhead: t.maxDaysAhead, hidden: t.hidden === true, notesToWiki: t.notesToWiki !== false,
-      hours: checkedHours(t.hours, title) };
+      hours: checkedHours(t.hours, title), accountSub: t.accountSub ?? firstAddress(service) };
   });
 }
 
@@ -100,22 +122,34 @@ const hoursFor = (type, settings) => type.hours ?? bookingHours(settings);
 
 export function updateBooking(service, input) {
   const state = bookingState(service);
-  if (!input || Object.keys(input).some(key => !['enabled', 'owner', 'calendarId', 'types'].includes(key))) throw invalid('Unknown booking setting.');
-  const next = { ...state };
+  if (!input || Object.keys(input).some(key => !['enabled', 'owner', 'calendarId', 'calendars', 'types'].includes(key))) throw invalid('Unknown booking setting.');
+  const next = { ...state, calendars: { ...state.calendars } };
   if (input.enabled !== undefined) {
     if (typeof input.enabled !== 'boolean') throw invalid('Choose whether to offer booking links.');
     next.enabled = input.enabled;
   }
   if (input.owner !== undefined) next.owner = { name: line(input.owner?.name, 100), headline: line(input.owner?.headline, 100) };
-  if (input.types !== undefined) next.types = checkedTypes(input.types);
-  if (input.calendarId !== undefined && input.calendarId !== state.calendarId) {
-    const calendar = service.calendars.find(c => c.id === input.calendarId);
+  if (input.types !== undefined) next.types = checkedTypes(service, input.types);
+  const writable = id => {
+    const calendar = service.calendars.find(c => c.id === id);
     if (!calendar?.writable) throw invalid('Choose a calendar you can add meetings to.');
-    next.calendarId = calendar.id;
-    next.accountSub = calendar.sub;
+    return calendar;
+  };
+  if (input.calendarId !== undefined && input.calendarId !== state.calendarId) {
+    const calendar = writable(input.calendarId);
+    Object.assign(next, { calendarId: calendar.id, accountSub: calendar.sub });
+    next.calendars[calendar.sub] = calendar.id;
+  }
+  // One calendar per address: where the meetings booked with that address go.
+  if (input.calendars !== undefined) {
+    if (!input.calendars || typeof input.calendars !== 'object' || Array.isArray(input.calendars)) throw invalid('Choose a calendar you can add meetings to.');
+    for (const [sub, id] of Object.entries(input.calendars)) {
+      if (writable(id).sub !== sub) throw invalid('Choose a calendar of that Google address.');
+      next.calendars[sub] = id;
+    }
   }
   if (next.enabled && !next.owner.name) throw invalid('Enter the name guests should see.');
-  if (next.enabled && !next.calendarId) throw invalid('Choose the calendar that receives booked meetings.');
+  if (next.enabled && !service.data.accounts.length) throw invalid('Connect a Google account under Settings → Calendars first.');
   Object.assign(state, next);
   service.store.save();
 }
@@ -129,12 +163,14 @@ export function dismissBookingNotice(service, id) {
 /** What the Bookings tab shows. Nothing here is a secret. */
 export function publicBooking(service) {
   const state = bookingState(service);
-  const account = service.data.accounts.find(a => a.sub === state.accountSub);
   return {
-    enabled: state.enabled, owner: { ...state.owner }, calendarId: state.calendarId, types: structuredClone(state.types),
-    notices: structuredClone(state.notices), account: account ? { sub: account.sub, email: account.email, access: canWriteBookings(account) } : null,
-    calendars: service.calendars.filter(c => c.writable).map(c => ({ id: c.id, name: c.name, sub: c.sub, accountEmail: c.accountEmail,
-      access: canWriteBookings(service.data.accounts.find(a => a.sub === c.sub)) })),
+    enabled: state.enabled, owner: { ...state.owner }, notices: structuredClone(state.notices),
+    types: state.types.map(type => ({ ...structuredClone(type), accountSub: addressOf(service, type) })),
+    // One section per connected address in the Bookings tab.
+    addresses: [...bookingTargets(service).values()].map(({ account, calendar }) => ({
+      sub: account.sub, email: account.email, access: canWriteBookings(account), calendarId: calendar?.id ?? null,
+      calendars: service.calendars.filter(c => c.sub === account.sub && c.writable).map(c => ({ id: c.id, name: c.name })),
+    })),
   };
 }
 
@@ -185,22 +221,29 @@ export async function bookingSnapshot(service, now = service.clock().getTime()) 
   const page = { owner: { ...state.owner }, types: state.types.map(publicType), slots: {}, paused: null };
   try {
     if (service.data.accounts.length && !service.calendars.length) await service.discover();
-    const target = bookingTarget(service);
-    const account = service.data.accounts.find(a => a.sub === state.accountSub);
-    if (!target || !canWriteBookings(account)) return { page: { ...page, paused: 'setup' } };
+    const targets = bookingTargets(service);
+    const used = [...new Set(state.types.map(type => addressOf(service, type)))].map(sub => targets.get(sub)).filter(target => target?.ready);
+    if (!used.length) return { page: { ...page, paused: 'setup' } };
     const horizon = Math.max(...state.types.map(t => t.maxDaysAhead));
+    // Busy time is the same whichever address a guest books: every calendar checked for conflicts counts.
     const busy = await bookingBusy(service, now, now + (horizon + 1) * DAY);
     for (const type of state.types) {
+      // A type whose address may not write events yet offers no times.
       // The receiver stores at most 3,000 start times per type; the nearest ones come first.
-      page.slots[type.slug] = computeSlots({ type: { ...type, hours: hoursFor(type, settings), dateOverrides: {} }, ownerTimeZone: settings.timeZone,
-        fromMs: now, toMs: now + type.maxDaysAhead * DAY, nowMs: now, busy }).slice(0, 3000);
+      page.slots[type.slug] = !targets.get(addressOf(service, type))?.ready ? []
+        : computeSlots({ type: { ...type, hours: hoursFor(type, settings), dateOverrides: {} }, ownerTimeZone: settings.timeZone,
+          fromMs: now, toMs: now + type.maxDaysAhead * DAY, nowMs: now, busy }).slice(0, 3000);
     }
-    const events = await service.google.listBookingEvents(await service.token(target.sub), { calendarId: target.providerId, timeMin: iso(now) });
-    const bookings = events.filter(e => SLUG.test(e.type)).map(e => ({ id: e.eventId.slice(3), type: e.type, start: e.start, end: e.end }));
-    // For the Bookings tab on this Mac only: who booked what. The receiver gets `bookings`, which names nobody.
     const titles = new Map(state.types.map(t => [t.slug, t.title]));
-    const upcoming = events.map(e => ({ id: e.eventId, type: titles.get(e.type) || 'Meeting', start: e.start, end: e.end, name: e.name, email: e.email }))
-      .sort((a, b) => a.start - b.start);
+    const bookings = [], upcoming = [];
+    for (const { account, calendar } of used) {
+      const events = await service.google.listBookingEvents(await service.token(account.sub), { calendarId: calendar.providerId, timeMin: iso(now) });
+      bookings.push(...events.filter(e => SLUG.test(e.type)).map(e => ({ id: e.eventId.slice(3), type: e.type, start: e.start, end: e.end })));
+      // For the Bookings tab on this Mac only: who booked what. The receiver gets `bookings`, which names nobody.
+      upcoming.push(...events.map(e => ({ id: e.eventId, type: titles.get(e.type) || 'Meeting', start: e.start, end: e.end, name: e.name, email: e.email,
+        address: account.email })));
+    }
+    upcoming.sort((a, b) => a.start - b.start);
     return { page, bookings, upcoming };
   } catch (error) {
     if (transient(error)) throw error; // The last published times stay until Google answers again.
@@ -218,17 +261,16 @@ function notice(service, kind, reason, request, type) {
   service.store.save();
 }
 
-function access(service) {
-  const state = bookingState(service);
-  const target = bookingTarget(service), account = service.data.accounts.find(a => a.sub === state.accountSub);
-  if (!state.enabled || !target || !canWriteBookings(account)) throw invalid('Booked meetings need a calendar with event access. Check the Bookings tab.', 409);
-  return { target, account };
-}
+const notReady = () => invalid('Booked meetings need a calendar with event access. Check the Bookings tab.', 409);
 
-async function findBooking(service, token, target, id, first = ID_PREFIX_WIKI) {
-  for (const prefix of first === ID_PREFIX_WIKI ? [ID_PREFIX_WIKI, ID_PREFIX_PRIVATE] : [ID_PREFIX_PRIVATE, ID_PREFIX_WIKI]) {
-    const event = await service.google.getBookingEvent(token, { calendarId: target.providerId, eventId: prefix + id });
-    if (event) return event;
+// A booked event is looked up by its id in the given addresses' calendars.
+async function findBooking(service, targets, id, first = ID_PREFIX_WIKI) {
+  for (const target of targets) {
+    const token = await service.token(target.account.sub), calendarId = target.calendar.providerId;
+    for (const prefix of first === ID_PREFIX_WIKI ? [ID_PREFIX_WIKI, ID_PREFIX_PRIVATE] : [ID_PREFIX_PRIVATE, ID_PREFIX_WIKI]) {
+      const event = await service.google.getBookingEvent(token, { calendarId, eventId: prefix + id });
+      if (event) return { event, token, calendarId };
+    }
   }
   return null;
 }
@@ -249,13 +291,12 @@ async function stillFree(service, type, start, end, now) {
 export async function settleBooking(service, request, { pageUrl, now = service.clock().getTime() }) {
   if (!request || !REQUEST_ID.test(request.id || '')) throw invalid('Invalid booking request.');
   const state = bookingState(service), { id, kind } = request;
-  const { target, account } = access(service);
-  const token = await service.token(target.sub);
-  const calendarId = target.providerId;
+  const targets = bookingTargets(service), ready = [...targets.values()].filter(target => target.ready);
+  if (!state.enabled || !ready.length) throw notReady();
 
   if (kind === 'cancel') {
-    const event = await findBooking(service, token, target, id);
-    if (event) await service.google.cancelBookingEvent(token, { calendarId, eventId: event.eventId });
+    const found = await findBooking(service, ready, id);
+    if (found) await service.google.cancelBookingEvent(found.token, { calendarId: found.calendarId, eventId: found.event.eventId });
     return { id, kind, ok: true };
   }
 
@@ -263,20 +304,26 @@ export async function settleBooking(service, request, { pageUrl, now = service.c
   const timed = Number.isSafeInteger(start) && Number.isSafeInteger(end) && start < end;
   if (kind === 'move') {
     const refused = { id, kind, ok: false, start, end };
-    const event = await findBooking(service, token, target, id);
-    if (!event || !timed) return refused;
+    const found = await findBooking(service, ready, id);
+    if (!found || !timed) return refused;
+    const { event } = found;
     if (event.start === start && event.end === end) return { id, kind, ok: true, start, end };
     const type = state.types.find(t => t.slug === event.type);
     if (!type || end - start !== type.durationMin * MINUTE || start - now < CONFIRM_LEAD || !await stillFree(service, type, start, end, now)) return refused;
-    const moved = await service.google.moveBookingEvent(token, { calendarId, eventId: event.eventId, start, end });
+    const moved = await service.google.moveBookingEvent(found.token, { calendarId: found.calendarId, eventId: event.eventId, start, end });
     return { id, kind, ok: true, start: moved.start, end: moved.end };
   }
 
   if (kind !== 'book') throw invalid('Unknown booking request.');
   const type = state.types.find(t => t.slug === request.type);
+  // The meeting goes to the calendar of the address this type is booked with.
+  const target = type ? targets.get(addressOf(service, type)) : ready[0];
+  if (!target?.ready) throw notReady();
+  const { account } = target, calendarId = target.calendar.providerId;
+  const token = await service.token(account.sub);
   const prefix = type?.notesToWiki === false ? ID_PREFIX_PRIVATE : ID_PREFIX_WIKI;
   // A retry after a lost answer finds the event it already made.
-  const existing = await findBooking(service, token, target, id, prefix);
+  const existing = (await findBooking(service, [target], id, prefix))?.event;
   if (existing) return { id, kind, ok: true, start: existing.start, end: existing.end };
   const guest = { name: line(request.guest?.name, 100), email: line(request.guest?.email, 254).toLowerCase(), timeZone: line(request.guest?.timeZone, 64) };
   const notes = typeof request.guest?.notes === 'string' ? request.guest.notes.trim().slice(0, 2000) : '';
