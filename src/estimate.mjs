@@ -1,5 +1,20 @@
 import { spawn } from 'node:child_process';
+import { runCli } from './agents/cli.mjs';
 import { CATEGORIES, estimateTask } from './planner.mjs';
+
+export async function localStatus(helperPath) {
+  let detail = 'Built-in text rules estimate tasks on this Mac.';
+  if (helperPath) {
+    try {
+      const { code, stdout } = await runCli(helperPath, ['--status'], { timeoutMs: 3500, maxBytes: 1024 });
+      const reason = stdout.trim();
+      if (code === 0 && reason === 'available') detail = 'Apple Foundation Models is available on this Mac.';
+      if (reason === 'modelNotReady') detail += ' The Apple model is still getting ready.';
+      if (reason === 'appleIntelligenceNotEnabled') detail += ' Apple Intelligence is turned off.';
+    } catch { /* Rules are available on every supported Mac. */ }
+  }
+  return { installed: true, signedIn: null, detail, models: [] };
+}
 
 export function makeEstimator(helperPath) {
   return async (text, context) => {
@@ -13,7 +28,7 @@ export function makeEstimator(helperPath) {
       const keepDuration = rules.explicitMinutes || (rules.windowStart && rules.windowEnd);
       return {
         ...rules,
-        category,
+        engine: 'apple', category,
         minutes: keepDuration ? rules.minutes : suggestion.minutes,
         reason: keepDuration ? rules.reason : 'On-device estimate · ' + String(suggestion.reason).slice(0, 180)
       };

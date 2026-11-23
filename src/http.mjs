@@ -8,6 +8,7 @@ const POLICY = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.png': 'image/png' };
 const escape = v => String(v).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c]);
 const TASK_ROUTE = /^\/api\/tasks\/([a-f0-9]{32})$/;
+const ESTIMATE_ROUTE = /^\/api\/tasks\/([a-f0-9]{32})\/estimate$/;
 const ACTION_ROUTE = /^\/action\/([a-f0-9]{32})$/;
 
 async function jsonInput(req) {
@@ -27,14 +28,15 @@ async function jsonInput(req) {
 }
 
 function page(title, body, link = '/', label = 'Open planner') {
-  return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Dayline · ' + escape(title) +
-    '</title><style>body{margin:clamp(32px,12vw,150px) auto;max-width:32em;padding:0 24px;background:#fcfbf7;color:#252723;font:17px/1.55 system-ui}small{font-size:15px;color:#65675e}h1{font:normal 42px/1.1 Georgia,serif;margin:.7em 0 .4em}a{color:#294b3e;text-underline-offset:4px}</style><small>Dayline / Antaia</small><h1>' + escape(title) +
+  return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>Dayline · ' + escape(title) +
+    '</title><style>:root{color-scheme:light dark}body{margin:clamp(32px,12vw,150px) auto;max-width:32em;padding:0 24px;background:#fbfbf8;color:#282a25;font:17px/1.55 system-ui}small{font-size:15px;color:#62645d}h1{font:normal 42px/1.1 Georgia,serif;margin:.7em 0 .4em}a{color:#863827;text-underline-offset:4px}:focus-visible{outline:2px solid currentColor;outline-offset:3px}@media(prefers-color-scheme:dark){body{background:#1c1f1d;color:#ecece3}small{color:#bbc0b4}a{color:#f5ac93}::selection{background:#704739;color:#fff0e9}}</style><small>Dayline / Antaia</small><h1>' + escape(title) +
     '</h1><p>' + escape(body) + '</p><a href="' + escape(link) + '">' + escape(label) + '</a></html>';
 }
 
-export async function startServer({ service, webRoot, port = 43127, intervalMs = 60000 }) {
+export async function startServer({ service, agents, webRoot, port = 43127, intervalMs = 60000 }) {
   const sessionSecret = randomBytes(32).toString('base64url');
   const invitations = new Map();
+  const retrying = new Map();
   let cookieName;
   let origin;
   let closed = false;
@@ -80,18 +82,36 @@ export async function startServer({ service, webRoot, port = 43127, intervalMs =
     if (pathname.startsWith('/api/')) {
       if (!hasSession) throw invalid('Open Dayline on this Mac and choose File → Open in Browser.', 401);
       if (req.method === 'GET' && pathname === '/api/state') return send(res, 200, 'application/json', JSON.stringify(service.snapshot()));
+      if (req.method === 'GET' && pathname === '/api/agent' && agents) {
+        const details = await agents.status(url.searchParams.get('provider') ?? undefined);
+        return send(res, 200, 'application/json', JSON.stringify(details));
+      }
       if (req.headers.origin !== origin) throw invalid('Open this action in your local planner.', 403);
       const body = await jsonInput(req);
       let result = { ok: true };
       const match = TASK_ROUTE.exec(pathname);
+      const retry = ESTIMATE_ROUTE.exec(pathname);
       let syncAfter = true;
       if (req.method === 'POST' && pathname === '/api/tasks') result.id = await service.run(() => service.createTask(body));
-      else if (req.method === 'PATCH' && match) await service.run(() => service.editTask(match[1], body));
+      else if (req.method === 'POST' && retry) {
+        const taskId = retry[1];
+        if (!retrying.has(taskId)) {
+          const pending = service.run(() => service.retryEstimate(taskId)).finally(() => retrying.delete(taskId));
+          retrying.set(taskId, pending);
+        }
+        await retrying.get(taskId);
+      } else if (req.method === 'POST' && pathname === '/api/agent' && agents) {
+        result = await service.run(() => agents.select(body));
+        syncAfter = false;
+      } else if (req.method === 'POST' && pathname === '/api/agent/login' && agents) {
+        result = await agents.login(body);
+        syncAfter = false;
+      } else if (req.method === 'PATCH' && match) await service.run(() => service.editTask(match[1], body));
       else if (req.method === 'DELETE' && match) await service.run(() => service.deleteTask(match[1]));
       else if (req.method === 'PATCH' && pathname === '/api/settings') await service.run(() => service.updateSettings(body));
       else if (req.method === 'POST' && pathname === '/api/connection/config') await service.run(() => service.configure(body));
       else if (req.method === 'POST' && pathname === '/api/connection/start') {
-        result = await service.run(() => service.beginConnection());
+        result = await service.run(() => service.beginConnection(body));
         syncAfter = false;
       } else if (req.method === 'POST' && pathname === '/api/connection/disconnect') {
         await service.run(() => service.disconnect(body.sub));

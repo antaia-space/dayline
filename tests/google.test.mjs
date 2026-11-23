@@ -13,6 +13,13 @@ const end = '2026-11-24T10:00:00.000Z';
 const task = { id: eventId, text: 'Review the brief', done: false, category: 'focus', start, end };
 const actionUrl = 'http://127.0.0.1:43127/action/' + eventId + '?done=1';
 const write = { calendarId, eventId, task, actionUrl, expectedEtag: null };
+const availabilityScopes = [
+  'openid', 'email',
+  'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
+  'https://www.googleapis.com/auth/calendar.events.freebusy',
+];
+const eventScope = 'https://www.googleapis.com/auth/calendar.events';
+const syncScopes = [...availabilityScopes, eventScope];
 
 function event(overrides = {}) {
   return {
@@ -51,8 +58,8 @@ test('desktop authorization is offline, uses PKCE and posts secrets only to the 
   assert.equal(url.searchParams.get('redirect_uri'), redirectUri);
   assert.equal(url.searchParams.has('client_secret'), false);
   const scope = url.searchParams.get('scope');
-  assert.ok(scope.includes('calendar.events.freebusy'));
-  assert.ok(scope.includes('calendar.calendarlist.readonly'));
+  assert.deepEqual(new Set(scope.split(' ')), new Set(availabilityScopes));
+  assert.notEqual(url.searchParams.get('include_granted_scopes'), 'true');
 
   simulate(t,
     (endpoint, init) => {
@@ -61,12 +68,14 @@ test('desktop authorization is offline, uses PKCE and posts secrets only to the 
       assert.equal(init.body.get('grant_type'), 'authorization_code');
       assert.equal(init.body.get('code_verifier'), 'verifier');
       assert.equal(init.body.get('client_secret'), 'test-secret');
-      return reply({ access_token: token, refresh_token: 'test-refresh', expires_in: 3600, scope });
+      const canonicalScope = scope.replace(' email ', ' https://www.googleapis.com/auth/userinfo.email ');
+      return reply({ access_token: token, refresh_token: 'test-refresh', expires_in: 3600, scope: canonicalScope });
     },
     (endpoint, init) => {
       assert.equal(init.body.get('grant_type'), 'refresh_token');
       assert.equal(init.body.get('refresh_token'), 'test-refresh');
       assert.equal(init.body.has('client_secret'), false);
+      assert.deepEqual(new Set(init.body.get('scope').split(' ')), new Set(availabilityScopes));
       return reply({ access_token: 'refreshed', expires_in: 3600 });
     },
     (endpoint, init) => {
@@ -82,6 +91,47 @@ test('desktop authorization is offline, uses PKCE and posts secrets only to the 
   assert.equal(refreshed.access_token, 'refreshed');
   assert.deepEqual(await getProfile(token), { sub: 'abc', email: 'person@example.test' });
   await assert.rejects(getProfile(token), { status: 403, reason: 'unverifiedProfile' });
+});
+
+test('event access is requested and accepted only for an explicit sync connection', async t => {
+  const options = { clientId: 'client', redirectUri: 'http://127.0.0.1/oauth/callback', mode: 'sync' };
+  const granted = syncScopes.join(' ');
+  const url = new URL(authorizationUrl({ ...options, state: 'state', codeChallenge: 'challenge' }));
+  assert.deepEqual(new Set(url.searchParams.get('scope').split(' ')), new Set(syncScopes));
+  simulate(t,
+    reply({ access_token: token, scope: granted }),
+    (_url, init) => {
+      assert.deepEqual(new Set(init.body.get('scope').split(' ')), new Set(syncScopes));
+      return reply({ access_token: token, scope: granted });
+    },
+    reply({ access_token: token, scope: availabilityScopes.join(' ') }),
+  );
+  assert.equal((await exchangeCode({ ...options, code: 'code', verifier: 'verifier' })).access_token, token);
+  assert.equal((await refreshToken({ ...options, refreshToken: 'test-refresh' })).access_token, token);
+  await assert.rejects(refreshToken({ ...options, refreshToken: 'reduced-grant' }), { reason: 'insufficientScopes' });
+});
+
+test('an availability exchange and refresh reject broader, incomplete, or malformed returned grants', async t => {
+  const options = { clientId: 'client', redirectUri: 'http://127.0.0.1/oauth/callback', mode: 'availability' };
+  const exchange = () => exchangeCode({ ...options, code: 'code', verifier: 'verifier' });
+  simulate(t,
+    reply({ access_token: token, scope: syncScopes.join(' ') }),
+    reply({ access_token: token, scope: [...availabilityScopes, 'https://www.googleapis.com/auth/calendar'].join(' ') }),
+    reply({ access_token: token, scope: availabilityScopes.filter(scope => scope !== 'email').join(' ') }),
+    reply({ access_token: token, scope: null }),
+  );
+  await assert.rejects(exchange(), { reason: 'unexpectedScopes' });
+  await assert.rejects(refreshToken({ ...options, refreshToken: 'old-refresh' }), { reason: 'unexpectedScopes' });
+  await assert.rejects(exchange(), { reason: 'insufficientScopes' });
+  await assert.rejects(exchange(), { reason: 'invalidResponse' });
+});
+
+test('an unknown connection mode fails before sending an OAuth request', async t => {
+  simulate(t);
+  const options = { clientId: 'client', mode: 'full' };
+  assert.throws(() => authorizationUrl(options), { reason: 'invalidMode' });
+  await assert.rejects(exchangeCode(options), { reason: 'invalidMode' });
+  await assert.rejects(refreshToken(options), { reason: 'invalidMode' });
 });
 
 test('a revoked refresh grant and a partially authorized scope set surface actionable errors', async t => {
@@ -251,4 +301,25 @@ test('explicit deletion uses a verified version and can be retried after success
   const remove = () => deleteTaskEvent(token, { calendarId, eventId, taskId: task.id, expectedEtag: '"v1"' });
   await remove();
   await remove();
+});
+
+test('virtual Week Numbers feeds have no availability while user calendars with the same name remain eligible', async t => {
+  const german = 'e_2_de#weeknum@group.v.calendar.google.com';
+  const chinese = 'e_2_zh_TW#weeknum@group.v.calendar.google.com';
+  const unlocalized = 'p#weeknum@group.v.calendar.google.com';
+  const real = 'weeknum@group.calendar.google.com';
+  const shared = 'e_2_de#weeknum@example.test';
+  const items = [german, chinese, unlocalized, real, shared].map(id => ({ id, summary: 'Week Numbers', accessRole: 'reader' }));
+  simulate(t, reply({ items }), (url, init) => {
+    assert.deepEqual(JSON.parse(init.body).items, [{ id: real }, { id: shared }]);
+    return reply({ calendars: { [real]: { busy: [] }, [shared]: { errors: [{ reason: 'notFound' }] } } });
+  });
+  const entries = await listCalendars(token);
+  for (const id of [german, chinese, unlocalized]) {
+    assert.equal(entries.find(c => c.id === id).canCheckAvailability, false);
+  }
+  for (const id of [real, shared]) assert.equal(entries.find(c => c.id === id).canCheckAvailability, true);
+  await assert.rejects(getBusy(token, { calendarIds: [german, chinese, real, shared], start, end }), error =>
+    error.reason === 'notFound' && error.calendarId === shared && !error.message.includes(shared));
+  await assert.rejects(getBusy(token, { calendarIds: [unlocalized], start, end }), { reason: 'missingCalendars' });
 });

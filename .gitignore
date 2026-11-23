@@ -7,5 +7,6 @@ dist/
 !.env.example
 *.sqlite*
 oauth-client*.json
+client_secret_*.json
 desktop/resources/estimator
 desktop/resources/google-client.json

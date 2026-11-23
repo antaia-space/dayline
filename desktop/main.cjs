@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, shell, dialog, safeStorage, session, powerMonitor } = require('electron');
+const { app, BrowserWindow, Menu, shell, dialog, safeStorage, session, powerMonitor, nativeTheme } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -9,6 +9,7 @@ let window;
 let local;
 let service;
 let requestedPage = '/';
+const windowBackground = () => nativeTheme.shouldUseDarkColors ? '#1c1f1d' : '#fbfbf8';
 
 function nativeLink(value) {
   try {
@@ -25,7 +26,8 @@ function nativeLink(value) {
 function external(url) {
   try {
     const target = new URL(url);
-    const allowed = ['accounts.google.com', 'console.cloud.google.com', 'console.developers.google.com', 'developers.google.com'];
+    const allowed = ['accounts.google.com', 'console.cloud.google.com', 'console.developers.google.com', 'developers.google.com',
+      'developers.openai.com', 'geminicli.com', 'antigravity.google', 'code.claude.com', 'claude.com'];
     if (target.protocol === 'https:' && !target.username && !target.password &&
       (allowed.includes(target.hostname) || (target.hostname === 'github.com' && target.pathname.startsWith('/antaia-space/dayline')))) {
       void shell.openExternal(target.href);
@@ -38,7 +40,7 @@ function showPlanner(destination = '/') {
   if (!window || window.isDestroyed()) {
     window = new BrowserWindow({
       title: 'Dayline', width: 1240, height: 850, minWidth: 590, minHeight: 460,
-      backgroundColor: '#fafaf7', show: false,
+      titleBarStyle: 'default', backgroundColor: windowBackground(), show: false,
       webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true }
     });
     window.once('ready-to-show', () => window?.show());
@@ -84,8 +86,12 @@ else {
   // On macOS, closing the last window keeps calendar synchronization and event links available.
   app.on('window-all-closed', () => {});
   app.whenReady().then(async () => {
+    nativeTheme.themeSource = 'system';
+    nativeTheme.on('updated', () => {
+      if (window && !window.isDestroyed()) window.setBackgroundColor(windowBackground());
+    });
     const { openStore } = await import('../src/store.mjs');
-    const { makeEstimator } = await import('../src/estimate.mjs');
+    const { TaskAgents } = await import('../src/agents/manager.mjs');
     const { DaylineService } = await import('../src/service.mjs');
     const { startServer } = await import('../src/http.mjs');
     const resources = app.isPackaged ? process.resourcesPath : path.join(__dirname, 'resources');
@@ -97,9 +103,11 @@ else {
       },
       async open(value) { return (await safeStorage.decryptStringAsync(Buffer.from(value, 'base64'))).result; }
     };
-    service = new DaylineService({ store: openStore(dataDirectory), vault,
-      estimate: makeEstimator(fs.existsSync(estimator) ? estimator : null), bundledClient: loadBundledClient(resources) });
-    local = await startServer({ service, webRoot: path.join(__dirname, '..', 'web'), port: Number(process.env.DAYLINE_PORT || 43127) });
+    const store = openStore(dataDirectory);
+    const agents = new TaskAgents({ store, helperPath: fs.existsSync(estimator) ? estimator : null });
+    service = new DaylineService({ store, vault,
+      estimate: (text, context) => agents.estimate(text, context), bundledClient: loadBundledClient(resources) });
+    local = await startServer({ service, agents, webRoot: path.join(__dirname, '..', 'web'), port: Number(process.env.DAYLINE_PORT || 43127) });
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     if (app.isPackaged) app.setAsDefaultProtocolClient('dayline');
     powerMonitor.on('resume', () => { if (service.data.accounts.length) void service.queueSync().catch(() => {}); });

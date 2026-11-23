@@ -246,12 +246,12 @@ function timeConstraints(text, minutes) {
   return { windowStart: low === null ? null : clockString(low), windowEnd: high === null ? null : clockString(high) };
 }
 
-export function estimateTask(text, { now, timeZone = 'UTC' } = {}) {
+export function estimateTask(text, { now, timeZone = 'UTC', estimatedMinutes } = {}) {
   const today = instantInZone(now, timeZone).startOf('day');
   if (!today.isValid) throw new RangeError('Choose a valid time zone and scheduling date.');
   const estimate = workEstimate(text);
   const { flexibleText, ...dates } = dateConstraints(text, today);
-  return { ...estimate, ...dates, ...timeConstraints(flexibleText, estimate.minutes) };
+  return { ...estimate, ...dates, ...timeConstraints(flexibleText, estimate.explicitMinutes ? estimate.minutes : (estimatedMinutes ?? estimate.minutes)) };
 }
 
 const minuteMs = 60_000;

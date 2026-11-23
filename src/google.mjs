@@ -5,13 +5,13 @@ import { CATEGORIES } from './planner.mjs';
 
 const API = 'https://www.googleapis.com/calendar/v3';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
-const SCOPES = [
+const AVAILABILITY_SCOPES = [
   'openid',
   'email',
   'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
   'https://www.googleapis.com/auth/calendar.events.freebusy',
-  'https://www.googleapis.com/auth/calendar.events',
 ];
+const SYNC_SCOPES = [...AVAILABILITY_SCOPES, 'https://www.googleapis.com/auth/calendar.events'];
 const WRITABLE = new Set(['owner', 'writer', 'writerWithoutPrivateAccess']);
 const EVENT_FIELDS = 'id,etag,status,summary,start,end,colorId,extendedProperties/private';
 const CHECK = '(?:[✓✔☑]\\uFE0F?|\\[x\\])';
@@ -71,13 +71,19 @@ function authorized(accessToken, options = {}) {
   };
 }
 
-export function authorizationUrl({ clientId, redirectUri, state, codeChallenge }) {
+function scopesFor(mode) {
+  if (mode === 'availability') return AVAILABILITY_SCOPES;
+  if (mode === 'sync') return SYNC_SCOPES;
+  throw new GoogleError(400, 'invalidMode', 'Choose availability or calendar sync for this connection.');
+}
+
+export function authorizationUrl({ clientId, redirectUri, state, codeChallenge, mode = 'availability' }) {
   const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
   url.search = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,
     response_type: 'code',
-    scope: SCOPES.join(' '),
+    scope: scopesFor(mode).join(' '),
     access_type: 'offline',
     prompt: 'consent select_account',
     state,
@@ -87,16 +93,26 @@ export function authorizationUrl({ clientId, redirectUri, state, codeChallenge }
   return url.toString();
 }
 
-async function requestToken({ clientId, clientSecret, ...grant }) {
+async function requestToken({ clientId, clientSecret, mode, ...grant }) {
+  const required = scopesFor(mode);
   const body = new URLSearchParams({ client_id: clientId, ...grant });
   if (clientSecret) body.set('client_secret', clientSecret);
+  // An older refresh token can carry more permission than the account's current mode.
+  if (grant.grant_type === 'refresh_token') body.set('scope', required.join(' '));
   const tokens = await googleRequest(TOKEN_URL, { method: 'POST', body });
   if (typeof tokens.access_token !== 'string' || !tokens.access_token) {
     throw invalidResponse('Google did not return an access token.');
   }
-  if (typeof tokens.scope === 'string') {
-    const granted = new Set(tokens.scope.split(/\s+/));
-    const required = SCOPES.filter(scope => scope.includes('/auth/calendar.'));
+  if (tokens.scope !== undefined) {
+    if (typeof tokens.scope !== 'string') throw invalidResponse('Google returned an unreadable permission list.');
+    const granted = new Set(tokens.scope.trim().split(/\s+/).filter(Boolean));
+    // Google can expand the OpenID email shorthand in the token response.
+    if (granted.delete('https://www.googleapis.com/auth/userinfo.email')) granted.add('email');
+    for (const scope of granted) {
+      if (!required.includes(scope)) {
+        throw new GoogleError(403, 'unexpectedScopes', 'Google returned access beyond the selected connection mode. Reconnect with the permissions shown in Dayline.');
+      }
+    }
     if (required.some(scope => !granted.has(scope))) {
       throw new GoogleError(403, 'insufficientScopes', 'Reconnect Google and allow the requested calendar permissions.');
     }
@@ -104,15 +120,15 @@ async function requestToken({ clientId, clientSecret, ...grant }) {
   return tokens;
 }
 
-export function exchangeCode({ clientId, clientSecret, redirectUri, code, verifier }) {
+export function exchangeCode({ clientId, clientSecret, redirectUri, code, verifier, mode = 'availability' }) {
   return requestToken({
-    clientId, clientSecret, grant_type: 'authorization_code', redirect_uri: redirectUri,
+    clientId, clientSecret, mode, grant_type: 'authorization_code', redirect_uri: redirectUri,
     code, code_verifier: verifier,
   });
 }
 
-export function refreshToken({ clientId, clientSecret, refreshToken: refresh }) {
-  return requestToken({ clientId, clientSecret, grant_type: 'refresh_token', refresh_token: refresh });
+export function refreshToken({ clientId, clientSecret, refreshToken: refresh, mode = 'availability' }) {
+  return requestToken({ clientId, clientSecret, mode, grant_type: 'refresh_token', refresh_token: refresh });
 }
 
 export async function getProfile(accessToken) {
@@ -140,6 +156,12 @@ async function paginatedItems(accessToken, url, kind) {
   }
 }
 
+// Google's virtual Week Numbers feed has a locale-dependent prefix. Its
+// generated labels are never appointments and its freeBusy item returns notFound.
+function canCheckAvailability(id) {
+  return !/^[^#@\s]*#weeknum@group\.v\.calendar\.google\.com$/i.test(id);
+}
+
 export async function listCalendars(accessToken) {
   const url = new URL(API + '/users/me/calendarList');
   url.searchParams.set('showHidden', 'true');
@@ -152,7 +174,8 @@ export async function listCalendars(accessToken) {
     calendars.set(item.id, {
       id: item.id,
       name: item.summaryOverride || item.summary || item.id,
-      writable: WRITABLE.has(item.accessRole),
+      canCheckAvailability: canCheckAvailability(item.id),
+      writable: canCheckAvailability(item.id) && WRITABLE.has(item.accessRole),
       primary: item.primary === true,
       color: item.backgroundColor ?? null,
     });
@@ -170,7 +193,8 @@ export async function getBusy(accessToken, { calendarIds, start, end }) {
     throw new GoogleError(400, 'missingCalendars', 'Select a calendar to check availability.');
   }
   if (!validInterval(start, end)) throw new GoogleError(400, 'invalidInterval', 'Choose a valid time range.');
-  const ids = [...new Set(calendarIds)];
+  const ids = [...new Set(calendarIds)].filter(canCheckAvailability);
+  if (!ids.length) throw new GoogleError(400, 'missingCalendars', 'Select at least one calendar that can report availability.');
   const intervals = [];
 
   // https://developers.google.com/workspace/calendar/api/v3/reference/freebusy/query
@@ -185,10 +209,16 @@ export async function getBusy(accessToken, { calendarIds, start, end }) {
       const calendar = data.calendars?.[id];
       if (calendar?.errors?.length || !Array.isArray(calendar?.busy)) {
         const reason = calendar?.errors?.[0]?.reason ?? 'missingAvailability';
-        throw new GoogleError(503, reason, 'Google could not check availability for ' + id + ' (' + reason + ').');
+        const error = new GoogleError(503, reason, 'Google could not read availability for one of the selected calendars.');
+        error.calendarId = id;
+        throw error;
       }
       for (const period of calendar.busy) {
-        if (!validInterval(period?.start, period?.end)) throw invalidResponse('Google returned an incomplete busy period.');
+        if (!validInterval(period?.start, period?.end)) {
+          const error = invalidResponse('Google returned an incomplete busy period.');
+          error.calendarId = id;
+          throw error;
+        }
         intervals.push({ start: new Date(period.start).toISOString(), end: new Date(period.end).toISOString() });
       }
     }

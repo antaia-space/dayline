@@ -4,6 +4,16 @@ import FoundationModels
 @main
 struct Estimator {
     static func main() async {
+        if CommandLine.arguments.contains("--status") {
+            if #available(macOS 26.0, *) {
+                switch SystemLanguageModel.default.availability {
+                case .available: print("available")
+                case .unavailable(let reason): print(String(describing: reason))
+                @unknown default: print("unavailable")
+                }
+            } else { print("unavailable") }
+            return
+        }
         guard #available(macOS 26.0, *),
               SystemLanguageModel.default.availability == .available else { exit(2) }
         let data = FileHandle.standardInput.readDataToEndOfFile()

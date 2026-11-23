@@ -8,9 +8,26 @@ export function defaultSettings() {
     workDays: [1, 2, 3, 4, 5],
     startTime: '09:00',
     endTime: '17:00',
+    calendarMode: 'availability',
     excludedCalendarIds: [],
     targetCalendarId: 'primary'
   };
+}
+
+// Accounts saved before calendar modes used Google's event-write scope. Keeping
+// that capability separate from the global mode avoids upgrading newer grants.
+export function migrateCalendarModes(state) {
+  let changed = false;
+  if (!['availability', 'sync'].includes(state.settings.calendarMode)) {
+    state.settings.calendarMode = 'availability';
+    changed = true;
+  }
+  for (const account of state.accounts) {
+    if (account.mode === 'availability' || account.mode === 'sync') continue;
+    account.mode = account.mode === undefined ? 'sync' : 'availability';
+    changed = true;
+  }
+  return changed;
 }
 
 export function openStore(directory) {
@@ -22,7 +39,7 @@ export function openStore(directory) {
   if (state.version !== 1 || !Array.isArray(state.tasks) || !Array.isArray(state.accounts)) {
     throw new Error('This Dayline data file is unreadable or belongs to a newer version.');
   }
-  return {
+  const store = {
     state,
     save() {
       const temp = file + '.next';
@@ -34,6 +51,8 @@ export function openStore(directory) {
       renameSync(temp, file);
     }
   };
+  if (migrateCalendarModes(state)) store.save();
+  return store;
 }
 
 // The standalone development server has its own directory. The Mac app uses Keychain.

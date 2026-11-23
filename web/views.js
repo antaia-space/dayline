@@ -51,7 +51,9 @@ function taskControls(task, state, agenda = false) {
   content.append(title);
   const category = categoryOf(state,task);
   const meta = element("span","task-meta");
-  if (agenda) {
+  if (task.pendingEstimate) {
+    meta.textContent = "Awaiting estimate";
+  } else if (agenda) {
     const endTime = task.end ? "Until " + instantTime(task.end,state.settings.timeZone) + " · " : "";
     meta.textContent = endTime + duration(task.minutes) + " · " + category.name;
   } else {
@@ -72,7 +74,7 @@ function taskRow(task,state) {
 }
 
 function taskDay(task, zone) {
-  return task.start && zonedDay(task.start,zone);
+  return !task.pendingEstimate && task.start && zonedDay(task.start,zone);
 }
 
 function ordered(tasks) {
@@ -195,7 +197,7 @@ export function renderAgenda(state,{monday,selected,today}) {
   for (const task of state.tasks) tasksByDay.get(taskDay(task,zone))?.push(task);
   dayStrip(id("agenda-strip"),days,selected,today,tasksByDay);
   const taskEntries = state.tasks.flatMap((task) => {
-    const range = wallRange(task,selected,zone);
+    const range = !task.pendingEstimate && wallRange(task,selected,zone);
     return range ? [{...range,kind:"task",task}] : [];
   });
   const booked = mergeRanges(taskEntries);
@@ -232,7 +234,7 @@ export function renderAgenda(state,{monday,selected,today}) {
 }
 
 export function renderBacklog(state) {
-  const tasks = ordered(state.tasks.filter((task) => !task.start));
+  const tasks = ordered(state.tasks.filter((task) => task.pendingEstimate || !task.start));
   id("backlog-count").textContent = String(tasks.length);
   if (tasks.length) {
     const list = element("div","tray-list");

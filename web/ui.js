@@ -58,6 +58,18 @@ export function addDays(day, count) {
 }
 export const startOfWeek = (day) => addDays(day, 1 - dayIndex(day));
 export const formatDay = (day, options) => formatter({...options, timeZone:"UTC"}).format(dateValue(day));
+const relativePeriod = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+
+export function navigationLabel(selectedDay, today, view) {
+  const weekly = view === "week";
+  const start = dateValue(weekly ? startOfWeek(today) : today);
+  const end = dateValue(weekly ? startOfWeek(selectedDay) : selectedDay);
+  // These are calendar dates in the planner's zone, represented at UTC noon.
+  const days = (end - start) / 86400000;
+  const text = weekly ? relativePeriod.format(days / 7, "week") : relativePeriod.format(days, "day");
+  return text[0].toUpperCase() + text.slice(1);
+}
+
 export function isoWeek(day) {
   const thursday = dateValue(addDays(day, 4 - dayIndex(day)));
   const first = Date.UTC(thursday.getUTCFullYear(), 0, 1, 12);

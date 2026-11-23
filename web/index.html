@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#fafaf7">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#fbfbf8">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1c1f1d">
   <title>Dayline</title>
   <link rel="icon" href="/mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
@@ -36,7 +37,7 @@
       </div>
       <div class="navigation" role="group" aria-label="Change displayed dates">
         <button id="previous" class="icon-button" type="button" aria-label="Previous week" title="Previous week"><span data-icon="left"></span></button>
-        <button id="today" type="button" class="today-button">Today</button>
+        <button id="today" type="button" class="today-button" title="Go to this week">This week</button>
         <button id="next" class="icon-button" type="button" aria-label="Next week" title="Next week"><span data-icon="right"></span></button>
       </div>
     </section>
@@ -82,34 +83,79 @@
 
   <dialog id="settings" aria-labelledby="settings-title" class="panel">
     <div class="dialog-heading"><div><p class="eyebrow">Dayline</p><h2 id="settings-title">Settings</h2></div><button class="icon-button close-dialog" aria-label="Close settings"><span data-icon="x"></span></button></div>
-    <div class="settings-tabs" role="group" aria-label="Settings section"><button id="tab-work" type="button" aria-pressed="true">Working hours</button><button id="tab-calendars" type="button" aria-pressed="false">Calendars</button></div>
+    <div class="settings-tabs" role="group" aria-label="Settings section"><button id="tab-work" type="button" aria-pressed="true">Working hours</button><button id="tab-calendars" type="button" aria-pressed="false">Calendars</button><button id="tab-agent" type="button" aria-pressed="false">Task agent</button></div>
     <div class="dialog-scroll">
       <form id="work-form" class="form-body">
         <fieldset><legend>Working days</legend><div id="work-days" class="work-days"></div></fieldset>
         <div class="field-pair"><label>Start time<input id="work-start" type="time" required></label><label>End time<input id="work-end" type="time" required></label></div>
         <label>Time zone<input id="work-zone" list="time-zones" required autocomplete="off"><datalist id="time-zones"></datalist></label>
-        <p class="hint">Dayline fits new tasks inside these hours, around your existing calendar commitments.</p>
+        <p class="hint">Dayline fits tasks inside these hours, around busy times from your connected calendars.</p>
         <div class="dialog-actions"><button type="button" class="secondary close-dialog">Cancel</button><button type="submit" class="primary">Save hours</button></div>
       </form>
       <section id="calendar-settings" class="form-body" hidden>
+        <form id="calendar-mode-form" class="calendar-mode-form">
+          <label>Calendar access<select id="calendar-mode" aria-describedby="mode-description">
+            <option value="availability">Check availability only</option>
+            <option value="sync">Sync tasks as calendar events</option>
+          </select></label>
+          <p id="mode-description" class="hint"></p>
+          <div id="mode-actions" class="mode-actions" hidden><button id="apply-mode" type="submit" class="primary">Enable event syncing</button><button id="cancel-mode" type="button" class="text-button">Keep current mode</button></div>
+        </form>
         <div id="calendar-accounts"></div>
         <p id="calendar-health" class="hint" hidden></p>
         <div id="setup-box" class="setup-box">
           <h3>Connect Google Calendar</h3>
-          <p class="hint">Choose your company's Google Desktop OAuth client file to enable calendar connections on this Mac.</p>
+          <p class="hint">Import the Google connection file from your Antaia administrator, then sign in to the accounts you want to check.</p>
           <p class="setup-link"><a class="outside-link" href="https://github.com/antaia-space/dayline#google-calendar-setup" target="_blank" rel="noopener noreferrer">Google Calendar setup guide</a></p>
           <label for="oauth-file" class="file-button"><span data-icon="file"></span>Choose client file<input id="oauth-file" type="file" accept=".json,application/json"></label>
         </div>
         <div id="google-login" hidden>
+          <p id="permission-hint" class="hint" hidden></p>
           <button id="connect-account" type="button" class="secondary connect-button"><span data-icon="plus"></span><span>Connect Google account</span></button>
           <button id="change-client" type="button" class="text-button change-client" hidden>Change client file</button>
           <a id="continue-google" class="outside-link" target="_blank" rel="noopener noreferrer" hidden>Continue in your browser</a>
         </div>
         <form id="calendar-form" hidden>
-          <label>Calendar for new tasks<select id="target-calendar"></select></label>
+          <label id="target-field">Calendar for new tasks<select id="target-calendar"></select></label>
           <fieldset><legend>Check for conflicts on</legend><div id="calendar-list" class="calendar-list"></div></fieldset>
           <div class="dialog-actions"><button type="button" class="secondary close-dialog">Cancel</button><button type="submit" class="primary">Save calendars</button></div>
         </form>
+      </section>
+      <section id="agent-settings" class="form-body" aria-label="Task agent" hidden>
+        <form id="agent-form">
+          <label>Estimate tasks with<select id="agent-provider">
+            <option value="local">Local on this Mac</option>
+            <option value="codex">OpenAI via Codex</option>
+            <option value="gemini">Google Gemini</option>
+            <option value="claude">Anthropic via Claude Code</option>
+          </select></label>
+          <p id="agent-current" class="hint" hidden></p>
+          <div id="agent-account" class="agent-account" aria-live="polite">
+            <p id="agent-status" class="agent-status">Checking agent…</p>
+            <p id="agent-detail" class="hint" hidden></p>
+            <p id="agent-plan" class="hint" hidden></p>
+            <div class="agent-account-actions">
+              <a id="agent-install" class="outside-link" target="_blank" rel="noopener noreferrer" hidden>Install client</a>
+              <button id="agent-login" class="secondary" type="button" hidden>Sign in in Terminal</button>
+              <button id="agent-check" class="text-button" type="button" hidden>Check sign-in</button>
+            </div>
+            <p id="agent-login-notice" class="hint" hidden></p>
+          </div>
+          <label id="model-field" hidden>Model <span class="optional">Optional</span>
+            <input id="agent-model" list="agent-models" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="120" placeholder="Provider default">
+            <datalist id="agent-models"></datalist>
+            <span id="model-help" class="model-help">Choose a suggestion or enter a model ID. Leave blank for the provider default.</span>
+            <span id="agent-effort" class="model-help" hidden></span>
+          </label>
+          <p id="agent-sharing" class="hint" hidden></p>
+          <div class="dialog-actions"><button type="button" class="secondary close-dialog">Close</button><button id="agent-save" type="submit" class="primary" disabled>Save agent</button></div>
+        </form>
+        <section id="last-estimate" class="agent-usage" aria-labelledby="last-estimate-title">
+          <h3 id="last-estimate-title">Last estimate</h3>
+          <p id="agent-run" class="hint">Checking recent usage…</p>
+          <p id="agent-run-usage" class="hint" hidden></p>
+          <p id="agent-run-notice" class="hint" hidden></p>
+        </section>
       </section>
       <p id="settings-error" class="field-error dialog-error" role="alert" hidden></p>
     </div>
@@ -119,10 +165,11 @@
     <div class="dialog-heading"><div><p class="eyebrow">Task details</p><h2 id="task-heading">Edit task</h2></div><button class="icon-button close-dialog" aria-label="Close task details"><span data-icon="x"></span></button></div>
     <div class="dialog-scroll"><form id="task-form" class="form-body">
       <label>Task<textarea id="task-text" required maxlength="1000" rows="2"></textarea></label>
-      <div class="field-pair"><label>Duration in minutes<input id="task-minutes" type="number" min="1" max="1440" step="1" required></label><label>Type<select id="task-category" required></select></label></div>
+      <div id="task-estimate-fields" class="field-pair"><label>Duration in minutes<input id="task-minutes" type="number" min="1" max="1440" step="1" required></label><label>Type<select id="task-category" required></select></label></div>
       <label>Schedule on a day <span class="optional">Optional</span><input id="task-day" type="date"></label>
       <p id="estimate-reason" class="hint"></p>
-      <div id="task-status" class="task-status"></div>
+      <div id="task-status" class="task-status" aria-live="polite"></div>
+      <button type="button" id="retry-estimate" class="secondary" title="Request one estimate using the agent selected in Settings" hidden>Retry estimate</button>
       <p id="task-error" class="field-error" role="alert" hidden></p>
       <div class="dialog-actions"><button type="button" id="delete-task" class="text-button danger push-left" hidden>Delete task</button><button type="button" class="secondary close-dialog">Cancel</button><button type="submit" class="primary">Save task</button></div>
     </form></div>
