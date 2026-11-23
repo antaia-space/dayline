@@ -48,6 +48,7 @@ test('only the actual meeting name previews details in Day and Week, while keybo
     root.listeners.click({target:time,detail:1});
     assert.deepEqual(lookedUp,[]);
     hover(name); root.listeners.pointerout({target:name,relatedTarget:time}); t.mock.timers.tick(250);
+    hover(name); doc.listeners.pointerdown({target:join,pointerType:'touch'}); t.mock.timers.tick(250);
     assert.deepEqual(lookedUp,[]);
     hover(name); t.mock.timers.tick(250);
     root.listeners.click({target:title,detail:0});

@@ -3,7 +3,9 @@ import {
   hhmmMinutes, icon, instantMinutes, instantTime, weekdayNames, zonedDay
 } from "./ui.js";
 import { meetingCard, nonblockingMeeting, rangeOnDay } from "./meetings.js";
+import { groupOverlappingMeetings, meetingColumns } from "./meeting-columns.js";
 import { addOrderHandle } from "./task-order.js";
+import { timelineBlock } from "./current-time.js";
 import { overrunNote, taskChecklist } from "./subtasks.js";
 import { moveLaterButton, movedMarker, movesByDay } from "./task-moves.js";
 
@@ -313,21 +315,24 @@ export function renderWeek(state,{monday,selected,today,weekends,events = []}) {
     if (isToday) endControls.append(element("span","today-tag","Today"));
     head.append(jump,endControls);
     const body = element("div","day-body");
+    body.dataset.clockDay = day;
     const {meetings,anonymous} = calendar.get(day);
     const completed = tasksByDay.get(day).filter(task => !task.start && task.done);
     const entries = tasksByDay.get(day).filter(task => task.start).map(task => ({task,...rangeOnDay(task,day,zone)}));
-    for (const entry of [...entries,...meetings,...anonymous,...moves.get(day)].sort(entryOrder)) {
-      if (entry.task) body.append(taskRow(entry.task,state,day,"board"));
-      else if (entry.meeting) body.append(meetingCard(entry,day,false));
-      else if (entry.kind === "moved") body.append(movedMarker(entry,"board"));
+    for (const entry of groupOverlappingMeetings([...entries,...meetings,...anonymous,...moves.get(day)]).sort(entryOrder)) {
+      let row;
+      if (entry.task) row=taskRow(entry.task,state,day,"board");
+      else if (entry.kind === "overlap") row=meetingColumns(entry,day);
+      else if (entry.meeting) row=meetingCard(entry,day,false);
+      else if (entry.kind === "moved") row=movedMarker(entry,"board");
       else {
-        const row = element("div","week-busy");
+        row=element("div","week-busy");
         const time = entry.start === 0 && entry.end === 1440 ? "All day" : displayTime(entry.start) + "–" + displayTime(entry.end);
         row.append(element("span","","Calendar busy"),element("small","",time));
-        body.append(row);
       }
+      body.append(timelineBlock(row,entry));
     }
-    if (completed.length) body.append(completedSection(completed,day,"board"));
+    if (completed.length) body.append(timelineBlock(completedSection(completed,day,"board"),{kind:"banner"}));
     column.append(head,body);
     return column;
   });
@@ -426,6 +431,7 @@ export function agendaBlockSize(entry,day,zone) {
 
 export function renderAgenda(state,{monday,selected,today,events = []}) {
   const zone = state.settings.timeZone;
+  id("agenda").dataset.clockDay = selected;
   const days = Array.from({length:7},(_,i) => addDays(monday,i));
   const tasksByDay = groupWeek(state.tasks,days,zone);
   const moves = movesByDay(state.tasks,days,zone);
@@ -448,42 +454,46 @@ export function renderAgenda(state,{monday,selected,today,events = []}) {
   }
   const released = groupReleasedSlots(completed,entries,selected,zone);
   entries.push(...moves.get(selected));
-  entries.sort(entryOrder);
   summary(id("agenda-summary"),[...taskEntries.map((entry) => entry.task),...completed],meetings.length);
   if (!entries.length && !completed.length) {
     id("agenda").replaceChildren(element("p","agenda-empty",workday ? "No time blocks for this day." : "Outside your working days. No tasks are scheduled."));
     return;
   }
-  const rows = entries.map((entry) => {
+  const rows = groupOverlappingMeetings(entries).sort(entryOrder).map((entry) => {
     if (entry.kind === "moved") {
       const row = element("div","agenda-slot agenda-moved");
       row.append(element("span","agenda-start",instantTime(entry.move.start,entry.zone)),movedMarker(entry,"agenda"));
-      return row;
+      return timelineBlock(row,entry);
     }
     const row = element("div","agenda-slot");
-    const size = agendaBlockSize(entry,selected,zone);
-    row.style.setProperty("--agenda-block-height",size.minimumRem + "rem");
-    if (size.compact) row.classList.add("is-compact");
+    if (entry.kind !== "overlap") {
+      const size = agendaBlockSize(entry,selected,zone);
+      row.style.setProperty("--agenda-block-height",size.minimumRem + "rem");
+      if (size.compact) row.classList.add("is-compact");
+    }
     const fullBusyDay = entry.kind === "busy" && entry.start === 0 && entry.end === 1440;
     row.append(element("span","agenda-start",entry.task?.allDay || entry.meeting?.allDay || fullBusyDay ? "All day" : displayTime(entry.start)));
-    if (entry.kind === "task") row.append(agendaTask(entry,state,selected));
-    else if (entry.meeting) row.append(meetingCard(entry,selected,true));
+    if (entry.kind === "task") row.append(timelineBlock(agendaTask(entry,state,selected),entry));
+    else if (entry.kind === "overlap") row.append(timelineBlock(meetingColumns(entry,selected,meeting => agendaBlockSize(meeting,selected,zone)),entry));
+    else if (entry.meeting) row.append(timelineBlock(meetingCard(entry,selected,true),entry));
     else {
       const isBusy = entry.kind === "busy";
       const block = element("div","agenda-block " + (isBusy ? "agenda-busy" : "agenda-free") + (entry.kind === "elapsed" ? " is-elapsed" : ""));
       const verified = !state.connection.connected || (coverage && coverage.start <= entry.start && entry.end <= coverage.end);
       const title = isBusy ? "Calendar busy" : entry.kind === "elapsed" ? (verified ? "Earlier free time" : "Earlier availability unconfirmed") : verified ? "Unallocated work time" : "Availability unconfirmed";
       block.append(element("span","slot-title",title),element("span","slot-detail","Until " + displayTime(entry.end) + " · " + duration(entry.end - entry.start)));
-      row.append(block);
+      row.append(timelineBlock(block,entry));
     }
-    const nearby = released.matched.get(entry);
-    if (nearby) {
+    const nearby = entry.kind === "overlap"
+      ? entry.cells.flatMap(cell => released.matched.get(cell.entry) || [])
+      : released.matched.get(entry);
+    if (nearby?.length) {
       row.classList.add("has-completed");
       row.append(completedSection(nearby,selected,"agenda",zone));
     }
     return row;
   });
-  if (released.remaining.length) rows.push(completedSection(released.remaining,selected,"agenda"));
+  if (released.remaining.length) rows.push(timelineBlock(completedSection(released.remaining,selected,"agenda"),{kind:"banner"}));
   id("agenda").replaceChildren(...rows);
 }
 

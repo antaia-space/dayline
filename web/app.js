@@ -7,9 +7,11 @@ import { createAgentSettings, estimateSource } from "./agent.js";
 import { createComposer } from "./composer.js";
 import { createDurationControls } from "./duration.js";
 import { createTaskOrder } from "./task-order.js";
+import { createCurrentTime } from "./current-time.js";
 import { createMovePicker, nextMoveCheck } from "./task-moves.js";
 import { createSubtaskControls, overrunNote, restoreSubtaskCaret, subtaskCaret } from "./subtasks.js";
 import { createMeetingDetails, createMeetingFeed } from "./meetings.js";
+import { retainMeetingScroll } from "./meeting-columns.js";
 import { createCalendarUpdates } from "./calendar-updates.js";
 import { localRead,localWrite } from "./outbox.js";
 
@@ -53,6 +55,7 @@ const composer = createComposer({
 });
 const durationControls = createDurationControls({api,refresh,getState:() => state,notify:toast});
 const taskOrder = createTaskOrder({root:byId("planner"),api,refresh,getState:() => state,notify:toast,repaint:render});
+const currentTime = createCurrentTime({root:byId("planner"),getSettings:()=>state?.settings});
 const subtaskControls = createSubtaskControls({api,refresh,getState:() => state,repaint:render,editor:byId("editor-checklist")});
 const movePicker = createMovePicker({api,refresh,getState:() => state,notify:toast,focusMarker:slotId => {
   if (!slotId || document.querySelector("dialog[open]")) return;
@@ -158,6 +161,7 @@ async function refresh(force = false, forceMeetings = false) {
     const zone = next.settings.timeZone;
     const day = zonedDay(next.now || Date.now(),zone);
     state = next;
+    currentTime.sync(next.now ?? Date.now());
     state.busy ||= [];
     state.calendars ||= [];
     state.categories ||= [];
@@ -192,7 +196,7 @@ async function refresh(force = false, forceMeetings = false) {
       force ||= staged.changed;
     }
     displayedGeneration = generation;
-    const currentMinute = view === "day" && selectedDay === day ? Math.ceil(new Date(state.now || Date.now()).getTime()/60000) : null;
+    const currentMinute = view === "day" && selectedDay === day && currentTime.inFreeTime ? Math.ceil(new Date(state.now || Date.now()).getTime()/60000) : null;
     const connection = {...state.connection,lastSync:undefined};
     const paint = JSON.stringify([state.tasks,state.categories,state.settings,state.selectedAgent,state.busy,state.busyStart,state.busyEnd,connection,day,selectedDay,currentMinute]);
     if (force || lastPaint !== paint) {
@@ -234,6 +238,7 @@ function render() {
   const active = document.activeElement;
   const bookmark = active?.dataset.focus;
   const caret = subtaskCaret(active);
+  const restoreMeetingScroll = retainMeetingScroll(byId("planner"));
   const weekView = view === "week";
   const context = {monday,selected:selectedDay,today,weekends,events:meetings.update(state,monday).events};
   byId("view-week").setAttribute("aria-pressed",String(weekView));
@@ -262,6 +267,8 @@ function render() {
     byId("week-board").replaceChildren();
     renderAgenda(state,context);
   }
+  restoreMeetingScroll();
+  currentTime.rendered();
   renderBacklog(state);
   taskOrder.paint();
   durationControls.paint();

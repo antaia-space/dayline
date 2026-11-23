@@ -1,6 +1,7 @@
 import { DateTime } from 'luxon';
 import { durationInText, estimateTask, explicitStartFor } from './planner.mjs';
 import { localTaskTitle } from './task-learning.mjs';
+import { earliestPhrase } from './start-preference.mjs';
 
 const create = () => ({ kind: 'create' });
 const clarify = (reason, message, candidates = []) => ({ kind: 'clarify', reason, message, candidates });
@@ -130,6 +131,9 @@ const datePhrase = '(?:today|tomorrow|day after tomorrow|' + weekday + '|\\d{4}-
 const clock = '(?:midnight|noon|\\d{1,2}(?:[:.]\\d{2})?(?:\\s*[ap]\\.?m\\.?)?)';
 const dateFirst = new RegExp('^(?:on\\s+)?(' + datePhrase + ')(?:\\s*,?\\s+(?:at\\s+)?(' + clock + '))?$', 'i');
 const timeFirst = new RegExp('^(?:at\\s+)?(' + clock + ')(?:\\s+(?:on\\s+)?(' + datePhrase + '))?$', 'i');
+const priorityPlace = '(?:' + earliestPhrase + '|(?:the )?top(?: of (?:my |the )?(?:day|list|queue))?|(?:my |the )?first (?:task|priority)(?: of the day)?|first)';
+const firstCommand = new RegExp('^(move|put|place|schedule|reschedule|prioriti[sz]e|make) (.+?) (?:(to (?:be |go )?|for |as |at ))?' + priorityPlace + '(?: (?:on |for )?(' + datePhrase + '))?$', 'i');
+const firstOnDay = new RegExp('^(move|put|place|schedule|reschedule|prioriti[sz]e|make) (.+?) (to |for |on )(' + datePhrase + ') ' + priorityPlace + '$', 'i');
 const timeHint = /\b(?:today|tomorrow|yesterday|(?:next|this) (?:week|month)|monday|tuesday|wednesday|thursday|friday|saturday|sunday|later|earlier|noon|midnight|morning|afternoon|evening)\b|\d{4}-\d|\d[:.]\d|\d\s*[ap]m\b/i;
 
 function destination(value, context) {
@@ -226,6 +230,8 @@ function resolveTarget(query, action, changes, context, from) {
   const [task] = matches;
   if (protectedMeeting(task)) return clarify('protected', '“' + titleOf(task) + '” has a protected calendar reservation. Change it in Google Calendar.');
   if (task.held || task.intent || task.pausedSync?.intent) return clarify('protected', '“' + titleOf(task) + '” is waiting for its calendar reservation. Refresh the planner and try again.');
+  if (action === 'first' && (task.done || task.canReorder === false || task.pendingEstimate || task.estimateJob || explicitStartFor(task,context.timeZone) ||
+      (task.end && Date.parse(task.end) <= context.now.getTime()))) return clarify('protected', 'Choose an unfinished, flexible task to put first.');
   if (action === 'move' && task.done) return clarify('protected', 'Reopen “' + titleOf(task) + '” before moving it.');
   if (changes.deltaMinutes && Number.isSafeInteger(task.minutes) &&
       (!Number.isSafeInteger(task.minutes + changes.deltaMinutes) || task.minutes + changes.deltaMinutes < 1)) {
@@ -309,6 +315,17 @@ export function parsePlannerCommand(text, { tasks = [], now, timeZone = 'UTC', c
   let match;
   if (/^(?:move|reschedule|postpone|defer|shift|bump|push back|rename|reopen|uncheck|mark done)$/i.test(input)) {
     return clarify('missing-target', 'Include the task name and the change you want to make.');
+  }
+  const priorityRequest = input.replace(/^(?:I (?:want|need|would like)|I['’]d like) (.+?) to (?:be|go) (.+)$/i,'move $1 to $2')
+    .replace(/^(?:can|could) (.+?) (?:be|go) (.+)$/i,'move $1 to $2')
+    .replace(/^(.+?) (?:should|needs to|has to) (?:be|go) (.+)$/i,'move $1 to $2');
+  if ((match = firstOnDay.exec(priorityRequest) || firstCommand.exec(priorityRequest))) {
+    const [, verb, subject, connector, date] = match;
+    if (/^(?:prioriti[sz]e|reschedule)$/i.test(verb) || plannerNoun.test(subject) || matchTasks(subject,context).length ||
+        (connector && /^(?:move|put|place|make)$/i.test(verb))) {
+      const changes = date ? destination(date,context) : {};
+      return changes ? resolveTarget(subject,'first',changes,context) : invalidDate();
+    }
   }
   if ((match = /^(move|put|place|reorder|prioriti[sz]e)\s+(["“‘'].+?["”’']|.+?)\s+(?:(?:right|just|immediately)\s+)?(before|after|ahead of|behind)\s+(.+)$/i.exec(input))) {
     const [, verb, source, relation, target] = match;

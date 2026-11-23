@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {addOrderHandle,orderRequest} from '../web/task-order.js';
+import {addOrderHandle,orderDropTarget,orderRequest} from '../web/task-order.js';
 import {fittedDuration,freeTimeRows,renderAgenda,renderBacklog,renderWeek} from '../web/views.js';
 
 test('reorder controls send a same-list target and distinguish adjacent and long moves from no-ops', () => {
@@ -13,6 +13,21 @@ test('reorder controls send a same-list target and distinguish adjacent and long
     ['draft','fixed','before'],['meeting','notes','after'],['draft','email','sideways']
   ]) assert.equal(orderRequest(ids,source,target,placement,day),null);
   assert.deepEqual(ids,['draft','review','notes','email']);
+});
+
+test('the heading, top edge and main first-card area promote to first, while its lower edge inserts between the first two rows',()=>{
+  const rows=[{id:'quick',top:90,bottom:150},{id:'middle',top:200,bottom:240},{id:'last',top:320,bottom:380}],day='2026-11-23';
+  const first={placement:'first',day};
+  for (const [y,hit] of [[26,undefined],[89,undefined],[91,'quick'],[120,'quick'],[132,'quick']]) {
+    assert.deepEqual(orderDropTarget(rows,'last',day,y,hit).request,first);
+  }
+  assert.deepEqual(orderDropTarget(rows,'last',day,149,'quick').request,{targetId:'quick',placement:'after',day});
+  assert.deepEqual(orderDropTarget(rows,'last',day,180).request,{targetId:'middle',placement:'before',day});
+  assert.deepEqual(orderDropTarget(rows,'quick',day,225,'middle').request,{targetId:'middle',placement:'after',day});
+  assert.deepEqual(orderDropTarget(rows,'quick',day,390).request,{targetId:'last',placement:'after',day});
+  assert.equal(orderDropTarget(rows,'last',day,345,'last'),null);
+  assert.equal(orderDropTarget(rows,'different-day',day,75),null);
+  assert.deepEqual(orderDropTarget([rows[0]],'quick',day,25).request,first);
 });
 
 test('calendar-fit wording gives the planned and original durations only while the block is shorter', () => {
@@ -56,7 +71,7 @@ test('only server-authorized tasks render a named keyboard and pointer handle in
     assert.equal(grip.tag,'button');
     assert.equal(grip.attributes['aria-label'],'Reorder Prepare the outline');
     assert.equal(grip.attributes['aria-haspopup'],'menu');
-    assert.equal(grip.attributes['aria-keyshortcuts'],'ArrowUp ArrowDown');
+    assert.equal(grip.attributes['aria-keyshortcuts'],'ArrowUp ArrowDown Home');
     assert.equal(grip.dataset.focus,view+'-order-draft');
   }
 });

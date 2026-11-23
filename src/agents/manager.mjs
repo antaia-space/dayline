@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { DateTime } from 'luxon';
 import { CATEGORIES, estimateTask } from '../planner.mjs';
+import { onlyFlexibleTiming } from '../start-preference.mjs';
 import { localStatus, makeEstimator } from '../estimate.mjs';
 import { durationCalibration, localTaskTitle, validTaskTitle, verifiedTaskTitle } from '../task-learning.mjs';
 import { findCli, openProviderLogin } from './cli.mjs';
@@ -182,7 +183,7 @@ export class TaskAgents {
         const minutes = rules.explicitMinutes ? rules.minutes : proposal.minutes;
         const fixed = estimateTask(text, { ...context, estimatedMinutes: minutes });
         const knownDays = Boolean(fixed.earliestDay || fixed.latestDay);
-        const knownWindow = Boolean(fixed.windowStart || fixed.windowEnd);
+        const knownWindow = Boolean(fixed.windowStart || fixed.windowEnd || onlyFlexibleTiming(text));
         result = { ...rules, title: proposal.title, subtasks: proposal.subtasks, category: proposal.category, minutes, reason: rules.explicitMinutes ? rules.reason : proposal.reason.trim(),
           earliestDay: knownDays ? fixed.earliestDay : proposal.earliestDay,
           latestDay: knownDays ? fixed.latestDay : proposal.latestDay,

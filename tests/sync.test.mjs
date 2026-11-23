@@ -1015,6 +1015,20 @@ test('updated free/busy pulls owned flexible events to the first open minute in 
   assert.equal(h.google.insertRequests,2);
 });
 
+test('earliest available requests move ahead of owned flexible Google reservations without moving an external meeting',async () => {
+  const h = fixture();
+  const appointment = {calendarId:'home-primary',start:at('09:00'),end:at('09:15')};
+  h.google.meetings=[appointment];
+  const deck = await create(h,'Prepare the presentation today for 60 minutes');
+  assert.equal(deck.start,at('09:15'));
+  const call = await create(h,'Call hotel today for 10 minutes, as early in the day as possible');
+  assert.deepEqual([call.start,h.google.events.get(deck.remote.eventId).start],[at('09:15'),at('09:25')]);
+  assert.equal(h.google.events.get(call.remote.eventId).end,at('09:25'));
+  assert.deepEqual(h.google.meetings,[appointment]);
+  h.google.eventCalls=[]; await successfulSync(h.service);
+  assert.equal(h.google.eventCalls.filter(e=>e.method==='putTaskEvent').length,0); assert.equal(h.google.insertRequests,2);
+});
+
 async function fullDaySwap() {
   const h = fixture();
   h.service.updateSettings({endTime:'10:00'});

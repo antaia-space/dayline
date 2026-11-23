@@ -13,7 +13,7 @@ function operation(names, fields = {}) {
 }
 const operations = [
   operation(['update'], { day:nullableString, time:nullableString, minutes:nullableInteger, deltaMinutes:nullableInteger, title:nullableString }),
-  operation(['complete','reopen']),
+  operation(['complete','reopen','first']),
   operation(['order'], { other:string, placement:{type:'string',enum:['before','after']} }),
   operation(['subtask.add'], { title:string }),
   operation(['subtask.rename'], { subtask:string, title:string }),

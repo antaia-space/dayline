@@ -8,6 +8,7 @@ import { MeetingAgenda, meetingRange } from './meeting-agenda.mjs';
 import { CATEGORIES, estimateTask, explicitStartFor, findSlot, planningRange, resizedClockWindow } from './planner.mjs';
 import { executePlannerCommand, guardCommandCapture, protectedCommandAppointment, revisePlannerTask, settlePlannerClarification } from './planner-command-service.mjs';
 import { canMoveLocalTask, explicitSchedulingIssue, nextFlexibleSlot, planFlexibleSlots, planTaskSlots } from './priority.mjs';
+import { asksForEarliest, insertCapture, migrateEarlyNotes, putEarlyNote } from './start-preference.mjs';
 import { fullTaskMinutes } from './calendar-fit.mjs';
 import { releaseCompletedTime, reopenCompletedTask } from './completion.mjs';
 import { canMoveLater, checkMoveLater, movedFromCurrentSlot, publicMovedSlot, recordElapsedMove } from './moved-slots.mjs';
@@ -59,7 +60,7 @@ function capturedAt(value, fallback) {
 const completedBesideMeeting = task => task.done && task.remote?.calendarAppointment && task.completedPlannedSlot;
 
 function safeTask(task, now) {
-  const { remote, dirty, intent, pausedSync, lastLocalSlot, held, deleting, estimateJob, estimateOverrides, orderRequestedAt, subtaskEdits, subtaskRequests,
+  const { remote, dirty, intent, pausedSync, lastLocalSlot, held, deleting, estimateJob, estimateOverrides, orderRequestedAt, startOrder, subtaskEdits, subtaskRequests,
     estimateRequestedAt, estimateRetryIds, estimateRemoteTitle, durationRequests, durationCheckPending, overrunWatchStart, commandEventPending, commandMovedAt, movedSlots, ...visible } = task;
   const text = estimateJob?.text ?? task.text;
   const active = task.estimateState === 'queued' || task.estimateState === 'estimating';
@@ -240,6 +241,8 @@ export class DaylineService {
       if (!Array.isArray(task.subtasks)) { updateSubtasks(task); migrated = true; }
       if (task.done && this.releaseCompletion(task, now)) migrated = true;
     }
+    const ordered = migrateEarlyNotes(this.data.tasks, this.data.settings.timeZone, now);
+    if (ordered !== this.data.tasks) { this.data.tasks = ordered; migrated = true; }
     if (this.data.accounts.length && this.data.settings.calendarMode === 'availability' && !this.data.tasks.some(task => task.overrunWatchStart)) {
       const observed = observeOverrun(this.data.tasks, now);
       if (observed.some((task, i) => task !== this.data.tasks[i])) { this.data.tasks = observed; migrated = true; }
@@ -355,32 +358,36 @@ export class DaylineService {
     return !task.remote || this.movableFlexibleEvent(task, now);
   }
 
-  reorderedTaskList(taskId, { targetId, placement, day }) {
-    if (!['before', 'after'].includes(placement) || typeof targetId !== 'string' || !/^[a-f0-9]{32}$/.test(targetId) || taskId === targetId) {
+  reorderedTaskList(taskId, { targetId, placement, day }, requestedDay) {
+    const first = placement === 'first' && targetId == null;
+    if (!first && (!['before', 'after'].includes(placement) || typeof targetId !== 'string' || !/^[a-f0-9]{32}$/.test(targetId) || taskId === targetId)) {
       throw invalid('Choose another task to move this one before or after.');
     }
     const task = this.findTask(taskId);
-    const target = this.findTask(targetId);
+    const target = first ? null : this.findTask(targetId);
     const now = this.clock();
     const taskDay = item => item.start ? DateTime.fromISO(item.start, { zone: this.data.settings.timeZone }).toISODate() : 'unscheduled';
-    const group = taskDay(task);
-    if ((day != null && day !== group) || taskDay(target) !== group) throw invalid('The schedule changed. Choose two tasks in the same day or in Unscheduled.', 409);
-    if (!this.canReorderTask(task, now) || !this.canReorderTask(target, now)) throw invalid('These tasks can no longer be rearranged. Refresh your plan.', 409);
+    const group = requestedDay || taskDay(task);
+    if ((day != null && day !== group) || (target && taskDay(target) !== group)) throw invalid('The schedule changed. Choose tasks in the same day or in Unscheduled.', 409);
+    if (!this.canReorderTask(task, now) || (target && !this.canReorderTask(target, now))) throw invalid('These tasks can no longer be rearranged. Refresh your plan.', 409);
 
     // Only reorder members of the displayed group. Requests from the desktop
     // and browser share this serialized list, including tasks captured meanwhile.
-    const members = this.data.tasks.filter(item => taskDay(item) === group && this.canReorderTask(item, now));
+    const members = this.data.tasks.filter(item => (item === task || taskDay(item) === group || (first && !item.start &&
+      item.earliestDay === group && item.latestDay === group)) && this.canReorderTask(item, now));
     const reordered = members.filter(item => item !== task);
-    reordered.splice(reordered.indexOf(target) + (placement === 'after' ? 1 : 0), 0, task);
-    const later = placement === 'after' ? task : target;
-    const displaced = later.start && Date.parse(later.start) < now.getTime() && !later.remote ? later : null;
-    if (reordered.every((item, i) => members[i] === item) && !displaced) return this.data.tasks;
+    reordered.splice(first ? 0 : reordered.indexOf(target) + (placement === 'after' ? 1 : 0), 0, task);
+    const later = first ? (members[0] !== task && members[0]) : placement === 'after' ? task : target;
+    const displaced = later?.start && Date.parse(later.start) < now.getTime() && !later.remote ? later : null;
+    const startOrder = first ? 'first' : 'manual';
+    if (reordered.every((item, i) => members[i] === item) && !displaced && (!first || task.startOrder === startOrder)) return this.data.tasks;
     const indices = new Map(members.map((item, i) => [item, i]));
     return this.data.tasks.map(original => {
       if (!indices.has(original)) return original;
       const item = reordered[indices.get(original)];
       if (item !== task && item !== displaced) return item;
       const changed = { ...item, orderRequestedAt: now.toISOString() };
+      changed.startOrder = item === task ? startOrder : 'manual';
       if (item === displaced) {
         // The user explicitly deferred an unfinished block. Its full remaining
         // estimate returns to the queue and will start in a new verified slot.
@@ -397,9 +404,9 @@ export class DaylineService {
 
   reorderTask(taskId, input) {
     const proposed = this.reorderedTaskList(taskId, input);
-    if (proposed !== this.data.tasks) {
+    if (proposed !== this.data.tasks || (!this.data.accounts.length && input.placement === 'first')) {
       if (this.data.accounts.length) this.commitTaskList(proposed);
-      else this.persistLocalPlan(proposed, true);
+      else this.persistLocalPlan(proposed, proposed !== this.data.tasks);
     }
     return { id: taskId };
   }
@@ -528,12 +535,9 @@ export class DaylineService {
       taskId: task.id, ...(input.captureAgent != null && { selection: this.captureSelection(input.captureAgent, task.createdAt) }) });
     applyEstimate(task, estimate, task.estimateOverrides, input.captureTimeZone || this.data.settings.timeZone);
     if (task.pendingEstimate) waitForEstimate(task);
-    if (!this.data.accounts.length) {
-      this.persistLocalPlan([...this.data.tasks, task]);
-      return task.id;
-    }
-    this.data.tasks.push(task);
-    this.store.save();
+    const proposed = insertCapture(this.data.tasks, task, this.data.settings.timeZone);
+    if (!this.data.accounts.length) this.persistLocalPlan(proposed);
+    else this.commitTaskList(proposed);
     return task.id;
   }
 
@@ -545,10 +549,9 @@ export class DaylineService {
     this.stageEstimate(task, task.text, false, { at: task.createdAt, timeZone: input.captureTimeZone, agent: this.captureSelection(input.captureAgent, task.createdAt) });
     const priorCommand = input.forceCreate === true && this.data.plannerCommands?.[task.id];
     if (priorCommand) delete this.data.plannerCommands[task.id];
-    this.data.tasks.push(task);
-    try { this.store.save(); }
+    const proposed = insertCapture(this.data.tasks, task, this.data.settings.timeZone);
+    try { this.commitTaskList(proposed); }
     catch (error) {
-      this.data.tasks.splice(this.data.tasks.indexOf(task), 1);
       if (priorCommand) this.data.plannerCommands[task.id] = priorCommand;
       throw error;
     }
@@ -899,10 +902,21 @@ export class DaylineService {
   }
 
   commitEdit(task, changed) {
-    if (!this.data.accounts.length) return this.persistLocalPlan(this.data.tasks.map(t => t === task ? changed : t));
+    let proposed = this.data.tasks.map(t => t === task ? changed : t);
+    if (task.text !== changed.text || (changed.startOrder === 'pending-note' && !changed.pendingEstimate)) {
+      const wantsEarly = asksForEarliest(changed.text);
+      if (wantsEarly && (changed.startOrder === 'pending-note' || !asksForEarliest(task.text)) && !changed.done && !protectedCommandAppointment(changed) &&
+          !explicitStartFor(changed, this.data.settings.timeZone)) {
+        if (changed.pendingEstimate) changed.startOrder = 'pending-note';
+        else {
+          proposed = putEarlyNote(proposed, changed, this.data.settings.timeZone);
+          if (this.data.accounts.length) return this.commitTaskList(proposed);
+        }
+      } else if (changed.startOrder === 'pending-note' || (!wantsEarly && changed.startOrder === 'note')) delete changed.startOrder;
+    }
+    if (!this.data.accounts.length) return this.persistLocalPlan(proposed);
     if (changed.done !== task.done && this.data.settings.calendarMode === 'availability' && this.busyRange && !this.error) {
       const now = this.clock();
-      const proposed = this.data.tasks.map(t => t === task ? changed : t);
       const covers = range => range && Date.parse(range.start) >= Date.parse(this.busyRange.start) && Date.parse(range.end) <= Date.parse(this.busyRange.end);
       const verified = new Set(proposed.filter(t => covers(planningRange({ task: t, settings: this.data.settings, now })) &&
         (!t.start || covers(t)) && (!t.lastLocalSlot || covers(t.lastLocalSlot))));

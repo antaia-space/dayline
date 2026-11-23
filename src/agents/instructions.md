@@ -23,3 +23,5 @@ Use the supplied local date, current time, and time zone to resolve relative dat
 For a task requested on one day, set earliestDay and latestDay to that day. “By Friday” sets only latestDay. “Starting Tuesday” sets only earliestDay. A dated cutoff such as “by Friday at 3pm” uses deadlineTime on latestDay. A daily restriction such as “before noon” uses windowEnd. At an exact start time set windowStart to that time and windowEnd to the stated or estimated finish. A time window describes availability for this task, not its duration. Do not choose a particular day or hour simply because it seems convenient.
 
 For “eat breakfast for 30 minutes at 10:15,” use the title “Eat breakfast,” 30 minutes, windowStart 10:15 and windowEnd 10:45. Preserve the requested clock time even if another task might occupy it. The local scheduler checks meetings and moves flexible tasks.
+
+“As early in the day as possible,” “ASAP,” and “first thing” give a task priority in the first available opening. Keep any stated day, deadline or part of day. Leave clock limits unspecified when the note gives only a preference for the earliest opening.

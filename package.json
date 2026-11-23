@@ -1,7 +1,7 @@
 {
   "name": "antaia-dayline",
   "productName": "Dayline",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "private": true,
   "description": "A private, local-first weekly task planner for Antaia.",
   "author": "Antaia",

@@ -74,7 +74,7 @@ function linkTo(value,label,className,accessible) {
   return a;
 }
 
-export function meetingCard(entry,day,agenda) {
+export function meetingCard(entry,day,agenda,showStart = false) {
   const event = entry.meeting;
   const name = event.title || "Calendar busy";
   const row = element("div",agenda ? "agenda-block meeting-card agenda-meeting" : "meeting-card week-meeting");
@@ -86,7 +86,7 @@ export function meetingCard(entry,day,agenda) {
   title.setAttribute("aria-haspopup","dialog"); title.setAttribute("aria-expanded","false");
   title.setAttribute("aria-controls","meeting-popover");
   const meta = element("div","meeting-meta");
-  const time = event.allDay ? "All day" : (agenda ? "Until " + displayTime(entry.end) : displayTime(entry.start) + "–" + displayTime(entry.end));
+  const time = event.allDay ? "All day" : (agenda && !showStart ? "Until " + displayTime(entry.end) : displayTime(entry.start) + "–" + displayTime(entry.end));
   meta.append(element("span","",time + (nonblockingMeeting(event) ? " · Free" : "")));
   const join = linkTo(event.joinUrl,"Join","meeting-join","Join " + name);
   if (join) { join.dataset.focus = title.dataset.focus + "-join"; meta.append(join); }
@@ -248,6 +248,7 @@ export function createMeetingDetails({root,find,zone,authorized = () => true}) {
     if (!painting && !panel.contains(event.relatedTarget) && !trigger(event.relatedTarget)) close();
   });
   document.addEventListener("pointerdown",event => {
+    clearTimeout(timer);
     if (anchor && !panel.contains(event.target) && !nameAt(event.target)) close();
   });
   document.addEventListener("keydown",event => {

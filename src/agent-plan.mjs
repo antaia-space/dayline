@@ -9,7 +9,7 @@ export { createPlanContext };
 
 const clock = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const fields = new Map(Object.entries({
-  update:['day','time','minutes','deltaMinutes','title'], complete:[], reopen:[], order:['other','placement'],
+  update:['day','time','minutes','deltaMinutes','title'], complete:[], reopen:[], first:[], order:['other','placement'],
   'subtask.add':['title','done'], 'subtask.rename':['subtask','title'], 'subtask.remove':['subtask'], 'subtask.check':['subtask','done'],
 }));
 const reject = message => { throw Object.assign(new Error(message), { status:409 }); };
@@ -198,6 +198,11 @@ function stage(service, plan) {
   const today = DateTime.fromISO(plan.at,{zone:plan.captureZone}).toISODate();
   for (const [i,action] of plan.actions.entries()) {
     const binding = plan.targets[action.task], task = view.findTask(binding.id);
+    if (action.op === 'first') {
+      view.data.tasks = view.reorderedTaskList(task.id,{placement:'first'},moved.has(task.id) ? task.estimateOverrides?.day : undefined);
+      steps.push('Give ' + display(label(task)) + ' the earliest available time.');
+      continue;
+    }
     if (action.op === 'order') {
       if (moved.size && !service.data.accounts.length) view.data.tasks = view.plannedTasks(view.data.tasks,[],now);
       const target = view.findTask(plan.targets[action.other].id);
@@ -257,8 +262,8 @@ export function previewAgentPlan(service, body, context, actions, agent) {
     const ids = aliases.map(alias => b.targets[alias].id);
     checkSubjects(b,ids);
     if (b.group) plan.scope = b.scope;
-    const orderGroups = new Set(plan.actions.filter(action => action.op === 'order')
-      .flatMap(action => [b.targets[action.task].orderGroup,b.targets[action.other].orderGroup]));
+    const orderGroups = new Set(plan.actions.filter(action => action.op === 'order' || action.op === 'first')
+      .flatMap(action => action.other ? [b.targets[action.task].orderGroup,b.targets[action.other].orderGroup] : [b.targets[action.task].orderGroup]));
     if (orderGroups.size) plan.order = Object.fromEntries([...orderGroups].map(group => [group,b.orderByGroup[group] || null]));
     plan.targets = Object.fromEntries(aliases.map(alias => {
       const {id,version,subtasks,evidence} = b.targets[alias];

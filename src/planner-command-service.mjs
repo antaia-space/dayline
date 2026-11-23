@@ -101,6 +101,7 @@ function describe(action, changes, tasks, zone, connected, target) {
   if (action === 'reopen') return 'Reopened ' + subject + '.';
   if (action === 'rename') return 'Renamed the task to ' + subject + '.';
   if (action === 'order') return 'Placed ' + subject + ' ' + changes.placement + ' “' + titleOf(target) + '” in the task order.';
+  if (action === 'first') return 'Requested the earliest available time' + (changes.day ? ' on ' + DateTime.fromISO(changes.day,{zone}).toFormat('ccc, LLL d') : '') + ' for ' + subject + '.';
   if (action === 'duration') return tasks.length === 1 ? 'Set ' + subject + ' to ' + tasks[0].minutes + ' minutes.' : 'Updated the duration of ' + subject + '.';
   const day = DateTime.fromISO(changes.day, { zone }).toFormat('ccc, LLL d');
   const when = day + (changes.time ? ' at ' + changes.time : '');
@@ -240,8 +241,14 @@ export function executePlannerCommand(service, input, { interpretedText } = {}) 
   const now = service.clock();
   let tasks;
   try {
-    tasks = parsed.action === 'order' ? service.reorderedTaskList(targets[0].id, parsed.changes)
-      : service.data.tasks.map(task => ids.has(task.id) ? revise(service,task,parsed.action,parsed.changes,learning,now) : task);
+    if (parsed.action === 'first') {
+      const view = Object.create(service);
+      const requestedDay = parsed.changes.day;
+      if (requestedDay) view.data = { ...service.data, tasks:service.data.tasks.map(task => ids.has(task.id) ?
+        revise(service,task,'move',parsed.changes,learning,now) : task) };
+      tasks = view.reorderedTaskList(targets[0].id,{placement:'first'},requestedDay);
+    } else if (parsed.action === 'order') tasks = service.reorderedTaskList(targets[0].id, parsed.changes);
+    else tasks = service.data.tasks.map(task => ids.has(task.id) ? revise(service,task,parsed.action,parsed.changes,learning,now) : task);
   } catch (error) {
     if (![400, 404, 409].includes(error.status) && !(error instanceof RangeError)) throw error;
     return persist(service, item, clarification(service, { reason:'invalid-change', message:error.message }));

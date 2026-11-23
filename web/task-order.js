@@ -14,7 +14,7 @@ export function addOrderHandle(row,task,day,view) {
   handle.setAttribute("aria-haspopup","menu");
   handle.setAttribute("aria-expanded","false");
   handle.setAttribute("aria-controls","task-order-menu");
-  handle.setAttribute("aria-keyshortcuts","ArrowUp ArrowDown");
+  handle.setAttribute("aria-keyshortcuts","ArrowUp ArrowDown Home");
   const dots = element("span","grip-dots");
   dots.setAttribute("aria-hidden","true");
   handle.append(dots);
@@ -28,15 +28,35 @@ export function orderRequest(ids,id,targetId,placement,day) {
   return {targetId,placement,day};
 }
 
+// The agenda is chronological. Its first visible row may be a meeting, and
+// the first task that fits in a short gap may have a lower saved priority.
+// The absolute request lets the scheduler choose its earliest legal opening.
+export function orderDropTarget(rows,sourceId,day,y,hitId) {
+  if (!rows.length || !Number.isFinite(y) || !rows.some(row => row.id === sourceId)) return null;
+  const first = {id:rows[0].id,placement:"before",request:{placement:"first",day}};
+  if (y < rows[0].top) return first;
+  const hit = rows.find(row => row.id === hitId);
+  if (hit?.id === sourceId) return null;
+  if (hit && hit.id === rows[0].id && y < hit.top + (hit.bottom-hit.top)*.72) return first;
+  const others = rows.filter(row => row.id !== sourceId);
+  if (!others.length) return null;
+  const target = hit || others.find(row => y < (row.top + row.bottom)/2) || others.at(-1);
+  const placement = y < (target.top + target.bottom)/2 ? "before" : "after";
+  if (target.id === rows[0].id && placement === "before") return first;
+  return {id:target.id,placement,request:{targetId:target.id,placement,day}};
+}
+
 export function createTaskOrder({root,api,refresh,getState,notify,repaint}) {
-  let open = null, drag = null, marked = null, pending = false, deferred = false;
+  let open = null, drag = null, dragOrigin = null, surface = null, marked = null, pending = false, deferred = false;
+  const topTarget = element("div","order-top-target","Move to top");
+  topTarget.setAttribute("aria-hidden","true");
   const menu = element("div","order-menu");
   menu.id = "task-order-menu";
   menu.hidden = true;
   menu.setAttribute("role","menu");
   menu.setAttribute("aria-label","Task order");
-  const choices = [-1,1].map(step => {
-    const text = step < 0 ? "Move earlier" : "Move later";
+  const choices = ["first",-1,1].map(step => {
+    const text = step === "first" ? "Move to top" : step < 0 ? "Move earlier" : "Move later";
     const choice = button("order-choice","order-step",text,text);
     choice.dataset.step = String(step);
     choice.setAttribute("role","menuitem");
@@ -54,12 +74,13 @@ export function createTaskOrder({root,api,refresh,getState,notify,repaint}) {
     const task = source && state?.tasks.find(t => t.id === source.id);
     return task?.canReorder && (task.start ? zonedDay(task.start,state.settings.timeZone) : "unscheduled") === source.day;
   }
-  function group(source) {
-    return rows().map(describe).filter(item => sameGroup(item,source) && eligible(item)).map(item => item.id);
+  function groupRows(source) {
+    return rows().filter(row => sameGroup(describe(row),source) && eligible(describe(row)));
   }
-  function stepRequest(source,step) {
+  function stepRequest(source,direction) {
     if (!source) return null;
-    const ids = group(source), index = ids.indexOf(source.id);
+    if (direction === "first") return {placement:"first",day:source.day};
+    const step = Number(direction), ids = groupRows(source).map(row => row.dataset.orderItem), index = ids.indexOf(source.id);
     return orderRequest(ids,source.id,ids[index+step],step < 0 ? "before" : "after",source.day);
   }
   function focusHandle(source) {
@@ -88,37 +109,36 @@ export function createTaskOrder({root,api,refresh,getState,notify,repaint}) {
     menu.style.top = Math.max(4,above ? rect.top - box.height - 4 : rect.bottom + 4) + "px";
     menu.style.left = Math.max(4,Math.min(rect.left,window.innerWidth-box.width-4)) + "px";
     handle.setAttribute("aria-expanded","true");
-    for (const choice of choices) choice.disabled = !stepRequest(open,Number(choice.dataset.step));
+    for (const choice of choices) choice.disabled = !stepRequest(open,choice.dataset.step);
     if (focused?.disabled) choices.find(choice => !choice.disabled)?.focus({preventScroll:true});
   }
   function paint() {
-    const all = rows(), totals = new Map();
-    for (const row of all) {
-      const source = describe(row), key = source.view + ":" + source.day;
-      if (eligible(source)) totals.set(key,(totals.get(key) || 0) + 1);
-    }
-    for (const row of all) {
+    for (const row of rows()) {
       const handle = row.querySelector(handleSelector);
-      const key = row.dataset.orderView + ":" + row.dataset.orderDay;
-      handle.disabled = pending || !eligible(describe(row)) || (totals.get(key) || 0) < 2;
-      handle.draggable = !handle.disabled;
-      handle.title = pending ? "Updating task order" : handle.disabled ? "No other movable task in this list" : "Drag to reorder, or use the up and down arrow keys";
+      handle.disabled = pending || !eligible(describe(row));
+      row.draggable = handle.draggable = !handle.disabled;
+      handle.title = pending ? "Updating task order" : "Drag to reorder. Use Home to move to the top, or the arrow keys to move one place.";
     }
     positionMenu();
   }
   function clearMark() {
     if (marked) delete marked.dataset.drop;
+    delete topTarget.dataset.active;
     marked = null;
   }
   function endDrag() {
     if (!drag) return;
     locate(drag)?.classList.remove("is-dragging");
+    topTarget.remove();
+    surface = null;
+    dragOrigin = null;
     drag = null;
     clearMark();
     if (deferred) { deferred = false; repaint(); }
   }
   async function move(source,request) {
-    if (!request || pending || !eligible(source) || !orderRequest(group(source),source.id,request.targetId,request.placement,source.day)) return;
+    if (!request || pending || !eligible(source) || request.day !== source.day) return;
+    if (request.placement !== "first" && !groupRows(source).some(row => row.dataset.orderItem === request.targetId && request.targetId !== source.id)) return;
     const canRestore = !document.activeElement || document.activeElement === document.body || root.contains(document.activeElement);
     pending = true;
     closeMenu();
@@ -154,7 +174,7 @@ export function createTaskOrder({root,api,refresh,getState,notify,repaint}) {
       positionMenu();
       choices.find(choice => !choice.disabled)?.focus({preventScroll:true});
     } else if (event.target.closest('[data-action="order-step"]') && open) {
-      void move(open,stepRequest(open,Number(event.target.closest("button").dataset.step)));
+      void move(open,stepRequest(open,event.target.closest("button").dataset.step));
     }
   });
   root.addEventListener("keydown",event => {
@@ -162,6 +182,15 @@ export function createTaskOrder({root,api,refresh,getState,notify,repaint}) {
     if (event.key === "Escape") {
       if (open) { event.preventDefault(); closeMenu(true); }
       if (drag) endDrag();
+      return;
+    }
+    if (event.key === "Home" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+      if (menu.contains(event.target)) { event.preventDefault(); choices[0].focus(); }
+      else if (handle && !handle.disabled) {
+        event.preventDefault();
+        const source = describe(handle.closest(rowSelector));
+        if (!event.repeat) void move(source,stepRequest(source,"first"));
+      }
       return;
     }
     const step = event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0;
@@ -183,24 +212,42 @@ export function createTaskOrder({root,api,refresh,getState,notify,repaint}) {
   document.addEventListener("focusin",dismissOutside);
   window.addEventListener("resize",positionMenu);
   window.addEventListener("scroll",positionMenu,true);
+  root.addEventListener("pointerdown",event => {
+    const row = event.target.closest(rowSelector);
+    if (!row) { dragOrigin = null; return; }
+    const control = event.target.closest("button,a,input,select,textarea,summary,[contenteditable=true]");
+    const allowed = !control || control.matches(handleSelector) || control.dataset.action === "edit-task";
+    dragOrigin = {row,allowed};
+  },true);
   root.addEventListener("dragstart",event => {
-    const handle = event.target.closest(handleSelector);
-    if (!handle || handle.disabled || !event.dataTransfer) return;
-    const row = handle.closest(rowSelector);
+    const row = event.target.closest(rowSelector);
+    if (!row || !event.dataTransfer) return;
+    const source = describe(row);
+    if (pending || !eligible(source) || (dragOrigin?.row === row && !dragOrigin.allowed)) { event.preventDefault(); return; }
+    surface = row.closest(".day-column, #day-section, #backlog");
+    const list = row.closest(".day-body, #agenda, .tray-list");
+    if (!surface || !list) { event.preventDefault(); return; }
     closeMenu();
-    drag = describe(row);
+    drag = source;
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("application/x-dayline-task",drag.id);
     event.dataTransfer.setDragImage(row,Math.min(24,row.offsetWidth/2),Math.min(16,row.offsetHeight/2));
     row.classList.add("is-dragging");
+    list.prepend(topTarget);
   });
   function dropAt(event) {
-    const row = event.target.closest(rowSelector), target = describe(row);
-    if (!drag || !sameGroup(drag,target) || !eligible(drag) || !eligible(target)) return null;
-    const bounds = row.getBoundingClientRect();
-    const placement = event.clientY < bounds.top + bounds.height/2 ? "before" : "after";
-    const request = orderRequest(group(drag),drag.id,target.id,placement,drag.day);
-    return request && {row,request};
+    if (!drag || !surface?.contains(event.target) || event.target.closest("#agenda-strip") || !eligible(drag)) return null;
+    if (topTarget.contains(event.target)) return {row:topTarget,request:{placement:"first",day:drag.day}};
+    const rows = groupRows(drag).filter(row => row.getClientRects().length);
+    const positions = rows.map(row => {
+      const slot = row.closest(".agenda-slot") || row;
+      const {top,bottom} = slot.getBoundingClientRect();
+      return {id:row.dataset.orderItem,top,bottom,owns:slot.contains(event.target)};
+    });
+    const target = orderDropTarget(positions,drag.id,drag.day,event.clientY,positions.find(p => p.owns)?.id);
+    if (!target) return null;
+    const row = target.request.placement === "first" ? topTarget : rows.find(r => r.dataset.orderItem === target.id);
+    return {row,request:target.request};
   }
   root.addEventListener("dragover",event => {
     if (!drag) return;
@@ -210,7 +257,8 @@ export function createTaskOrder({root,api,refresh,getState,notify,repaint}) {
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
     marked = target.row;
-    marked.dataset.drop = target.request.placement;
+    if (marked === topTarget) topTarget.dataset.active = "true";
+    else marked.dataset.drop = target.request.placement;
   });
   root.addEventListener("dragleave",event => { if (marked && !marked.contains(event.relatedTarget)) clearMark(); });
   root.addEventListener("drop",event => {

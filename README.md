@@ -36,12 +36,15 @@ An Internal client accepts accounts in the Google Workspace organization that ow
 
 For an **External** client in **Testing**, open **Google Auth Platform → Audience → Test users → Add users**. Add the exact addresses you will connect, save, and start a fresh sign-in from Dayline for each one. Google expires the calendar authorization after seven days in this mode. [Google’s OAuth token guidance](https://developers.google.com/identity/protocols/oauth2#expiration)
 
+To publish the external client, upload the 120 × 120 Dayline PNG under **Branding → App logo**, then select **Audience → Publish app**. After the client reaches **In production**, reconnect each account in Dayline to obtain a new calendar authorization. Google reviews external production branding before displaying the logo to everyone. [Dayline logo](docs/dayline-google-logo.png) · [Google’s branding guidance](https://support.google.com/cloud/answer/15549049?hl=en)
+
 To distribute a build with the company’s Desktop client already configured, set the environment variable `DAYLINE_GOOGLE_CLIENT_FILE` to the JSON file’s local path when running the Mac packaging command. Each teammate still signs in to Google. Keep the downloaded file out of source control.
 
 ## Plan a task
 
 - Press **Enter** to capture a task and keep typing. Dayline saves each entry on your Mac, then creates a short title and estimates the work in the background. Open the task to see your original wording or edit the title. Changing just the title uses no model quota.
 - **“Draft a proposal by Friday”** lets Dayline estimate the duration and choose an opening before the deadline. **“Call Morgan for 20 minutes tomorrow afternoon”** sets the duration and narrows the search to tomorrow afternoon.
+- **“Call the hotel tomorrow morning for 10 minutes, as early as possible”** puts the call first among flexible tasks in that morning’s plan. Dayline finds the first opening long enough, within working hours and around fixed appointments.
 - **“Eat breakfast for 30 minutes at 10:15”** reserves 10:15–10:45 on the requested day. Two queued thirty-minute tasks can then start at 10:45 and 11:15, leaving fifteen minutes before a noon meeting. An overlapping meeting, an existing fixed task, or working hours can prevent an exact booking. The task shows the conflict in **Unscheduled**.
 - In **Day agenda**, a task without a date in its text uses the day you are viewing. Choose a date in the entry field to pin the task to that day, or choose **Auto-schedule** to let Dayline find the next opening. Queued tasks keep their dates across reloads and restarts.
 - When an unfinished task’s scheduled time has passed, select **Move to…** and choose a later day. A compact **Moved** entry at the original time links to the destination. The task carries its checklist and duration with it. If that day has no opening, the link takes you to the task in **Unscheduled**.
@@ -61,9 +64,13 @@ The day you’re viewing helps identify the task, including when your wording us
 
 ### Reorder the day
 
-Drag the grip on the left edge of a flexible task to place it above or below another task in its day. The five-minute controls stay at the right edge. You can also click or tap the grip and choose **Move earlier** or **Move later**, or focus it and use the up and down arrow keys. The same controls let you prioritize tasks in **Unscheduled**. The desktop and browser save one order. Working hours, time windows, fixed tasks and Google meetings determine where that order fits.
+Drag the grip on the left edge of a flexible task to the top of its day, or drop it above or below another task. You can also click the grip and choose **Move to top**, **Move earlier** or **Move later**. With the grip focused, press **Home** to move to the top or use the up and down arrow keys to move one place. The same controls let you prioritize tasks in **Unscheduled**. The desktop and browser save one order. Working hours, time windows, fixed tasks and Google meetings determine where that order fits.
 
 Dayline packs flexible work into the earliest available slots and replans when a meeting appears, moves or disappears. Already-queued work can start at the end of the preceding block when a refresh comes a few minutes later and that task would still be underway. A newly entered task starts from its capture time or later. Short blocks in the day agenda take less vertical space than long ones.
+
+Overlapping meetings appear side by side in **Day agenda** and **Week**. Meetings with the same start line up. A later start appears lower in its column. Each meeting has its own details and join link when one is available.
+
+In today’s plan, a red dot and line show the current time in your planner’s time zone. The line advances every minute through the scheduled block. An outline identifies the task currently underway.
 
 Checking off a task before its scheduled start frees the whole slot. The day agenda shows the checked item beside the block that takes its place, or below it on a narrow screen. The checked line uses a short display title. Open it for the full wording, checklist and original time. Several completions in the same slot share an expandable line. Items without a matching time appear under **Completed** on their original day. Finishing a task during its slot releases the unused portion. Reopen it to schedule the unfinished work again.
 
