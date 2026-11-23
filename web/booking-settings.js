@@ -204,7 +204,7 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
     visit.href = href;
     visit.target = "_blank";
     visit.rel = "noopener noreferrer";
-    visit.title = label;
+    visit.dataset.tip = label;
     visit.setAttribute("aria-label",label);
     visit.append(icon("external"));
     return visit;
@@ -214,7 +214,7 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
   function iconButton(symbol,label,onClick) {
     const control = element("button","icon-button booking-icon");
     control.type = "button";
-    control.title = label;
+    control.dataset.tip = label;
     control.setAttribute("aria-label",label);
     control.append(icon(symbol));
     if (onClick) control.addEventListener("click",onClick);
@@ -247,7 +247,7 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
     const off = type.active === false;
     const menu = element("details","booking-menu");
     const opener = element("summary","icon-button booking-icon booking-more");
-    opener.title = "More for " + type.title;
+    opener.dataset.tip = "More";
     opener.setAttribute("aria-label","More for " + type.title);
     opener.append(icon("more"));
     const list = element("div","booking-menu-list");
@@ -292,7 +292,7 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
     const copyLink = action("secondary","Copy link","link");
     copyLink.setAttribute("aria-label","Copy the link for " + type.title);
     copyLink.disabled = !href;
-    copyLink.title = href || why;
+    if (!href) copyLink.dataset.tip = why;
     copyLink.addEventListener("click",() => copy(href,copyLink));
     actions.append(book,share,copyLink,pageLink(href,"external","Preview the booking page for " + type.title,why),typeMenu(type,index));
     card.append(main,actions);

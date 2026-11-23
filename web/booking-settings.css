@@ -57,9 +57,23 @@
 .booking-icon { flex: none; width: 2.2rem; height: 2.2rem; display: inline-grid; place-items: center; color: var(--muted); border-radius: .39rem; cursor: pointer; list-style: none; }
 .booking-icon::-webkit-details-marker { display: none; }
 .booking-icon:hover { color: var(--accent-dark); background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); }
-.booking-icon:disabled { opacity: .4; cursor: default; background: none; box-shadow: none; color: var(--muted); }
+.booking-icon:disabled { cursor: default; background: none; box-shadow: none; color: var(--muted); }
+.booking-icon:disabled .icon { opacity: .4; }
 .booking-icon .icon { width: 1.1rem; height: 1.1rem; }
 .booking-more .icon { stroke-width: 2.8; }
+/* What a control does, shown the moment the pointer or the keyboard reaches it. */
+.bookings [data-tip] { position: relative; }
+.bookings [data-tip]::after {
+  content: attr(data-tip); position: absolute; z-index: 7; inset-block-start: calc(100% + .4rem); inset-inline-start: 50%; transform: translateX(-50%);
+  inline-size: max-content; max-inline-size: 18rem; padding: .3rem .55rem; border-radius: .34rem; background: var(--ink); color: var(--paper);
+  font: 500 .76rem/1.35 var(--sans); letter-spacing: 0; text-align: start; white-space: normal; pointer-events: none; visibility: hidden;
+}
+.bookings [data-tip]:hover::after, .bookings [data-tip]:focus-visible::after { visibility: visible; }
+.bookings .booking-menu[open] > [data-tip]::after { visibility: hidden; }
+/* The last controls of a row sit near the edge: their hint opens leftwards. */
+.booking-row-actions > :nth-last-child(-n+2)[data-tip]::after, .booking-row-actions > .booking-menu > [data-tip]::after, .booking-link > [data-tip]::after {
+  inset-inline: auto 0; transform: none;
+}
 .booking-card.is-off { border-inline-start-color: var(--line); }
 .booking-card.is-off .booking-card-main strong { color: var(--quiet); }
 .booking-menu { position: relative; }
