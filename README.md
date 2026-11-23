@@ -126,6 +126,18 @@ Give people a link where they pick a time with you. The meeting lands in your Go
 4. Switch on **Offer booking links**.
 5. Each meeting type is a card with its own link. Choose **Copy link** on a card and send it. The link of your whole page, at the top, lists the types of every address that are not **Hidden**. Your page is at `https://dayline-calendar.antaia-space.workers.dev/` followed by the part of your Antaia address before the `@`.
 
+Each card carries the actions for its meeting type:
+
+| On the card | What it does |
+| --- | --- |
+| Calendar with a plus | **Book a meeting for someone.** Opens the type’s public page; pick the time and enter their name and email address. |
+| Arrow | **Share.** Shows the link and a short text with a few of your next free times, ready to paste into an email. |
+| **Copy link** | Copies the type’s link. |
+| Square with an arrow | **Preview.** Opens the public page as a guest sees it. |
+| Three dots | **Edit**, **Duplicate**, **Turn off** or **Turn on**, and **Delete**. A type that is off is not published; its link stops answering until you turn it on. |
+
+These need **Offer booking links** switched on and a published page. Until then they are greyed out and say why.
+
 Whichever address a guest books, every calendar you check for conflicts blocks time. A meeting booked with one address is busy time for the others.
 
 Select a card to edit that meeting type in the panel on the right, or choose **New meeting type** in an address’s section. The panel holds the address it is booked with, the title, the link name, the length, how many days ahead it can be booked and with how much notice, how often a start time is offered, and the gap kept around your other meetings. Under **Weekly hours** a type follows your working hours, or keeps its own: choose **Custom hours for this type**, mark the days and set a start and an end for each. **Save changes** applies it at once. A **Hidden** type is left off your page; only people with its link can book it. **Notes may be copied to the company wiki** decides the first three characters of the event’s ID: `bkb` when on, `bkp` when off. The meeting-notes job in `antaia-brain` reads that prefix and never copies notes of `bkp` meetings.

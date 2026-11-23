@@ -275,6 +275,23 @@ test('each address has its own meeting types, and a booking lands in the calenda
   assert.equal(google.bookings.size, 1);
 });
 
+test('a meeting type that is switched off is not published and cannot be booked', async () => {
+  const { service, google } = await ready();
+  const types = defaultBooking().types;
+  updateBooking(service, { types: types.map(type => ({ ...type, active: type.slug !== 'meeting' })) });
+  assert.deepEqual(service.data.booking.types.map(type => type.active), [true, false, true, true]);
+  const { page } = await bookingSnapshot(service, now);
+  assert.deepEqual(page.types.map(type => type.slug), ['intro', 'deep-dive', 'private']);
+  assert.deepEqual(Object.keys(page.slots), ['intro', 'deep-dive', 'private']);
+  // A request that was already waiting for it is refused, not created.
+  assert.equal((await settleBooking(service, request(at('10:00')), { pageUrl, now })).reason, 'unavailable');
+  assert.equal(google.bookings.size, 0);
+  // With every type off the page says so instead of offering an empty list as if it were a busy week.
+  updateBooking(service, { types: types.map(type => ({ ...type, active: false })) });
+  const none = await bookingSnapshot(service, now);
+  assert.deepEqual([none.page.paused, none.page.types], ['off', []]);
+});
+
 test('requests are checked again on the Mac, whatever the receiver says', async () => {
   const { service, google } = await ready();
   const refused = async (extra, reason) => assert.equal((await settleBooking(service, request(at('10:00'), extra), { pageUrl, now })).reason, reason, JSON.stringify(extra));

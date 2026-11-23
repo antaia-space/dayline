@@ -130,6 +130,11 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
       if (req.method === 'GET' && pathname === '/api/booking') {
         return send(res, 200, 'application/json', JSON.stringify(bookingView()));
       }
+      // The next free start times of one meeting type, as last published, to paste into an email.
+      const bookingTimes = req.method === 'GET' && /^\/api\/booking\/times\/([a-z0-9][a-z0-9-]{0,39})$/.exec(pathname);
+      if (bookingTimes) {
+        return send(res, 200, 'application/json', JSON.stringify({ slots: (desk.slots[bookingTimes[1]] ?? []).slice(0, 400) }));
+      }
       if (req.method === 'GET' && pathname === '/api/agent' && agents) {
         const details = await agents.status(url.searchParams.get('provider') ?? undefined);
         return send(res, 200, 'application/json', JSON.stringify({ ...details, durationNotes: durationNotes(service.data) }));

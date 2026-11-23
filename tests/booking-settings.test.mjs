@@ -9,9 +9,21 @@ import { developmentVault, openStore } from '../src/store.mjs';
 import { DaylineService } from '../src/service.mjs';
 import { startServer } from '../src/http.mjs';
 
-import { daysLabel, hoursLabel } from '../web/booking-settings.js';
+import { daysLabel, hoursLabel, timesText } from '../web/booking-settings.js';
 
 const webRoot = fileURLToPath(new URL('../web/', import.meta.url));
+
+test('sharing offers a few of the next free times as text for an email', () => {
+  const at = (day, time) => Date.parse('2026-11-' + day + 'T' + time + ':00Z');
+  const slots = [at(24, '09:00'), at(24, '09:30'), at(24, '10:00'), at(24, '10:30'), at(25, '14:00'), at(26, '08:00'), at(27, '08:00')];
+  const link = 'https://book.example.invalid/urs/meeting';
+  assert.equal(timesText(slots, { timeZone: 'UTC', link, title: 'Meeting', minutes: 30 }),
+    'Here are some times that work for a 30 min Meeting (UTC time):\n\nTue 24 Nov: 09:00, 09:30, 10:00\nWed 25 Nov: 14:00\nThu 26 Nov: 08:00\n\n' +
+    'Pick one of these or any other free time here:\n' + link);
+  // Times follow the planner's zone, not the Mac's.
+  assert.match(timesText([at(24, '17:00')], { timeZone: 'America/Los_Angeles', link, title: 'Deep dive', minutes: 60 }), /1 hr Deep dive \(America\/Los Angeles time\):\n\nTue 24 Nov: 09:00\n/);
+  assert.match(timesText([], { timeZone: 'UTC', link, title: 'Meeting', minutes: 30 }), /^No free times are published.*\n\nBook here: https:\/\/book/);
+});
 
 test('a meeting type card says in one line when the type can be booked', () => {
   assert.equal(daysLabel(['mon', 'tue', 'wed', 'thu', 'fri']), 'Mon–Fri');
@@ -39,6 +51,9 @@ test('booking settings load, validate and save for a paired planner only', async
   assert.equal((await write('/api/booking', 'PATCH', { enabled: false }, { cookie, Origin: 'https://elsewhere.example' })).status, 403);
   const first = await read();
   assert.deepEqual([first.enabled, first.status.state, first.addresses, first.notices, first.upcoming], [false, 'off', [], [], []]);
+  // Free times for sharing: paired planner only, and empty until a page is published.
+  assert.equal((await fetch(app.origin + '/api/booking/times/meeting')).status, 401);
+  assert.deepEqual(await (await fetch(app.origin + '/api/booking/times/meeting', { headers: { cookie } })).json(), { slots: [] });
   assert.deepEqual(first.types.map(type => type.slug), ['intro', 'meeting', 'deep-dive', 'private']);
   assert.deepEqual((await (await fetch(app.origin + '/api/state', { headers: { cookie } })).json()).booking, { enabled: false, notices: 0 });
 
