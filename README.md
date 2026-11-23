@@ -4,6 +4,8 @@ Dayline finds time for your to-do list. Write a task in plain English and it est
 
 ![An example week in Dayline with nine tasks across five working days](docs/example-week.png)
 
+If you are an AI agent setting this up or changing it for someone, read [AGENTS.md](AGENTS.md) first.
+
 ## Using Dayline outside Antaia
 
 Dayline was built for Antaia’s team. The code is public so others can run it, with these limits today.
