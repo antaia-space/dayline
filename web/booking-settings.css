@@ -35,6 +35,12 @@
 .booking-section-bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .8rem; }
 .booking-heading { margin: 0 0 .5rem; font: 600 .76rem/1.4 var(--sans); letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
 .booking-section-bar .booking-heading { margin: 0; }
+/* One section per Google address people can book. */
+.booking-address { min-width: 0; display: grid; gap: .15rem; }
+.booking-address-email { font: 500 1.35rem/1.25 var(--serif); letter-spacing: -.015em; overflow-wrap: anywhere; }
+.booking-section > .booking-access { margin: 0 0 .8rem; }
+.form-body label.booking-calendar:not(.file-button) { max-width: 26rem; margin: 0 0 .9rem; }
+.booking-connect { margin-top: 1.6rem; }
 .booking-cards { list-style: none; margin: 0; padding: 0; display: grid; gap: .7rem; }
 .booking-card { display: flex; align-items: center; gap: 1rem; padding: .95rem 1.1rem .95rem 1.2rem; background: var(--surface); border: 1px solid var(--line); border-inline-start: .34rem solid var(--accent); border-radius: .6rem; }
 .booking-card.is-hidden { border-inline-start-color: var(--rule); }

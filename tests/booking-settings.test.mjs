@@ -38,13 +38,13 @@ test('booking settings load, validate and save for a paired planner only', async
   assert.equal((await fetch(app.origin + '/api/booking')).status, 401);
   assert.equal((await write('/api/booking', 'PATCH', { enabled: false }, { cookie, Origin: 'https://elsewhere.example' })).status, 403);
   const first = await read();
-  assert.deepEqual([first.enabled, first.status.state, first.calendars, first.notices, first.upcoming], [false, 'off', [], [], []]);
+  assert.deepEqual([first.enabled, first.status.state, first.addresses, first.notices, first.upcoming], [false, 'off', [], [], []]);
   assert.deepEqual(first.types.map(type => type.slug), ['intro', 'meeting', 'deep-dive', 'private']);
   assert.deepEqual((await (await fetch(app.origin + '/api/state', { headers: { cookie } })).json()).booking, { enabled: false, notices: 0 });
 
   // Switching on needs a name and a calendar; nothing is saved by a refused change.
   const refused = await write('/api/booking', 'PATCH', { enabled: true, owner: { name: 'Urs Wilcke', headline: 'Antaia' } });
-  assert.deepEqual([refused.status, (await refused.json()).error], [400, 'Choose the calendar that receives booked meetings.']);
+  assert.deepEqual([refused.status, (await refused.json()).error], [400, 'Connect a Google account under Settings → Calendars first.']);
   assert.equal((await read()).owner.name, '');
 
   const types = [{ ...first.types[1], title: 'Working session', durationMin: 45, notesToWiki: false }];

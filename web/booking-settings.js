@@ -156,39 +156,23 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
     line.setAttribute("role","status");
     box.append(line);
 
-    const chosen = view.calendars.find(choice => choice.id === view.calendarId);
     const details = element("details","booking-page-settings");
-    details.open = pageOpen || !view.owner.name || !chosen || !chosen.access;
+    details.open = pageOpen || !view.owner.name;
     details.addEventListener("toggle",() => { pageOpen = details.open; });
     const summary = element("summary","","Page settings");
-    summary.append(element("span","booking-type-facts",[view.owner.name || "No name yet",chosen ? chosen.name + " — " + chosen.accountEmail : "No calendar chosen"].join(" · ")));
+    summary.append(element("span","booking-type-facts",[view.owner.name || "No name yet",view.owner.headline].filter(Boolean).join(" · ")));
     const form = element("form");
     const name = input("text",view.owner.name,{maxlength:"100",autocomplete:"name"});
     const headline = input("text",view.owner.headline,{maxlength:"100"});
     const names = element("div","field-pair");
     names.append(field("Name guests see",name),field("Headline",headline));
-    const calendar = element("select");
-    if (!view.calendars.length) calendar.append(new Option("Connect a Google account under Settings → Calendars first",""));
-    else if (!view.calendarId) calendar.append(new Option("Choose a calendar",""));
-    for (const choice of view.calendars) calendar.append(new Option(choice.name + " — " + choice.accountEmail,choice.id,false,choice.id === view.calendarId));
     const save = element("button","secondary","Save page settings");
     save.type = "submit";
     form.addEventListener("submit",event => {
       event.preventDefault();
-      const changes = {owner:{name:name.value.trim(),headline:headline.value.trim()}};
-      if (calendar.value) changes.calendarId = calendar.value;
-      void send(changes,"Page settings saved.");
+      void send({owner:{name:name.value.trim(),headline:headline.value.trim()}},"Page settings saved.");
     });
-    form.append(names,field("Bookings go to",calendar));
-    if (chosen && !chosen.access) {
-      const note = element("div","booking-access");
-      note.append(element("p","hint","Dayline needs permission to add events to " + chosen.accountEmail + " before it can create booked meetings. Your tasks stay local."));
-      const allow = element("button","secondary","Allow booked meetings");
-      allow.type = "button";
-      allow.addEventListener("click",() => connect(allow,{mode:"booking",accountSub:chosen.sub}));
-      note.append(allow);
-      form.append(note);
-    }
+    form.append(names);
     const actions = element("div","dialog-actions");
     actions.append(save);
     form.append(actions);
@@ -237,10 +221,11 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
     if (panel?.open) panel.close();
   }
 
-  function openPanel(index) {
+  // `sub` is the address whose section a new type is created in.
+  function openPanel(index,sub) {
     const isNew = index < 0;
-    const type = isNew ? {slug:"",title:"",description:"",durationMin:30,slotStepMin:30,bufferMin:15,minNoticeMin:720,maxDaysAhead:45,hidden:false,notesToWiki:true,hours:null}
-      : structuredClone(view.types[index]);
+    const type = isNew ? {slug:"",title:"",description:"",durationMin:30,slotStepMin:30,bufferMin:15,minNoticeMin:720,maxDaysAhead:45,hidden:false,notesToWiki:true,hours:null,
+      accountSub:sub ?? view.addresses[0]?.sub ?? null} : structuredClone(view.types[index]);
     panel?.remove();
     panel = element("dialog","booking-panel");
     panel.setAttribute("aria-label",isNew ? "New meeting type" : "Meeting type " + type.title);
@@ -269,6 +254,10 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
     slug.addEventListener("input",() => { slugTouched = true; });
     const base = view.status.url ? view.status.url.replace(/^https:\/\//,"") + "/" : "your page/";
     const description = input("text",type.description,{maxlength:"300"});
+    // The meeting lands in this address's calendar and Google invites the guest from it.
+    const address = element("select");
+    for (const choice of view.addresses) address.append(new Option(choice.email,choice.sub,false,choice.sub === type.accountSub));
+    address.disabled = view.addresses.length < 2;
 
     const duration = number(type.durationMin,5,480,"5");
     duration.setAttribute("list","booking-lengths");
@@ -325,6 +314,7 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
 
     form.append(
       section("Name",field("Title",title),field("Link",slug,base + (type.slug || "…")),field("Description",description)),
+      view.addresses.length ? section("Booked with",field("Google address",address,"The meeting lands in this address’s calendar, and Google invites the guest from it.")) : "",
       section("Duration",field("Length (min)",duration),lengths),
       section("Location",element("p","booking-fixed","Google Meet. Each booking gets its own link, sent in Google’s invitation.")),
       section("Availability",range,pair(field("Offer a start every (min)",step),field("Gap between meetings (min)",gap)),field("Weekly hours",schedule),week,zoneNote),
@@ -371,7 +361,7 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
       }
       const next = {slug:slug.value.trim(),title:title.value.trim(),description:description.value.trim(),durationMin:Number(duration.value),
         slotStepMin:Number(step.value),bufferMin:Number(gap.value),minNoticeMin:Math.round(Number(notice.value) * 60),maxDaysAhead:Number(ahead.value),
-        hidden:hidden.box.checked,notesToWiki:wiki.box.checked,hours};
+        hidden:hidden.box.checked,notesToWiki:wiki.box.checked,hours,...(type.accountSub && {accountSub:address.value || type.accountSub})};
       const types = isNew ? [...view.types,next] : view.types.map((known,i) => i === index ? next : known);
       save.disabled = true;
       if (await send({types},isNew ? "Meeting type created." : "Meeting type saved.")) closePanel();
@@ -398,7 +388,8 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
       for (const meeting of view.upcoming) {
         const row = element("li","booking-type");
         const text = element("div","booking-type-text");
-        text.append(element("strong","",meeting.type + " with " + meeting.name),element("span","booking-type-facts",meeting.email));
+        text.append(element("strong","",meeting.type + " with " + meeting.name),
+          element("span","booking-type-facts",[meeting.email,view.addresses.length > 1 && meeting.address && "booked with " + meeting.address].filter(Boolean).join(" · ")));
         row.append(text,element("span","booking-when",day.format(meeting.start) + " · " + time.format(meeting.start) + "–" + time.format(meeting.end)));
         list.append(row);
       }
@@ -430,16 +421,42 @@ export function createBookingSettings({api,toast,fail,connect,zone,settings,onCh
 
   function render() {
     if (!view) { root.replaceChildren(element("p","hint","Loading your booking page…")); return; }
-    const types = element("section","booking-section");
-    const bar = element("div","booking-section-bar");
-    const create = action("primary","New meeting type","plus");
-    create.addEventListener("click",() => openPanel(-1));
-    create.disabled = view.types.length >= 20;
-    bar.append(element("h2","booking-heading","Meeting types"),create);
-    const cards = element("ul","booking-cards");
-    view.types.forEach((type,index) => cards.append(typeCard(type,index)));
-    types.append(bar,cards);
-    const parts = [pageBox(),types];
+    // One section per connected Google address, each with its own meeting types and links.
+    const sectionFor = address => {
+      const part = element("section","booking-section");
+      const bar = element("div","booking-section-bar");
+      const create = action("secondary","New meeting type","plus");
+      create.addEventListener("click",() => openPanel(-1,address?.sub));
+      create.disabled = view.types.length >= 20;
+      const heading = element("div","booking-address");
+      heading.append(element("h2","booking-heading",address ? "Meeting types for" : "Meeting types"));
+      if (address) heading.append(element("strong","booking-address-email",address.email));
+      bar.append(heading,create);
+      part.append(bar);
+      if (address && !address.access) {
+        const note = element("div","setup-box booking-access");
+        note.append(element("p","hint","Dayline needs permission to add events to " + address.email + " before people can book you with it. Your tasks stay local."));
+        const allow = element("button","secondary","Allow booked meetings");
+        allow.type = "button";
+        allow.addEventListener("click",() => connect(allow,{mode:"booking",accountSub:address.sub}));
+        note.append(allow);
+        part.append(note);
+      } else if (address && address.calendars.length > 1) {
+        const calendar = element("select");
+        for (const choice of address.calendars) calendar.append(new Option(choice.name,choice.id,false,choice.id === address.calendarId));
+        calendar.addEventListener("change",() => void send({calendars:{[address.sub]:calendar.value}},"Calendar saved."));
+        const row = field("Bookings go to",calendar);
+        row.classList.add("booking-calendar");
+        part.append(row);
+      }
+      const cards = element("ul","booking-cards");
+      view.types.forEach((type,index) => { if (!address || type.accountSub === address.sub) cards.append(typeCard(type,index)); });
+      part.append(cards.children.length ? cards : element("p","hint","No meeting types for this address yet. People cannot book you with it."));
+      return part;
+    };
+    const parts = [pageBox()];
+    if (view.addresses.length) parts.push(...view.addresses.map(sectionFor));
+    else parts.push(element("p","hint booking-connect","Connect a Google account under Settings → Calendars. Meeting types are then grouped by the address people book you with."),sectionFor(null));
     if (view.enabled) parts.push(upcomingList());
     if (view.notices.length) parts.push(noticeList());
     parts.push(element("p","hint booking-privacy","The public page shows your name, these meeting types and the start times that are free. Meeting details, tasks and Google access stay on this Mac."));
