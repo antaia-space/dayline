@@ -519,7 +519,7 @@ async function allowBookedMeetings(control,options) {
   } catch (error) { errorAt("booking-error",error.message); }
   finally { control.disabled = false; }
 }
-const bookingSettings = createBookingSettings({api,toast,connect:allowBookedMeetings,zone:() => state?.settings.timeZone,
+const bookingSettings = createBookingSettings({api,toast,connect:allowBookedMeetings,zone:() => state?.settings.timeZone,settings:() => state?.settings,
   fail:message => errorAt("booking-error",message),
   onChange:() => { byId("booking-google").hidden = true; void refresh(true); }});
 window.addEventListener("focus",() => { if (bookingsOpen) void bookingSettings.refresh(); });

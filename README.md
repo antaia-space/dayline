@@ -120,15 +120,18 @@ Closing the Mac window keeps Dayline listening for calendar changes. After quitt
 
 Give people a link where they pick a time with you. The meeting lands in your Google Calendar with a Google Meet link, and Google sends the invitation. Your Google Calendar is the only store of bookings: a booking is a calendar event.
 
-1. Connect your Antaia Google account under **Settings → Calendars**. Then open the **Bookings** tab, beside **Week** and **Day agenda**, and enter the **Name guests see** and choose a calendar under **Bookings go to**.
-2. Tick **Offer booking links** and choose **Save booking**. If Dayline may not yet add events to that account, choose **Allow booked meetings** and approve event access in Google. This permission is separate from **Sync tasks as calendar events**: your tasks stay local unless you turn that on too.
-3. Copy the link of your page, or of one meeting type, and send it. Your page is at `https://dayline-calendar.antaia-space.workers.dev/` followed by the part of your Antaia address before the `@`.
+1. Connect your Antaia Google account under **Settings → Calendars**. Then open the **Bookings** tab, beside **Week** and **Day agenda**. Under **Page settings**, enter the **Name guests see**, choose a calendar under **Bookings go to** and choose **Save page settings**.
+2. If Dayline may not yet add events to that account, choose **Allow booked meetings** and approve event access in Google. This permission is separate from **Sync tasks as calendar events**: your tasks stay local unless you turn that on too.
+3. Switch on **Offer booking links**.
+4. Each meeting type is a card with its own link. Choose **Copy link** on a card and send it, or copy the link of your whole page at the top. Your page is at `https://dayline-calendar.antaia-space.workers.dev/` followed by the part of your Antaia address before the `@`.
 
-Under **Meeting types** you set each type’s title, link name, length, how often a start time is offered, the gap kept around your other meetings, the minimum notice and how many days ahead it can be booked. A **Hidden** type is left off your page; only people with its link can book it. **Notes may be copied to the company wiki** decides the first three characters of the event’s ID: `bkb` when on, `bkp` when off. The meeting-notes job in `antaia-brain` reads that prefix and never copies notes of `bkp` meetings.
+Select a card to edit that meeting type in the panel on the right, or choose **New meeting type**. The panel holds the title, the link name, the length, how many days ahead it can be booked and with how much notice, how often a start time is offered, and the gap kept around your other meetings. Under **Weekly hours** a type follows your working hours, or keeps its own: choose **Custom hours for this type**, mark the days and set a start and an end for each. **Save changes** applies it at once. A **Hidden** type is left off your page; only people with its link can book it. **Notes may be copied to the company wiki** decides the first three characters of the event’s ID: `bkb` when on, `bkp` when off. The meeting-notes job in `antaia-brain` reads that prefix and never copies notes of `bkp` meetings.
+
+Below the cards, **Upcoming booked meetings** lists who booked what, read from your Google Calendar.
 
 ### Which times are offered
 
-Dayline offers start times inside your working hours, on the calendars you check for conflicts. It reads those calendars as busy or free only. A private account you connected blocks time, and its events are never read for booking.
+Dayline offers start times inside your working hours, or inside a meeting type’s own weekly hours, on the calendars you check for conflicts. It reads those calendars as busy or free only. A private account you connected blocks time, and its events are never read for booking.
 
 A task with an exact time in its text, such as “at 10:15”, blocks that time. Other tasks do not: a booking is a meeting, and Dayline replans flexible tasks around it. If a calendar cannot be read, your page offers no times until it can. Offering times blind could double-book you.
 
@@ -151,7 +154,7 @@ Antaia’s receiver on Cloudflare serves the page. It stores the following, per 
 
 | Data | Fields | Kept until |
 | --- | --- | --- |
-| Page profile | The name guests see and the headline | Your next change. Deleted when you untick **Offer booking links**, and after 30 days without contact from your Mac |
+| Page profile | The name guests see and the headline | Your next change. Deleted when you switch off **Offer booking links**, and after 30 days without contact from your Mac |
 | Meeting types | Title, link name, description, length, gap, minimum notice, days ahead, hidden or not | Same |
 | Free times | For each type, the start times that are free, and when they were published | Replaced whenever your availability changes and at least every 5 minutes while Dayline runs. Not offered after 72 hours |
 | Waiting request | Request ID, meeting type, start, and the guest’s name, email address, time zone and notes | Deleted when your Mac has answered. If it never does, after 7 days |
