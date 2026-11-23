@@ -38,6 +38,7 @@ function numberFrom(text) {
 
 function durationInText(source) {
   const normalized = source.toLowerCase()
+    .replace(/\bminuten\b/g, 'minutes').replace(/\b(?:stunden?|std)\b/g, 'hours')
     .replace(/(\d)\s*½/g, '$1.5').replace(/½/g, '0.5')
     .replace(/three[- ]quarters?(?: of)? (?:an? )?hour/g, '45 minutes')
     .replace(/\b(?:a )?quarter(?: of)?[- ](?:an? )?hour\b/g, '15 minutes')
@@ -146,8 +147,8 @@ function dateConstraints(text, today) {
   let latestDay = null;
   let deadlineTime = null;
   const consumedClocks = [];
-  const precedingClock = new RegExp('\\b(?:by|due(?: by)?|before|no later than)\\s+(' + clockPattern + ')\\s+(?:on\\s+)?$', 'i');
-  const followingClock = new RegExp('^\\s*,?\\s*(?:(?:at|by|before|until)\\s+(' + clockPattern + ')(?![\\w:-])|(morning|afternoon|evening)\\b)', 'i');
+  const precedingClock = new RegExp('\\b(?:by|due(?: (?:at|by))?|deadline(?: (?:at|by))?|until|before|no later than)\\s+(' + clockPattern + ')\\s+(?:on\\s+)?$', 'i');
+  const followingClock = new RegExp('^\\s*,?\\s*(?:(?:(?:at|by|before|until)\\s+(' + clockPattern + ')|(' + bareClockPattern + '))' + clockEnd + '|(morning|afternoon|evening)\\b)', 'iu');
   for (const match of text.matchAll(new RegExp(dateWords, 'gi'))) {
     const phrase = match[0].toLowerCase();
     // Bare “week” in “a week of research” does not name a scheduling date.
@@ -157,7 +158,7 @@ function dateConstraints(text, today) {
     const before = text.slice(0, match.index).toLowerCase();
     const clockBefore = before.match(precedingClock);
     const since = /\b(?:from|starting(?: on)?|after|not before|no earlier than)\s*$/.test(before);
-    const due = !since && (Boolean(clockBefore) || /\b(?:by|due(?:\s+(?:on|by))?|no later than|until|through|before)\s+(?:the\s+)?$/.test(before)
+    const due = !since && (Boolean(clockBefore) || /\b(?:by|(?:due|deadline)(?:\s+(?:on|by|is))?|no later than|until|through|before)\s+(?:the\s+)?$/.test(before)
       || /^(?:within|end of|eod|cob)/.test(phrase) || (earliestDay && /\bto\s*$/.test(before)));
     if (!due) {
       const day = first.plus({ days: /\bafter\s*$/.test(before) ? 1 : 0 }).toISODate();
@@ -174,7 +175,7 @@ function dateConstraints(text, today) {
     }
     if (clockAfter) {
       const periodEnd = { morning: 720, afternoon: 1020, evening: 1440 };
-      const time = clockAfter[1] ? clockMinute(clockAfter[1]) : periodEnd[clockAfter[2].toLowerCase()];
+      const time = clockAfter[1] || clockAfter[2] ? clockMinute(clockAfter[1] || clockAfter[2]) : periodEnd[clockAfter[3].toLowerCase()];
       cutoff = Math.min(cutoff ?? 1440, time);
       consumedClocks.push([end, end + clockAfter[0].length]);
     }
@@ -194,7 +195,33 @@ function dateConstraints(text, today) {
   return { earliestDay, latestDay, deadlineTime, flexibleText };
 }
 
-const clockPattern = '(?:noon|midnight|(?:[01]?\\d|2[0-3])(?:[.:][0-5]\\d)?\\s*(?:[ap]\\.?\\s*m\\.?)?)';
+const hourPattern = '(?:[01]?\\d|2[0-3])';
+const meridiem = '[ap]\\.?\\s*m\\.?';
+const clockPattern = '(?:noon|midnight|' + hourPattern + '(?:[.:][0-5]\\d)?(?:\\s*' + meridiem + ')?)';
+// An unlabelled integer or decimal might be a quantity, a date or a version.
+const bareClockPattern = '(?:noon|midnight|' + hourPattern + '(?::[0-5]\\d(?:\\s*' + meridiem + ')?|\\s*' + meridiem + '))';
+const clockStart = '(?<![\\p{L}\\p{N}_.:/])';
+const clockEnd = '(?![\\p{L}\\p{N}_:/]|\\.\\d)';
+const bareClock = new RegExp('^' + bareClockPattern + '$', 'i');
+const clocks = new RegExp(clockStart + '(' + clockPattern + ')' + clockEnd, 'giu');
+const ranges = new RegExp(clockStart + '(?:(between|from)\\s+)?(' + clockPattern + ')\\s*(and|or|to|until|[-–—])\\s*(' + clockPattern + ')' + clockEnd, 'giu');
+
+const germanTimeWords = {
+  heute: 'today', morgen: 'tomorrow', übermorgen: 'day after tomorrow',
+  montag: 'monday', dienstag: 'tuesday', mittwoch: 'wednesday', donnerstag: 'thursday',
+  freitag: 'friday', samstag: 'saturday', sonntag: 'sunday',
+  vormittags: 'morning', nachmittags: 'afternoon', abends: 'evening',
+  um: 'at', ab: 'no earlier than', nach: 'after', vor: 'before', bis: 'until',
+  gegen: 'around', frühestens: 'no earlier than', spätestens: 'no later than',
+  zwischen: 'between', von: 'from', und: 'and',
+};
+const germanTimeWord = new RegExp('(?<!\\p{L})(?:' + Object.keys(germanTimeWords).join('|') + ')(?!\\p{L})', 'giu');
+
+function schedulingText(text) {
+  return text.replace(/\b(\d{1,2})(?:[.:]([0-5]\d))?\s*uhr\b/gi, (_, hour, minute) => hour.padStart(2, '0') + ':' + (minute || '00'))
+    .replace(/\bam morgen\b/gi, 'in the morning')
+    .replace(germanTimeWord, word => germanTimeWords[word.toLowerCase()]);
+}
 function clockMinute(clock, period) {
   const clean = clock.trim().toLowerCase().replace(/\s/g, '').replace(/^(\d{1,2})\.(\d{2})/, '$1:$2').replace(/\./g, '');
   if (clean === 'noon') return 720;
@@ -215,7 +242,23 @@ function clockString(minutes) {
   return String(Math.floor(minutes / 60)).padStart(2, '0') + ':' + String(minutes % 60).padStart(2, '0');
 }
 
-function timeConstraints(text, minutes) {
+const startsAt = /\b(?:start(?:s|ing)?|begin(?:s|ning)?)\s+at\s*$/i;
+const relativeToEvent = /\b(after|before|by|until)\s+(?:(?:the|a|an|my|our|their|team|morning|afternoon|client|weekly|next)\s+)*(?:meeting|call|appointment|interview|class|session|workshop|train|flight)(?:\s+(?:starts?\s+)?at)?\s*$/i;
+
+function clockRole(before, after) {
+  if (/^\s*(?:or later|at the earliest)\b/i.test(after)) return 'lower';
+  if (/^\s*(?:or earlier|at the latest|deadline|cutoff)\b/i.test(after)) return 'upper';
+  if (/^\s*(?:if possible|or so|ish)\b/i.test(after)) return 'approximate';
+  const relative = before.match(relativeToEvent);
+  if (relative) return relative[1].toLowerCase() === 'after' ? 'lower' : 'upper';
+  if (/\b(?:no earlier than|(?:at the )?earliest(?: start)?|after|from)(?: at)?\s*$/i.test(before)) return 'lower';
+  if (/\b(?:no later than|(?:at the )?latest(?: start)?|by|until|before)(?: at)?\s*$/i.test(before)
+    || /\b(?:end(?:s|ing)?|finish(?:es|ing)?|due|deadline|cutoff)(?: (?:is|at|by|of))*\s*$/i.test(before)) return 'upper';
+  if (/\b(?:around|about|approximately|roughly|ideally|preferably|maybe|except|not)(?: at)?\s*$/i.test(before)) return 'approximate';
+  return /(?:\bat|@)\s*$/i.test(before) ? 'fixed' : null;
+}
+
+function readClocks(text) {
   const period = text.match(/\b(morning|afternoon|evening|tonight)\b/i)?.[1].toLowerCase();
   const bands = { morning: [0, 720], afternoon: [720, 1020], evening: [1020, 1440], tonight: [1020, 1440] };
   const [bandStart, bandEnd] = bands[period] || [null, null];
@@ -224,53 +267,79 @@ function timeConstraints(text, minutes) {
   if (/\bafter lunch\b/i.test(text)) low = Math.max(low ?? 0, 780);
   if (/\bbefore lunch\b/i.test(text)) high = Math.min(high ?? 1440, 720);
 
-  const range = text.match(new RegExp('\\b(?:between|from)\\s+(' + clockPattern + ')\\s*(?:and|to|until|[-–—])\\s*(' + clockPattern + ')(?![\\w:-])', 'i'));
-  if (range) {
-    const left = clockMinute(range[1], period);
-    const right = clockMinute(range[2], period);
+  const rangeSpans = [];
+  const starts = new Set();
+  for (const match of text.matchAll(ranges)) {
+    const connector = match[3].toLowerCase();
+    if (!match[1] && (connector === 'and' || (!bareClock.test(match[2]) && !bareClock.test(match[4])))) continue;
+    rangeSpans.push([match.index, match.index + match[0].length]);
+    if (connector === 'or') continue;
+    const left = clockMinute(match[2], period);
+    const right = clockMinute(match[4], period);
     if (left !== null && right !== null) {
       low = Math.max(low ?? 0, left);
       high = Math.min(high ?? 1440, right);
+      if (startsAt.test(text.slice(0, match.index))) starts.add(left);
     }
   }
-  const clocks = new RegExp('\\b(no earlier than|no later than|after|starting at|before|until|by|at)\\s+(' + clockPattern + ')(?![\\w:-]|\\s*(?:hours?|hrs?|minutes?|mins?|days?)\\b)', 'gi');
   for (const match of text.matchAll(clocks)) {
-    if (range && match.index >= range.index && match.index < range.index + range[0].length) continue;
-    const minute = clockMinute(match[2], period);
+    if (rangeSpans.some(([from, to]) => match.index >= from && match.index < to)) continue;
+    const before = text.slice(0, match.index);
+    const after = text.slice(match.index + match[0].length);
+    const role = clockRole(before, after);
+    if (!role && !bareClock.test(match[1])) continue;
+    if (/^\d+$/.test(match[1]) && (/\d[-–—]$/.test(before) || /^[-–—]\d/.test(after))) continue;
+    if (/[€£$#]$/.test(before) || /^\s*(?:[%/]|(?:hours?|hrs?|h|minutes?|mins?|m|days?|pages?|slides?|items?|tickets?|projects?|invoices?)\b)/i.test(after)) continue;
+    if (/\b(?:ratio|odds|score|verse|version|timestamp|timecode)\s*(?:(?:of|is|at)\s*)?$/i.test(before)) continue;
+    const minute = clockMinute(match[1], period);
     if (minute === null) throw new RangeError('Enter a valid clock time for this task.');
-    const prep = match[1].toLowerCase();
-    if (['after', 'at', 'starting at', 'no earlier than'].includes(prep)) low = Math.max(low ?? 0, minute);
-    if (['by', 'until', 'before', 'no later than'].includes(prep)) high = Math.min(high ?? 1440, minute);
-    if (prep === 'at' || prep === 'starting at') high = Math.min(high ?? 1440, minute + minutes);
+    if (role === 'lower') low = Math.max(low ?? 0, minute);
+    else if (role === 'upper') high = Math.min(high ?? 1440, minute);
+    else if (role !== 'approximate') starts.add(minute);
+  }
+  return { low, high, exact: starts.size === 1 ? [...starts][0] : null };
+}
+
+function displayWindow({ low, high, exact }, minutes) {
+  if (exact !== null) {
+    low = Math.max(low ?? 0, exact);
+    high = Math.min(high ?? 1440, exact + minutes);
   }
   return { windowStart: low === null ? null : clockString(low), windowEnd: high === null ? null : clockString(high) };
+}
+
+function sourceClocks(task, timeZone) {
+  if (typeof task?.text !== 'string' || !task.text) return null;
+  const captured = instantInZone(task.estimateRequestedAt || task.createdAt, timeZone).startOf('day');
+  if (!captured.isValid) return null;
+  try { return readClocks(dateConstraints(schedulingText(task.text), captured).flexibleText); }
+  catch (error) {
+    if (!(error instanceof RangeError)) throw error;
+    return null;
+  }
+}
+
+// A narrow model-suggested window, a generated title, and an existing event
+// start are not evidence that the author asked for an appointment at that time.
+export function explicitStartFor(task, timeZone = 'UTC') {
+  const minute = sourceClocks(task, timeZone)?.exact;
+  return minute == null ? null : clockString(minute);
 }
 
 export function estimateTask(text, { now, timeZone = 'UTC', estimatedMinutes } = {}) {
   const today = instantInZone(now, timeZone).startOf('day');
   if (!today.isValid) throw new RangeError('Choose a valid time zone and scheduling date.');
   const estimate = workEstimate(text);
-  const { flexibleText, ...dates } = dateConstraints(text, today);
-  return { ...estimate, ...dates, ...timeConstraints(flexibleText, estimate.explicitMinutes ? estimate.minutes : (estimatedMinutes ?? estimate.minutes)) };
+  const { flexibleText, ...dates } = dateConstraints(schedulingText(text), today);
+  const minutes = estimate.explicitMinutes ? estimate.minutes : (estimatedMinutes ?? estimate.minutes);
+  return { text, ...estimate, ...dates, ...displayWindow(readClocks(flexibleText), minutes) };
 }
 
 // An exact start such as “at 10” creates an end derived from the estimate.
 // Recompute that end on resize while retaining explicit deadlines and ranges.
 export function resizedClockWindow(task, minutes, timeZone) {
-  if (!task.windowStart || !task.windowEnd) return task.windowEnd;
-  const captured = instantInZone(task.estimateRequestedAt || task.createdAt, timeZone).startOf('day');
-  if (!captured.isValid) return task.windowEnd;
-  try {
-    const { flexibleText } = dateConstraints(task.text, captured);
-    const original = timeConstraints(flexibleText, task.minutes);
-    if (original.windowStart === task.windowStart && original.windowEnd === task.windowEnd) {
-      return timeConstraints(flexibleText, minutes).windowEnd;
-    }
-  } catch (error) {
-    if (!(error instanceof RangeError)) throw error;
-    // Legacy or calendar-edited text may have an unrelated clock expression.
-  }
-  return task.windowEnd;
+  const source = sourceClocks(task, timeZone);
+  return source?.exact != null ? displayWindow(source, minutes).windowEnd : task.windowEnd;
 }
 
 const minuteMs = 60_000;
@@ -371,9 +440,9 @@ function dayWindows(day, localStart, localEnd) {
   return mergeIntervals(windows);
 }
 
-function freeStart(window, blocked, nowMillis, duration, exactOpening) {
+function freeStart(window, blocked, nowMillis, duration, fitsOnlyAtOpening) {
   const roundUp = (time) => Math.ceil(time / gridMs) * gridMs;
-  let candidate = exactOpening && nowMillis <= window.start ? window.start : roundUp(Math.max(nowMillis, window.start));
+  let candidate = fitsOnlyAtOpening && nowMillis <= window.start ? window.start : roundUp(Math.max(nowMillis, window.start));
   for (const event of blocked) {
     if (candidate + duration > window.end) return null;
     if (event.end <= candidate) continue;
@@ -383,22 +452,49 @@ function freeStart(window, blocked, nowMillis, duration, exactOpening) {
   return candidate + duration <= window.end ? candidate : null;
 }
 
-export function findSlot({ task, settings, busy = [], now, horizonDays = 28 }) {
+function fixedStart(day, minute, windows, blocked, nowMillis, duration, capturedAt) {
+  // Intersect that single wall-clock minute with the day's real instants.
+  // It can be missing in spring or have two candidates in autumn.
+  for (const { start } of dayWindows(day, minute, minute + 1)) {
+    const end = start + duration;
+    if (start < nowMillis && !(capturedAt <= start && nowMillis < end)) continue;
+    if (!windows.some(window => start >= window.start && end <= window.end)) continue;
+    if (!blocked.some(event => event.start < end && event.end > start)) return start;
+  }
+  return null;
+}
+
+export function findSlot({ task, settings, busy = [], now, horizonDays = 28, allowInProgress = false }) {
   const days = searchDays({ task, settings, now, horizonDays });
   if (!days || !Array.isArray(settings.workDays) || !Number.isSafeInteger(task.minutes) || task.minutes < 1) return null;
-  const startMinute = Math.max(clockValue(settings.startTime), task.windowStart == null ? 0 : clockValue(task.windowStart));
-  const endMinute = Math.min(clockValue(settings.endTime, true), task.windowEnd == null ? 1440 : clockValue(task.windowEnd, true));
+  const wording = sourceClocks(task, settings.timeZone);
+  const exact = wording?.exact;
+  // The written clock wins over an older model's window. An actual "before",
+  // "after", range or deadline in the same wording still bounds the full task.
+  const lower = exact != null ? wording.low ?? 0 : task.windowStart == null ? 0 : clockValue(task.windowStart);
+  const upper = exact != null ? wording.high ?? 1440 : task.windowEnd == null ? 1440 : clockValue(task.windowEnd, true);
+  const startMinute = Math.max(clockValue(settings.startTime), lower);
+  const endMinute = Math.min(clockValue(settings.endTime, true), upper);
   if (!(startMinute < endMinute)) return null;
   const blocked = blockedIntervals(busy, settings.timeZone);
   if (!blocked) return null;
   const duration = task.minutes * minuteMs;
-  const exactOpening = task.windowStart != null && task.windowEnd != null && endMinute - startMinute === task.minutes;
+  const fitsOnlyAtOpening = task.windowStart != null && task.windowEnd != null && endMinute - startMinute === task.minutes;
+  const nowMillis = days.current.toMillis();
+  const captured = task.estimateRequestedAt || task.createdAt;
+  const capturedAt = allowInProgress && captured != null ? instantInZone(captured, settings.timeZone).toMillis() : Infinity;
   for (let day = days.first; day < days.stop; day = day.plus({ days: 1 }).startOf('day')) {
     if (!settings.workDays.includes(day.weekday)) continue;
     const deadline = task.deadlineTime != null && day.toISODate() === task.latestDay ? clockValue(task.deadlineTime, true) : 1440;
     if (!(startMinute < deadline)) continue;
-    for (const window of dayWindows(day, startMinute, Math.min(endMinute, deadline))) {
-      const start = freeStart(window, blocked, days.current.toMillis(), duration, exactOpening);
+    const windows = dayWindows(day, startMinute, Math.min(endMinute, deadline));
+    if (exact != null) {
+      const start = fixedStart(day, exact, windows, blocked, nowMillis, duration, capturedAt);
+      if (start !== null) return { start: new Date(start).toISOString(), end: new Date(start + duration).toISOString() };
+      continue;
+    }
+    for (const window of windows) {
+      const start = freeStart(window, blocked, nowMillis, duration, fitsOnlyAtOpening);
       if (start !== null) return { start: new Date(start).toISOString(), end: new Date(start + duration).toISOString() };
     }
   }

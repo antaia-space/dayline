@@ -3,7 +3,10 @@ import { DateTime, IANAZone } from 'luxon';
 import { migrateCalendarModes } from './store.mjs';
 import metadata from '../package.json' with { type: 'json' };
 import * as googleCalendar from './google.mjs';
-import { CATEGORIES, estimateTask, findSlot, planningRange } from './planner.mjs';
+import { readCalendarMeetings } from './meetings.mjs';
+import { MeetingAgenda, meetingRange } from './meeting-agenda.mjs';
+import { CATEGORIES, estimateTask, explicitStartFor, findSlot, planningRange } from './planner.mjs';
+import { canMoveLocalTask, explicitSchedulingIssue, nextFlexibleSlot, planTaskSlots } from './priority.mjs';
 import { localTaskTitle, recordDurationFeedback } from './task-learning.mjs';
 import { adjustTaskDuration, previewAdjustedSlot, setManualDuration } from './duration.mjs';
 import { agentSelection } from './agents/manager.mjs';
@@ -52,7 +55,7 @@ function safeTask(task) {
     estimateRequestedAt, estimateRetryIds, estimateRemoteTitle, durationRequests, durationCheckPending, ...visible } = task;
   const text = estimateJob?.text ?? task.text;
   const active = task.estimateState === 'queued' || task.estimateState === 'estimating';
-  return { ...visible, text, title: task.title || localTaskTitle(text), allDay: Boolean(remote?.allDay),
+  return { ...visible, text, title: task.title || localTaskTitle(text), allDay: Boolean(remote?.allDay), hasCalendarEvent: Boolean(remote),
     estimateState: task.estimateState ?? (task.pendingEstimate ? 'failed' : null),
     ...(active && estimateJob && { estimateAgent: { ...estimateJob.selection } }) };
 }
@@ -134,12 +137,38 @@ function combinedRanges(ranges) {
   return combined.map(({ start, end }) => ({ start: new Date(start).toISOString(), end: new Date(end).toISOString() }));
 }
 
+const overlaps = (a, b) => Date.parse(a.start) < Date.parse(b.end) && Date.parse(b.start) < Date.parse(a.end);
+const sameSlot = (a, b) => a && b && Date.parse(a.start) === Date.parse(b.start) && Date.parse(a.end) === Date.parse(b.end);
+
+// Produce possible gaps for the planner. Google can merge an owned reservation
+// with an unrelated meeting, so a proposed gap is always verified by event ID.
+function withoutSlots(intervals, slots) {
+  let result = intervals;
+  for (const slot of slots) {
+    result = result.flatMap(block => {
+      if (!overlaps(block, slot)) return [block];
+      const rest = [];
+      if (Date.parse(block.start) < Date.parse(slot.start)) rest.push({ start: block.start, end: slot.start });
+      if (Date.parse(slot.end) < Date.parse(block.end)) rest.push({ start: slot.end, end: block.end });
+      return rest;
+    });
+  }
+  return result;
+}
+
+function copyRecord(current, next) {
+  for (const key of Object.keys(current)) if (!owns(next, key)) delete current[key];
+  Object.assign(current, next);
+}
+
 export class DaylineService {
-  constructor({ store, vault, google = googleCalendar, estimate = estimateTask, clock = () => new Date(), bundledClient = null }) {
+  constructor({ store, vault, google = googleCalendar, readMeetings = readCalendarMeetings, estimate = estimateTask, clock = () => new Date(), bundledClient = null }) {
     this.store = store;
     this.data = store.state;
     this.vault = vault;
     this.google = google;
+    this.readMeetings = readMeetings;
+    this.meetingAgenda = new MeetingAgenda();
     this.estimate = estimate;
     this.clock = clock;
     this.bundledClient = bundledClient;
@@ -157,12 +186,16 @@ export class DaylineService {
     this.auth = new Map();
     this.authVersion = 0;
     this.tokens = new Map();
+    this.refreshes = new Map();
+    this.discovery = null;
+    this.discoveryErrors = new Set();
     const migrated = migrateCalendarModes(this.data);
     if (this.data.settings.calendarMode === 'availability' && this.data.tasks.some(t =>
       t.remote || t.intent || t.deleting || Object.keys(t.dirty || {}).length)) {
       this.pauseEventSync();
       this.store.save();
     } else if (migrated) this.store.save();
+    if (!this.data.accounts.length) this.persistLocalPlan(this.data.tasks);
   }
 
   // Preserve the identity and last known reservation when pausing. A lost insert
@@ -216,7 +249,9 @@ export class DaylineService {
   }
 
   snapshot() {
-    const accounts = this.data.accounts.map(({ sub, email, mode }) => ({ sub, email, mode }));
+    const accounts = this.data.accounts.map(account => ({
+      sub: account.sub, email: account.email, mode: account.mode, meetingDetails: this.canReadMeetings(account)
+    }));
     return {
       tasks: this.data.tasks.map(safeTask),
       settings: structuredClone(this.data.settings),
@@ -257,12 +292,39 @@ export class DaylineService {
       .map(({ start, end }) => ({ start, end }));
   }
 
-  planLocal(task) {
-    if (task.pendingEstimate) return;
-    const slot = findSlot({ task, settings: this.data.settings, busy: this.localBusy(task.id), now: this.clock() });
-    Object.assign(task, slot || { start: null, end: null });
-    task.syncStatus = slot ? 'local' : 'attention';
-    task.issue = slot ? null : noSlot;
+  plannedTasks(tasks, busy, now) {
+    const context = { tasks, busy, now, settings: this.data.settings };
+    const placements = planTaskSlots(context);
+    return tasks.map(task => {
+      if (!placements.has(task.id)) return task;
+      const slot = placements.get(task.id);
+      const start = slot?.start ?? null, end = slot?.end ?? null;
+      const syncStatus = slot ? 'local' : 'attention';
+      const issue = slot ? null : explicitSchedulingIssue({ ...context, task, placements }) || noSlot;
+      if (task.start === start && task.end === end && task.syncStatus === syncStatus && task.issue === issue &&
+          !task.lastLocalSlot && !(slot && task.durationCheckPending)) return task;
+      const next = { ...task, start, end, syncStatus, issue };
+      delete next.lastLocalSlot;
+      if (slot) delete next.durationCheckPending;
+      return next;
+    });
+  }
+
+  // Persist the entire local rearrangement together. Failed writes cannot move a
+  // sibling while leaving the edited task (or its new duration) uncommitted.
+  persistLocalPlan(tasks, forceSave = false) {
+    const previous = this.data.tasks;
+    const proposed = this.plannedTasks(tasks, [], this.clock());
+    if (!forceSave && previous.length === proposed.length && proposed.every((task, i) => task === previous[i])) return;
+    const byId = new Map(previous.map(task => [task.id, task]));
+    this.data.tasks = proposed;
+    try { this.store.save(); }
+    finally { this.data.tasks = previous; }
+    this.data.tasks = proposed.map(task => {
+      const existing = byId.get(task.id);
+      if (existing && existing !== task) copyRecord(existing, task);
+      return existing || task;
+    });
   }
 
   captureDraft(input) {
@@ -293,7 +355,10 @@ export class DaylineService {
       taskId: task.id, ...(input.captureAgent != null && { selection: agentSelection(input.captureAgent) }) });
     applyEstimate(task, estimate, task.estimateOverrides);
     if (task.pendingEstimate) waitForEstimate(task);
-    else if (!this.data.accounts.length) this.planLocal(task);
+    if (!this.data.accounts.length) {
+      this.persistLocalPlan([...this.data.tasks, task]);
+      return task.id;
+    }
     this.data.tasks.push(task);
     this.store.save();
     return task.id;
@@ -563,39 +628,45 @@ export class DaylineService {
     if (changed.dirty.schedule) changed.held = false;
     changed.issue = null;
     changed.syncStatus = Object.keys(changed.dirty).length ? 'pending' : changed.syncStatus;
+    if (!this.data.accounts.length && !changed.remote && !changed.intent) {
+      if (changed.dirty.schedule && !changed.done) {
+        if (changed.start) changed.lastLocalSlot = { start: changed.start, end: changed.end };
+        if (durationOnly && changed.start && Date.parse(changed.start) < this.clock().getTime()) changed.durationCheckPending = true;
+        changed.start = changed.end = null;
+      }
+      if (this.data.settings.calendarMode === 'availability') changed.dirty = {};
+      if (changed.done || changed.start) changed.syncStatus = 'local';
+      return this.commitEdit(task, changed);
+    }
     if (this.data.settings.calendarMode === 'availability') {
       const needsPlacement = Boolean(changed.dirty.schedule);
       changed.dirty = {};
       if (needsPlacement && !changed.done) {
         const preview = durationOnly ? previewAdjustedSlot(this, task, changed) : null;
-        if (preview) {
+        if (preview && (preview.start === task.start || !explicitStartFor(changed, this.data.settings.timeZone))) {
           Object.assign(changed, preview, { syncStatus: 'local', durationCheckPending: this.data.accounts.length > 0 });
         } else {
           if (changed.start) changed.lastLocalSlot = { start: changed.start, end: changed.end };
           changed.start = null;
           changed.end = null;
           changed.syncStatus = 'pending';
-          if (!this.data.accounts.length) this.planLocal(changed);
         }
       } else if (changed.done || changed.start) {
         changed.syncStatus = 'local';
       }
-    } else if (!this.data.accounts.length && !changed.remote && !changed.intent) {
-      if (changed.dirty.schedule && !changed.done) this.planLocal(changed);
-      else changed.syncStatus = 'local';
     }
     this.commitEdit(task, changed);
   }
 
   commitEdit(task, changed) {
+    if (!this.data.accounts.length) return this.persistLocalPlan(this.data.tasks.map(t => t === task ? changed : t));
     // Persist the candidate first. On disk failure the original record, including
     // its in-flight model claim or retry identifier, remains live in this process.
     const index = this.data.tasks.indexOf(task);
     this.data.tasks[index] = changed;
     try { this.store.save(); }
     finally { this.data.tasks[index] = task; }
-    for (const key of Object.keys(task)) if (!owns(changed, key)) delete task[key];
-    Object.assign(task, changed);
+    copyRecord(task, changed);
   }
 
   deleteTask(taskId) {
@@ -609,7 +680,9 @@ export class DaylineService {
       task.syncStatus = 'deleting';
       task.issue = 'Waiting to remove the linked Google event.';
     } else {
-      this.data.tasks = this.data.tasks.filter(t => t.id !== taskId);
+      const kept = this.data.tasks.filter(t => t.id !== taskId);
+      if (!this.data.accounts.length) return this.persistLocalPlan(kept, true);
+      this.data.tasks = kept;
     }
     this.store.save();
   }
@@ -626,10 +699,15 @@ export class DaylineService {
     if (typeof next.targetCalendarId !== 'string' || (next.targetCalendarId !== old.targetCalendarId && next.targetCalendarId !== 'primary' && !this.calendars.some(c => c.id === next.targetCalendarId && c.writable))) throw invalid('Choose a writable destination calendar.');
     next.workDays = [...new Set(next.workDays)].sort();
     this.data.settings = next;
+    if (['excludedCalendarIds', 'timeZone', 'calendarMode', 'targetCalendarId'].some(key => JSON.stringify(old[key]) !== JSON.stringify(next[key]))) {
+      this.meetingAgenda.clear();
+    }
     if (next.calendarMode !== old.calendarMode) {
       this.auth.clear();
       this.authVersion++;
       this.tokens.clear();
+      this.refreshes.clear();
+      this.discovery = null;
       this.error = null;
       if (next.calendarMode === 'availability') this.pauseEventSync();
       else this.resumeEventSync();
@@ -637,6 +715,7 @@ export class DaylineService {
     const hoursChanged = ['timeZone', 'workDays', 'startTime', 'endTime'].some(k => JSON.stringify(old[k]) !== JSON.stringify(next[k]));
     if (hoursChanged) {
       for (const task of this.data.tasks) {
+        if (!this.data.accounts.length && !task.remote && !task.intent) continue;
         if (task.pendingEstimate || task.done || task.held || task.deleting || task.remote?.allDay ||
             (task.end && Date.parse(task.end) <= this.clock().getTime())) continue;
         if (task.start && this.fitsHours(task.start, task.end)) continue;
@@ -646,10 +725,10 @@ export class DaylineService {
           task.end = null;
         } else task.dirty.schedule = true;
         task.syncStatus = 'pending';
-        if (!this.data.accounts.length && !task.remote && !task.intent) this.planLocal(task);
       }
     }
-    this.store.save();
+    if (!this.data.accounts.length) this.persistLocalPlan(this.data.tasks, true);
+    else this.store.save();
   }
 
   fitsHours(start, end) {
@@ -674,17 +753,20 @@ export class DaylineService {
     throw invalid('Import the Antaia Google Desktop OAuth client in Settings first.', 409);
   }
 
-  async beginConnection({ expectedMode } = {}) {
-    const mode = this.data.settings.calendarMode;
-    if (expectedMode !== undefined && expectedMode !== mode) throw invalid('The calendar mode changed. Refresh Settings before connecting.', 409);
+  async beginConnection({ expectedMode, mode = this.data.settings.calendarMode, accountSub } = {}) {
+    const plannerMode = this.data.settings.calendarMode;
+    if (expectedMode !== undefined && expectedMode !== plannerMode) throw invalid('The calendar mode changed. Refresh Settings before connecting.', 409);
+    if (mode !== 'details' && mode !== plannerMode) throw invalid('Choose the calendar access shown in Settings.', 409);
+    const account = this.data.accounts.find(a => a.sub === accountSub);
+    if (accountSub != null && !account) throw invalid('Choose a connected Google account.');
     const { clientId } = await this.client();
     const state = randomBytes(32).toString('base64url');
     const verifier = randomBytes(48).toString('base64url');
     const codeChallenge = createHash('sha256').update(verifier).digest('base64url');
     const redirectUri = this.origin + '/oauth/callback';
     for (const [key, request] of this.auth) if (request.expires < Date.now()) this.auth.delete(key);
-    this.auth.set(state, { verifier, redirectUri, mode, version: this.authVersion, expires: Date.now() + 600000 });
-    return { url: this.google.authorizationUrl({ clientId, redirectUri, state, codeChallenge, mode }).toString() };
+    this.auth.set(state, { verifier, redirectUri, mode, plannerMode, accountSub, version: this.authVersion, expires: Date.now() + 600000 });
+    return { url: this.google.authorizationUrl({ clientId, redirectUri, state, codeChallenge, mode, loginHint: account?.email }).toString() };
   }
 
   async finishConnection({ state, code, error }) {
@@ -693,7 +775,7 @@ export class DaylineService {
     if (!request || request.expires < Date.now()) throw invalid('This sign-in request expired. Start again in Dayline.');
     if (error || !code) throw invalid('Google sign-in was cancelled. You can return to Dayline.');
     const checkMode = () => {
-      if (request.mode !== this.data.settings.calendarMode || request.version !== this.authVersion) {
+      if (request.plannerMode !== this.data.settings.calendarMode || request.version !== this.authVersion) {
         throw invalid('Calendar access changed during sign-in. Start again with the current mode.', 409);
       }
     };
@@ -702,12 +784,23 @@ export class DaylineService {
     const tokens = await this.google.exchangeCode({ ...client, ...request, code });
     checkMode();
     const profile = await this.google.getProfile(tokens.access_token);
+    if (request.accountSub != null && request.accountSub !== profile.sub) {
+      throw invalid('Google returned a different account. Choose the address shown for this connection in Dayline.', 409);
+    }
     const existing = this.data.accounts.find(a => a.sub === profile.sub);
-    if (!tokens.refresh_token && (!existing?.secret || existing.mode !== request.mode)) throw invalid('Google did not grant offline access. Reconnect and allow the requested calendar permissions.');
+    const mode = request.mode === 'details' ? 'availability' : request.mode;
+    const meetingDetails = request.mode === 'details';
+    if (!tokens.refresh_token && (!existing?.secret || existing.mode !== mode || Boolean(existing.meetingDetails) !== meetingDetails)) {
+      throw invalid('Google did not grant offline access. Reconnect and allow the requested calendar permissions.');
+    }
     const secret = tokens.refresh_token ? await this.vault.seal(tokens.refresh_token) : existing.secret;
     checkMode();
-    if (existing) Object.assign(existing, { email: profile.email, secret, mode: request.mode });
-    else this.data.accounts.push({ ...profile, secret, mode: request.mode });
+    const account = { ...existing, ...profile, secret, mode, meetingDetails };
+    if (existing) this.data.accounts[this.data.accounts.indexOf(existing)] = account;
+    else this.data.accounts.push(account);
+    this.discovery = null;
+    this.meetingAgenda.clear();
+    this.refreshes.delete(profile.sub);
     this.cacheToken(profile.sub, tokens, request.mode);
     this.error = null;
     this.store.save();
@@ -717,7 +810,11 @@ export class DaylineService {
     if (sub != null && (typeof sub !== 'string' || !this.data.accounts.some(a => a.sub === sub))) throw invalid('Unknown Google account.');
     this.data.accounts = this.data.accounts.filter(a => sub && a.sub !== sub);
     this.calendars = this.calendars.filter(c => sub && c.sub !== sub);
+    if (sub) this.discoveryErrors.delete(sub); else this.discoveryErrors.clear();
     if (sub) this.tokens.delete(sub); else this.tokens.clear();
+    this.refreshes.clear();
+    this.discovery = null;
+    this.meetingAgenda.clear();
     this.busy = [];
     this.busyRange = null;
     this.error = null;
@@ -729,7 +826,8 @@ export class DaylineService {
         t.issue = 'Reconnect the original Google account to sync this event.';
       }
     }
-    this.store.save();
+    if (!this.data.accounts.length) this.persistLocalPlan(this.data.tasks, true);
+    else this.store.save();
   }
 
   cacheToken(sub, tokens, mode) {
@@ -739,22 +837,71 @@ export class DaylineService {
   async token(sub) {
     const account = this.data.accounts.find(a => a.sub === sub);
     if (!account) throw invalid('Reconnect the original Google account to sync this event.', 409);
-    const mode = this.data.settings.calendarMode === 'availability' ? 'availability' : account.mode;
+    const mode = account.mode === 'sync' && this.data.settings.calendarMode === 'sync' ? 'sync'
+      : account.meetingDetails ? 'details' : 'availability';
     const cached = this.tokens.get(sub);
     if (cached?.mode === mode && cached.expires > Date.now() + 60000) return cached.access;
-    const tokens = await this.google.refreshToken({ ...await this.client(), mode, refreshToken: await this.vault.open(account.secret) });
-    this.cacheToken(sub, tokens, mode);
-    if (tokens.refresh_token) { account.secret = await this.vault.seal(tokens.refresh_token); this.store.save(); }
-    return tokens.access_token;
+    const pending = this.refreshes.get(sub);
+    if (pending) return pending;
+    const version = this.authVersion;
+    const refresh = (async () => {
+      const tokens = await this.google.refreshToken({ ...await this.client(), mode, refreshToken: await this.vault.open(account.secret) });
+      const replacement = tokens.refresh_token && await this.vault.seal(tokens.refresh_token);
+      if (this.authVersion !== version || !this.data.accounts.includes(account)) throw invalid('Calendar access changed. Refresh your calendar.', 409);
+      this.cacheToken(sub, tokens, mode);
+      if (replacement) { account.secret = replacement; this.store.save(); }
+      return tokens.access_token;
+    })().finally(() => { if (this.refreshes.get(sub) === refresh) this.refreshes.delete(sub); });
+    this.refreshes.set(sub, refresh);
+    return refresh;
   }
 
-  async discover() {
-    const groups = await Promise.all(this.data.accounts.map(async account => {
+  discover() {
+    if (this.discovery) return this.discovery;
+    const accounts = [...this.data.accounts];
+    const current = Promise.allSettled(accounts.map(async account => {
       const calendars = await this.google.listCalendars(await this.token(account.sub));
       return calendars.map(c => ({ ...c, sub: account.sub, accountEmail: account.email, accountMode: account.mode,
         providerId: c.id, id: recordKey(account.sub, c.id) }));
-    }));
-    this.calendars = groups.flat();
+    })).then(groups => {
+      if (this.discovery !== current) return;
+      const calendars = groups.flatMap(group => group.status === 'fulfilled' ? group.value : []);
+      this.discoveryErrors = new Set(accounts.filter((account, i) => groups[i].status === 'rejected').map(account => account.sub));
+      if (JSON.stringify(calendars) !== JSON.stringify(this.calendars)) this.meetingAgenda.clear();
+      this.calendars = calendars;
+      const failure = groups.find(group => group.status === 'rejected');
+      // Scheduling needs an answer from every account. The agenda can still
+      // show meetings from the accounts that Google successfully returned.
+      if (failure) throw failure.reason;
+    }).finally(() => { if (this.discovery === current) this.discovery = null; });
+    this.discovery = current;
+    return current;
+  }
+
+  canReadMeetings(account) {
+    return account.meetingDetails === true || (account.mode === 'sync' && this.data.settings.calendarMode === 'sync');
+  }
+
+  async meetings({ from, to }) {
+    const range = meetingRange(from, to, this.data.settings.timeZone);
+    if (!this.data.accounts.some(account => this.canReadMeetings(account))) return { events: [], warnings: [] };
+    if (!this.calendars.length) {
+      try { await this.discover(); }
+      catch { /* Each account that failed discovery is identified below. */ }
+    }
+    const enabled = new Set(this.data.accounts.filter(account => this.canReadMeetings(account)).map(account => account.sub));
+    const { excludedCalendarIds, calendarMode } = this.data.settings;
+    const target = calendarMode === 'sync' ? this.selectedTarget()?.id : null;
+    const calendars = this.calendars.filter(c => enabled.has(c.sub) && c.canCheckAvailability !== false &&
+      c.accessRole !== 'freeBusyReader' && (!excludedCalendarIds.includes(c.id) || c.id === target));
+    const representedTaskIds = new Set(this.data.tasks.filter(task => task.remote || task.intent ||
+      (task.pausedSync?.original?.start && task.start === task.pausedSync.original.start && task.end === task.pausedSync.original.end))
+      .map(task => task.id));
+    const week = await this.meetingAgenda.read(calendars, range, async (calendar, interval) =>
+      this.readMeetings(await this.token(calendar.sub), { ...calendar, representedTaskIds }, interval));
+    const warnings = this.data.accounts.filter(a => this.canReadMeetings(a) && this.discoveryErrors.has(a.sub))
+      .map(a => 'Check the Google connection for ' + a.email + ' in Settings to load its meetings.');
+    return warnings.length ? { events: week.events, warnings: [...week.warnings, ...warnings] } : week;
   }
 
   syncPermission(sub) {
@@ -788,24 +935,33 @@ export class DaylineService {
     return result;
   }
 
-  async availability(range, destinationId, reservation) {
-    if (reservation) this.syncPermission(reservation.sub);
+  async availability(range, destinationId, reservations = []) {
+    if (!Array.isArray(reservations)) reservations = [reservations];
+    const byCalendar = new Map();
+    for (const ref of reservations) {
+      this.syncPermission(ref.sub);
+      const key = recordKey(ref.sub, ref.calendarId);
+      if (!byCalendar.has(key)) byCalendar.set(key, []);
+      byCalendar.get(key).push(ref.eventId);
+    }
     const excluded = new Set(this.data.settings.excludedCalendarIds);
     const target = this.data.settings.calendarMode === 'sync' ? this.selectedTarget() : null;
     const chosen = this.calendars.filter(c => c.canCheckAvailability !== false &&
-      (c.id === target?.id || c.id === destinationId || !excluded.has(c.id)));
+      (c.id === target?.id || c.id === destinationId || byCalendar.has(c.id) || !excluded.has(c.id)));
     if (!chosen.length) throw invalid('Select at least one calendar to check availability.', 409);
     const groups = await Promise.all(this.data.accounts.map(async account => {
       const calendars = chosen.filter(c => c.sub === account.sub);
       if (!calendars.length) return [];
       try {
         const access = await this.token(account.sub);
-        const ownCalendar = reservation && account.sub === reservation.sub &&
-          calendars.find(c => c.providerId === reservation.calendarId && c.canInspectReservations === true);
-        const calendarIds = calendars.filter(c => c !== ownCalendar).map(c => c.providerId);
+        const inspect = calendars.filter(c => byCalendar.has(c.id) && c.canInspectReservations === true);
+        const calendarIds = calendars.filter(c => !inspect.includes(c)).map(c => c.providerId);
         const busy = calendarIds.length ? await this.google.getBusy(access, { ...range, calendarIds }) : [];
-        if (ownCalendar && await this.google.hasOtherBusyEvent(access, { ...range, calendarId: ownCalendar.providerId, eventId: reservation.eventId })) {
-          busy.push(range);
+        for (const calendar of inspect) {
+          const eventIds = byCalendar.get(calendar.id);
+          if (await this.google.hasOtherBusyEvent(access, { ...range, calendarId: calendar.providerId, eventId: eventIds[0], eventIds })) {
+            busy.push(range);
+          }
         }
         return busy;
       } catch (error) {
@@ -822,7 +978,7 @@ export class DaylineService {
     return groups.flat();
   }
 
-  acceptRemote(task, event, ref) {
+  acceptRemote(task, event, ref, { pulled = false } = {}) {
     if (!event.owned || event.taskId !== task.id) throw invalid('Google could not verify ownership of the linked event.', 409);
     if (!event.start || !event.end) throw invalid('The linked event needs a timed start and end in Google Calendar.', 409);
     if (task.estimateRemoteTitle && event.text !== task.estimateRemoteTitle && event.text !== task.title) {
@@ -845,14 +1001,17 @@ export class DaylineService {
     // instants, and a day-long reservation should preserve the task’s estimated effort.
     const allDay = DAY.test(event.start) && DAY.test(event.end);
     const instant = value => allDay ? DateTime.fromISO(value, { zone: this.data.settings.timeZone }).toUTC().toISO() : value;
-    task.start = instant(event.start);
-    task.end = instant(event.end);
+    const slot = { start: instant(event.start), end: instant(event.end) };
+    const manualTime = ref.manualTime || (pulled && task.start && !sameSlot(task, slot) && !sameSlot(ref.proposedSlot, slot));
+    Object.assign(task, slot);
     if (!allDay && !task.dirty.schedule && !(task.done && task.estimateOverrides?.minutes != null)) {
       const length = Math.round((Date.parse(task.end) - Date.parse(task.start)) / 60000);
       if (length > 0) task.minutes = length;
     }
     if (task.remote && task.remote.done !== event.done && !task.dirty.done) task.dirty.link = true;
     task.remote = { sub: ref.sub, calendarId: ref.calendarId, eventId: event.eventId, etag: event.etag, done: event.done };
+    if (manualTime) task.remote.manualTime = true;
+    if (event.calendarAppointment) task.remote.calendarAppointment = true;
     if (allDay) task.remote.allDay = { start: event.start, end: event.end };
     task.intent = null;
     task.issue = null;
@@ -893,7 +1052,7 @@ export class DaylineService {
         const event = byId.get(ref.eventId) || await this.google.getTaskEvent(access, { ...ref, taskId: task.id });
         if (event) {
           if (task.estimateJob?.protected && event.done && !ref.done && !task.dirty.done) keepRevisionWording(task);
-          this.acceptRemote(task, event, ref);
+          this.acceptRemote(task, event, ref, { pulled: true });
           if (task.pendingEstimate) waitForEstimate(task);
           continue;
         }
@@ -911,6 +1070,112 @@ export class DaylineService {
     await this.google.deleteTaskEvent(await this.eventToken(ref.sub), { ...ref, expectedEtag: ref.etag || null, taskId: task.id });
     this.data.tasks = this.data.tasks.filter(t => t !== task);
     this.store.save();
+  }
+
+  async cachedAvailability(range, destinationId, cache) {
+    const key = destinationId + '|' + range.start + '|' + range.end;
+    if (!cache.has(key)) cache.set(key, await this.availability(range, destinationId));
+    return cache.get(key);
+  }
+
+  movableFlexibleEvent(task, now) {
+    if (!task.start || !task.end || Date.parse(task.start) <= now.getTime() || task.done || task.held ||
+        task.deleting || task.pendingEstimate || task.intent || explicitStartFor(task, this.data.settings.timeZone)) return false;
+    if (!task.remote) return true; // A local preview has no event to move.
+    return !task.remote.allDay && !task.remote.manualTime && !task.remote.calendarAppointment && !Object.keys(task.dirty).length &&
+      this.calendars.some(c => c.sub === task.remote.sub && c.providerId === task.remote.calendarId &&
+        c.accountMode === 'sync' && c.writable && c.canInspectReservations === true);
+  }
+
+  async replacementFor(task, reserved, rangeCache) {
+    const { settings } = this.data;
+    const now = this.clock();
+    const range = planningRange({ task, settings, now });
+    if (!range) return null;
+    const dest = recordKey(task.remote.sub, task.remote.calendarId);
+    const raw = await this.cachedAvailability(range, dest, rangeCache);
+    const busy = [...withoutSlots(raw, [task]), ...this.localBusy(task.id), ...reserved];
+    for (;;) {
+      const slot = nextFlexibleSlot(task, settings, now, busy);
+      if (!slot) return null;
+      const blockers = await this.availability(slot, dest, overlaps(slot, task) ? [task.remote] : []);
+      if (!blockers.length) return slot;
+      busy.push(...blockers);
+    }
+  }
+
+  async writeEvent(task, ref, slot, rangeCache) {
+    // Keep the old confirmed time until the PATCH returns. After an interrupted
+    // write, the next pull can distinguish our move from a person's calendar edit.
+    if (task.remote && !sameSlot(task, slot)) {
+      ref.proposedSlot = { start: slot.start, end: slot.end };
+      this.store.save();
+    }
+    rangeCache.clear();
+    return this.google.putTaskEvent(await this.eventToken(ref.sub), { ...ref, task: { ...task, ...slot, text: task.title || task.text },
+      actionUrl: this.origin + '/action/' + task.id + '?done=' + (task.done ? '0' : '1'), expectedEtag: task.remote?.etag || null });
+  }
+
+  async explicitPlacement(task, range, destinationId, rangeCache) {
+    const { settings } = this.data;
+    const now = this.clock();
+    const others = this.data.tasks.filter(t => t !== task && t.start && t.end && !t.deleting && (!t.pendingEstimate || t.estimateJob?.protected));
+    const flexible = others.filter(t => this.movableFlexibleEvent(t, now));
+    const fixed = others.filter(t => !flexible.includes(t));
+    const movableEvents = flexible.filter(t => t.remote);
+    const raw = await this.cachedAvailability(range, destinationId, rangeCache);
+    const ownedSlots = task.remote && !task.remote.allDay ? [...movableEvents, task] : movableEvents;
+    const possible = withoutSlots(raw, ownedSlots);
+    const busy = [...possible, ...fixed];
+    const request = { task, settings, now, allowInProgress: true };
+    const original = task.remote && Date.parse(task.start) >= now.getTime() &&
+      findSlot({ ...request, now: new Date(task.start), busy });
+    let preferred = original && Date.parse(original.start) === Date.parse(task.start) ? original : null;
+    let issue = null;
+    for (;;) {
+      const slot = preferred || findSlot({ ...request, busy });
+      preferred = null;
+      if (!slot) {
+        task.issue = issue || explicitSchedulingIssue({ ...request, tasks: others, busy: possible, placements: new Map() });
+        return null;
+      }
+      const displaced = movableEvents.filter(t => overlaps(t, slot));
+      const own = task.remote && overlaps(task, slot) ? [task.remote] : [];
+      const ignore = [...own, ...displaced.map(t => t.remote)];
+      // The exact time must be free on every other calendar, and on the source
+      // calendars once these specific, verified Dayline event IDs are excluded.
+      const clock = explicitStartFor(task, settings.timeZone);
+      if (!(await this.availability(slot, destinationId, ignore)).length) {
+        const moves = [];
+        for (const other of displaced) {
+          const next = await this.replacementFor(other, [slot, ...moves.map(move => move.slot)], rangeCache);
+          if (!next) break;
+          moves.push({ task: other, slot: next });
+        }
+        if (moves.length === displaced.length) {
+          for (const move of moves) {
+            const other = move.task;
+            const ref = other.remote;
+            const dest = recordKey(ref.sub, ref.calendarId);
+            if (!this.movableFlexibleEvent(other, this.clock()) ||
+                (await this.availability(move.slot, dest, overlaps(other, move.slot) ? [ref] : [])).length) {
+              throw invalid('Availability changed while moving a flexible task. Sync again to check the new times.', 409);
+            }
+            const event = await this.writeEvent(other, ref, move.slot, rangeCache);
+            this.acceptRemote(other, event, ref);
+            this.store.save();
+          }
+          if (moves.length && (await this.availability(slot, destinationId, own)).length) {
+            throw invalid('Another event now occupies the requested time. Sync again to check the calendar.', 409);
+          }
+          return slot;
+        }
+        issue = 'A flexible task already occupies ' + clock + ' and has no other open slot. Change a task’s time, duration, or working hours.';
+      } else issue = 'Google Calendar is busy at the requested ' + clock + ' start. Change the time or day.';
+      // There can be another valid day for a clock-only request. A task pinned
+      // to one date remains unscheduled when that appointment cannot be placed.
+      busy.push(slot);
+    }
   }
 
   async pushTask(task, rangeCache) {
@@ -956,22 +1221,23 @@ export class DaylineService {
       let placement = null;
       if (range) {
         const destinationId = ref ? recordKey(ref.sub, ref.calendarId) : this.target().id;
-        const cacheKey = destinationId + '|' + range.start + '|' + range.end;
-        if (!rangeCache.has(cacheKey)) rangeCache.set(cacheKey, await this.availability(range, destinationId));
-        // Free/busy merges simultaneous meetings. Reuse the original time only
-        // after excluding this one verified event and checking every other source.
-        if (task.remote && !task.remote.allDay && Date.parse(task.end) > now.getTime()) {
-          const candidate = findSlot({ task, settings, now: new Date(task.start), busy: this.localBusy(task.id) });
-          if (candidate && Date.parse(candidate.start) === Date.parse(task.start) &&
-              !(await this.availability(candidate, destinationId, task.remote)).length) placement = candidate;
+        if (explicitStartFor(task, settings.timeZone)) {
+          placement = await this.explicitPlacement(task, range, destinationId, rangeCache);
+        } else {
+          const busy = await this.cachedAvailability(range, destinationId, rangeCache);
+          // Reuse this reservation only after checking for a second, overlapping event.
+          if (task.remote && !task.remote.allDay && Date.parse(task.end) > now.getTime()) {
+            const candidate = findSlot({ task, settings, now: new Date(task.start), busy: this.localBusy(task.id) });
+            if (candidate && Date.parse(candidate.start) === Date.parse(task.start) &&
+                !(await this.availability(candidate, destinationId, task.remote)).length) placement = candidate;
+          }
+          placement ||= findSlot({ task, settings, now, busy: [...busy, ...this.localBusy(task.id)] });
         }
-        placement ||= findSlot({ task, settings, now, busy: [...rangeCache.get(cacheKey), ...this.localBusy(task.id)] });
       }
       if (!placement) {
         if (!task.remote) { task.start = null; task.end = null; }
-        task.issue = task.remote
-          ? 'No slot fits the new constraints. Google still holds the previous time.'
-          : 'No open work period fits. Change the day, duration, or working hours.';
+        const detail = explicitStartFor(task, settings.timeZone) ? task.issue : null;
+        task.issue = (detail || noSlot) + (task.remote ? ' Google still holds the previous time.' : '');
         task.syncStatus = 'attention';
         // A completion gesture still reaches an existing reservation when rescheduling cannot fit.
         if (!task.remote || !task.dirty.done) return;
@@ -982,7 +1248,6 @@ export class DaylineService {
       const dest = this.target();
       ref = { sub: dest.sub, calendarId: dest.providerId, eventId: id() };
     }
-    const outgoing = { ...task, ...slot, text: task.title || task.text };
     if (!task.remote) {
       task.intent = { ...ref, snapshot: {
         text: task.text, title: task.title, category: task.category, done: task.done, minutes: task.minutes, earliestDay: task.earliestDay,
@@ -990,9 +1255,7 @@ export class DaylineService {
       } };
       this.store.save();
     }
-    const event = await this.google.putTaskEvent(await this.eventToken(ref.sub), { ...ref, task: outgoing,
-      actionUrl: this.origin + '/action/' + task.id + '?done=' + (task.done ? '0' : '1'),
-      expectedEtag: task.remote?.etag || null });
+    const event = await this.writeEvent(task, ref, slot, rangeCache);
     const issue = task.issue;
     task.dirty = waitingForSlot ? { schedule: true } : {};
     this.acceptRemote(task, event, ref);
@@ -1004,48 +1267,29 @@ export class DaylineService {
   }
 
   futureLocalTask(task, now) {
-    return !task.pendingEstimate && !task.done && !task.held && (!task.start || Date.parse(task.start) >= now.getTime() ||
-      (task.durationCheckPending && Date.parse(task.end) > now.getTime()));
+    return canMoveLocalTask(task, now);
   }
 
   async planAgainstCalendars(boardRange) {
     const now = this.clock();
     const settings = this.data.settings;
-    const movable = this.data.tasks.filter(t => this.futureLocalTask(t, now));
     const ranges = [boardRange];
-    for (const task of movable) {
+    for (const task of this.data.tasks) {
+      const active = task.start && Date.parse(task.end) > now.getTime() && canMoveLocalTask(task, new Date(task.start));
+      if (!canMoveLocalTask(task, now) && !active) continue;
       ranges.push(planningRange({ task, settings, now }));
-      if (task.start) ranges.push(task);
-      else if (task.lastLocalSlot) ranges.push(task.lastLocalSlot);
+      const prior = task.start ? task : task.lastLocalSlot;
+      if (prior) {
+        ranges.push(prior);
+        const resized = findSlot({ task, settings, now: new Date(prior.start) });
+        if (resized && Date.parse(resized.start) === Date.parse(prior.start)) ranges.push(resized);
+      }
     }
     const busy = [];
     for (const range of combinedRanges(ranges)) busy.push(...await this.availability(range));
 
-    // Reserve existing valid slots first. A newly conflicting task should never
-    // displace a second task whose original time still works.
-    const fixed = this.data.tasks.filter(t => (!t.pendingEstimate || t.estimateJob?.protected) && t.start && !this.futureLocalTask(t, now))
-      .map(t => ({ start: t.start, end: t.end }));
-    const unplaced = [];
-    const place = (task, slot) => {
-      Object.assign(task, slot || { start: null, end: null });
-      task.syncStatus = slot ? 'local' : 'attention';
-      task.issue = slot ? null : noSlot;
-      delete task.lastLocalSlot;
-      if (slot) { delete task.durationCheckPending; fixed.push(slot); }
-    };
-    for (const task of movable) {
-      const prior = task.start ? task : task.lastLocalSlot;
-      let sameSlot = null;
-      if (prior && (Date.parse(prior.start) >= now.getTime() || (task.durationCheckPending && Date.parse(prior.end) > now.getTime()))) {
-        // Free/busy omits event IDs. An old reservation can share a busy interval
-        // with a separate meeting, so every Google block participates in this check.
-        const candidate = findSlot({ task, settings, now: new Date(prior.start), busy: [...busy, ...fixed] });
-        if (candidate && Date.parse(candidate.start) === Date.parse(prior.start)) sameSlot = candidate;
-      }
-      if (sameSlot) place(task, sameSlot);
-      else unplaced.push(task);
-    }
-    for (const task of unplaced) place(task, findSlot({ task, settings, now, busy: [...busy, ...fixed] }));
+    const planned = this.plannedTasks(this.data.tasks, busy, now);
+    planned.forEach((task, i) => { if (task !== this.data.tasks[i]) copyRecord(this.data.tasks[i], task); });
     this.busy = busy.filter(e => Date.parse(e.end) > Date.parse(boardRange.start) && Date.parse(e.start) < Date.parse(boardRange.end));
     this.busyRange = boardRange;
   }
@@ -1063,7 +1307,7 @@ export class DaylineService {
 
   async reconcile() {
     this.error = null;
-    if (!this.data.accounts.length) return;
+    if (!this.data.accounts.length) { this.persistLocalPlan(this.data.tasks); return; }
     try {
       await this.discover();
       const monday = DateTime.fromJSDate(this.clock(), { zone: this.data.settings.timeZone }).startOf('week');
@@ -1079,7 +1323,10 @@ export class DaylineService {
       let firstError = null;
       try { this.target(); }
       catch (error) { firstError = messageOf(error); }
-      for (const task of [...this.data.tasks]) {
+      const rank = task => task.deleting ? 0 : explicitStartFor(task, this.data.settings.timeZone) ? 1 : 2;
+      const ordered = this.data.tasks.map(task => ({ task, rank: rank(task) }));
+      ordered.sort((a, b) => a.rank - b.rank || (a.rank === 1 && Date.parse(a.task.estimateRequestedAt || a.task.createdAt) - Date.parse(b.task.estimateRequestedAt || b.task.createdAt)));
+      for (const { task } of ordered) {
         try { await this.pushTask(task, rangeCache); }
         catch (error) {
           task.issue = messageOf(error);

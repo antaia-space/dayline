@@ -1,12 +1,12 @@
 # Dayline
 
-Dayline finds time for your to-do list. Write a task in plain English and it estimates the work, checks your selected Google calendars, and finds an opening within your working hours. The weekly board shows each task under its date. Open a day to see its time blocks alongside your meetings’ busy periods. The Mac app and its local browser view share one planner.
+Dayline finds time for your to-do list. Write a task in plain English and it estimates the work, checks your selected Google calendars, and finds an opening within your working hours. The weekly board and day agenda show your tasks alongside your meetings. The Mac app and its local browser view share one planner.
 
 ![An example week in Dayline with nine tasks across five working days](docs/example-week.png)
 
 ## Install on a Mac
 
-1. Sign in to GitHub with access to the Antaia repository. For an Apple silicon or Intel Mac running macOS 13 or later, download **Dayline-1.3.0-mac-universal.zip**. [Latest Mac release](https://github.com/antaia-space/dayline/releases/latest)
+1. Sign in to GitHub with access to the Antaia repository. For an Apple silicon or Intel Mac running macOS 13 or later, download **Dayline-1.4.0-mac-universal.zip**. [Latest Mac release](https://github.com/antaia-space/dayline/releases/latest)
 2. Unzip the download, drag **Dayline.app** to **Applications**, and open it. To use the same planner in your browser, choose **File → Open in Browser** in the Mac app. Both views follow your system’s light or dark appearance.
 
 The internal build uses an ad hoc signature and has not been notarized by Apple. If your Mac’s launch policy requires approval, follow Antaia’s approved procedure or run the app from source below.
@@ -14,11 +14,13 @@ The internal build uses an ad hoc signature and has not been notarized by Apple.
 ## Connect your calendars
 
 1. Open **Settings → Calendars**. If prompted, get Antaia’s Google Desktop OAuth client JSON from your Workspace administrator and select **Choose client file**. [Google Calendar setup for administrators](#google-calendar-setup)
-2. Leave **Calendar access** on **Check availability only**. Choose **Connect Google account** and approve access in your browser. You can connect more than one eligible account.
+2. Leave **Calendar access** on **Read calendars, keep tasks local**. Choose **Connect Google account** and approve the read-only permissions in your browser. For an account already connected for busy times, click **Show meeting details** beside its address and choose that account in Google. Each account needs its own approval.
 3. **Check for conflicts on** starts with all available calendars selected, including shared calendars. Google’s generated Week Numbers feed has no bookable events and is omitted. Keep at least one availability calendar selected and choose **Save calendars**. In availability-only mode, you can uncheck any calendar, including your primary.
 4. In **Settings → Working hours**, set your days, hours, and time zone. The default is Monday–Friday, 09:00–17:00, in the Mac’s time zone.
 
-Availability-only is the default for new installations and for planners upgraded from 1.0. Dayline reads calendar names and busy intervals. Task blocks, checkmarks, and deletions stay on your Mac. If a meeting takes a time you had planned to use, the next refresh moves the unfinished task to another opening. If Google cannot confirm availability, upcoming tasks wait under **Unscheduled** until a refresh succeeds. Choose **Refresh availability** to retry. After an internal Mac update, macOS may ask for access to **Dayline Safe Storage** in Keychain. Allow that item in the system dialog and refresh. You can keep capturing and estimating tasks while calendar access is waiting.
+Calendar access is read-only by default. Task blocks, checkmarks, and deletions stay on your Mac. Google’s busy periods keep those times clear for meetings. If Google cannot confirm availability, upcoming tasks wait under **Unscheduled** until a refresh succeeds. Choose **Refresh availability** to retry. After an internal Mac update, macOS may ask for access to **Dayline Safe Storage** in Keychain. Allow that item in the system dialog and refresh. You can keep capturing and estimating tasks while calendar access is waiting.
+
+Hover over a meeting or select it in either calendar view to see its time, organizer, and guests’ responses. Choose **Join** to open the meeting in your browser, or open the original event in Google Calendar. Google controls which details and guests you can see on shared calendars. Calendars shared as free/busy show anonymous busy blocks. Entries marked free can appear in the agenda while leaving that time available for tasks. Dayline keeps meeting details in memory on your Mac and sends only task information to the task agent. [Google Calendar permissions](https://developers.google.com/workspace/calendar/api/auth)
 
 ### Google Calendar setup
 
@@ -34,6 +36,7 @@ To distribute a build with the company’s Desktop client already configured, se
 
 - Press **Enter** to capture a task and keep typing. Dayline saves each entry on your Mac, then creates a short title and estimates the work in the background. Open the task to see your original wording or edit the title. Changing just the title uses no model quota.
 - **“Draft a proposal by Friday”** lets Dayline estimate the duration and choose an opening before the deadline. **“Call Morgan for 20 minutes tomorrow afternoon”** sets the duration and narrows the search to tomorrow afternoon.
+- **“Eat breakfast for 30 minutes at 10:15”** reserves 10:15–10:45 on the requested day. Dayline moves flexible tasks out of the way and keeps the other bookings in place wherever possible. An overlapping meeting, an existing fixed task, or working hours can prevent the booking. The task shows the conflict in **Unscheduled**.
 - In **Day agenda**, a task without a date in its text uses the day you are viewing. Choose a date in the entry field to pin the task to that day, or choose **Auto-schedule** to let Dayline find the next opening. Queued tasks keep their dates across reloads and restarts.
 - Each task type has a consistent color. Select a task to see how its duration was estimated or edit its text, duration, type, or preferred day. If there is no opening long enough, the task appears under **Unscheduled**.
 - You can start using the planner before connecting a calendar. It finds time within your work hours and around your other tasks. After you connect, it also checks for conflicts with meetings.
@@ -64,7 +67,7 @@ Codex defaults to `gpt-6.2-sol` with **low** reasoning effort. For Google or Ant
 
 1. In **Settings → Calendars**, choose **Sync tasks as calendar events**, then **Enable event syncing**. Reconnect the destination account if prompted, and approve event access in Google. Choose a writable **Calendar for new tasks** and save. Dayline always checks that calendar for conflicts.
 2. The next successful sync can publish upcoming, unfinished tasks as events. Google receives their titles, times, category colors, and completion state. Tick a task in Dayline to mark its linked event with ✓. From Google Calendar, add ✓ to either end of an event title, or open **Mark complete** in the event description and confirm on the Mac running Dayline. Remove the title’s ✓ or uncheck the task to reopen it.
-3. **Sync now** retries pending changes. Dayline checks the event version before updating or deleting it so it can reconcile edits made in Google Calendar. Confirming **Delete task** also removes its linked event while event syncing is enabled. To pause calendar writes, switch back to **Check availability only** and confirm **Use availability only**. Existing Google events stay in your calendar.
+3. **Sync now** retries pending changes. Dayline checks the event version before updating or deleting it so it can reconcile edits made in Google Calendar. Confirming **Delete task** also removes its linked event while event syncing is enabled. To pause calendar writes, choose **Read calendars, keep tasks local** and confirm the change.
 
 Closing the Mac window keeps Dayline running and checking Google about once a minute. After quitting, reopen Dayline to catch up. The planner lives in `~/Library/Application Support/Dayline`. The desktop app protects Google credentials with macOS Keychain-backed encryption.
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { CATEGORIES, estimateTask, findSlot, planningRange } from '../src/planner.mjs';
+import { CATEGORIES, estimateTask, explicitStartFor, findSlot, planningRange, resizedClockWindow } from '../src/planner.mjs';
 
 const settings = { timeZone: 'America/Los_Angeles', workDays: [1, 2, 3, 4, 5], startTime: '09:00', endTime: '17:00' };
 const monday = '2026-11-23T08:00:00-08:00';
@@ -91,6 +91,73 @@ test('the free/busy query covers explicit future dates beyond the default horizo
   assert.equal(slot(task, allDay), null);
   assert.deepEqual(slot(task), utcRange('2027-01-15T17:00Z', '2027-01-15T17:15Z'));
   assert.equal(planningRange({ task: estimate('Write on 2030-01-01'), settings, now: monday }), null);
+});
+
+test('identifies an exact clock from original wording independently of a title or model window', () => {
+  const pin = text => explicitStartFor({ text, title: 'A call at 3pm', windowStart: '15:00', windowEnd: '15:30' }, settings.timeZone);
+  for (const text of ['Discuss the launch at 10:15', '10:15 for 30 min', 'Review notes: 30 min starting at 10:15',
+    'Design review tomorrow, 10:15', 'Besprechung um 10.15 Uhr', 'Session starts at 10:15 until 12:00']) {
+    assert.equal(pin(text), '10:15', text);
+  }
+  for (const text of ['Review the hiring plan', 'File by Friday at 10:15', 'File by Tuesday 10:15',
+    'Deadline at 10:15', 'Send before the team meeting at 10:15', 'After 10:15', 'By 10:15 tomorrow',
+    'Between 10:15 and 11', 'From 10:15 to 12', 'Read 10:15–11:00', 'Call at 10:15 or later',
+    'Call at 10:15 or 11:30', 'Review around 10:15', 'Meet at 10:15 if possible',
+    'Check the 1:1 channel', 'Review v10.15 on 2027-10-15', 'Look at 10 slides', 'Check the ratio of 10:15',
+    'Look at 10-15 tickets', 'Call on 10/15', 'Bis Dienstag um 10:15 Uhr']) {
+    assert.equal(pin(text), null, text);
+  }
+  const german = estimate('Besprechung morgen um 10:15 Uhr für 20 Minuten');
+  assert.deepEqual([german.earliestDay, german.windowStart, german.windowEnd, german.minutes],
+    ['2026-11-24', '10:15', '10:35', 20]);
+  assert.equal(explicitStartFor({ text: 'Call at 09:00, send the recap by Friday at 10:15' }, settings.timeZone), '09:00');
+});
+
+test('an exact source clock overrides stale model windows, respects real bounds and never slides after a conflict', () => {
+  const task = { ...estimate('10:17 today for 30 minutes'), windowStart: '13:00', windowEnd: '17:00' };
+  const expected = utcRange('2026-11-23T18:17Z', '2026-11-23T18:47Z');
+  assert.deepEqual(slot(task), expected);
+  assert.deepEqual(slot(task, [utcRange('2026-11-23T17:00Z', expected.start), utcRange(expected.end, '2026-11-23T21:00Z')]), expected);
+  assert.equal(slot(task, [utcRange('2026-11-23T18:20Z', '2026-11-23T18:21Z')]), null);
+  assert.equal(slot(task, [], monday, { ...settings, startTime: '10:18' }), null);
+  assert.equal(slot(task, [], '2026-11-23T10:18:00-08:00'), null);
+  const longer = { ...task, minutes: 55 };
+  assert.equal(resizedClockWindow(task, 55, settings.timeZone), '11:12');
+  assert.deepEqual(slot(longer), utcRange(expected.start, '2026-11-23T19:12Z'));
+  const capped = { ...longer, text: 'Review at 10:17, finish by 11:00' };
+  assert.equal(resizedClockWindow(capped, 55, settings.timeZone), '11:00');
+  assert.equal(slot(capped), null);
+  const undated = { ...estimate('Call at 10:17 for 30 min'), windowEnd: '17:00' };
+  assert.deepEqual(slot(undated, [], '2026-11-23T10:18:00-08:00'),
+    utcRange('2026-11-24T18:17Z', '2026-11-24T18:47Z'));
+});
+
+test('queue catch-up only permits an active exact appointment captured no later than its start', () => {
+  const task = { ...estimate('Office hours today at 10:15 for 30 min'), createdAt: '2026-11-23T18:14Z' };
+  const now = '2026-11-23T18:25Z';
+  const check = (candidate, overrides = {}) => findSlot({ task: candidate, now, settings, allowInProgress: true, ...overrides });
+  const expected = utcRange('2026-11-23T18:15Z', '2026-11-23T18:45Z');
+  assert.deepEqual(check(task), expected);
+  assert.deepEqual(check({ ...task, createdAt: expected.start }), expected);
+  assert.equal(check(task, { allowInProgress: false }), null);
+  assert.equal(check(task, { now: expected.end }), null);
+  assert.equal(check(task, { busy: [utcRange('2026-11-23T18:17Z', '2026-11-23T18:18Z')] }), null);
+  assert.equal(check({ ...task, createdAt: null }), null);
+  assert.equal(check({ ...task, estimateRequestedAt: '2026-11-23T18:16Z' }), null);
+  assert.equal(check({ ...task, text: 'Process forms' }), null);
+});
+
+test('exact clocks survive DST folds, reject missing starts and use elapsed duration across the gap', () => {
+  const hours = { ...settings, workDays: [7], startTime: '00:00', endTime: '05:00' };
+  const spring = '2026-03-08T08:00Z';
+  assert.equal(slot(estimate('Class today at 02:15 for 30 min', spring), [], spring, hours), null);
+  assert.deepEqual(slot(estimate('Class today at 01:45 for 30 min', spring), [], spring, hours),
+    utcRange('2026-03-08T09:45Z', '2026-03-08T10:15Z'));
+  const autumn = '2026-11-01T07:00Z';
+  const repeated = estimate('Class today at 01:17 for 15 min', autumn);
+  const first = utcRange('2026-11-01T08:17Z', '2026-11-01T08:32Z');
+  assert.deepEqual(slot(repeated, [], autumn, hours), first);
+  assert.deepEqual(slot(repeated, [first], autumn, hours), utcRange('2026-11-01T09:17Z', '2026-11-01T09:32Z'));
 });
 
 test('spring daylight saving time preserves elapsed task duration and excludes nonexistent hours', () => {

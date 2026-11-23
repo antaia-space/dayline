@@ -92,12 +92,12 @@ class GoogleCalendars {
     return found?.calendarId === calendarId ? structuredClone(found) : null;
   }
 
-  hasOtherBusyEvent(account, { calendarId, eventId, start, end }) {
+  hasOtherBusyEvent(account, { calendarId, eventId, eventIds = [eventId], start, end }) {
     this.eventCalls.push({ method: 'hasOtherBusyEvent', account });
     this.checkAccess(account, calendarId, true);
-    assert.equal(this.events.get(eventId)?.calendarId, calendarId);
-    return [...this.meetings, ...this.events.values()].some(e => e.calendarId === calendarId && e.eventId !== eventId &&
+    const live = [...this.meetings, ...this.events.values()].filter(e => e.calendarId === calendarId &&
       Date.parse(e.end) > Date.parse(start) && Date.parse(e.start) < Date.parse(end));
+    return eventIds.some(id => !live.some(e => e.eventId === id)) || live.some(e => !eventIds.includes(e.eventId));
   }
 
   putTaskEvent(account, { calendarId, eventId, task, expectedEtag, actionUrl }) {
@@ -834,4 +834,121 @@ test('a saved remote fallback can retry in place with its legacy pinned date and
   assert.equal(upgraded.agent.model, 'test-model');
   assert.ok(upgraded.start.startsWith('2026-11-25T'));
   assert.equal(h.google.events.get(previous.remote.eventId).end, upgraded.end);
+});
+
+test('a later exact-time request shifts two verified Google reservations and preserves the other slots and event IDs', async () => {
+  const h = fixture();
+  const first = await create(h, 'Write the summary for 30 minutes today');
+  const second = await create(h, 'File receipts for 30 minutes today');
+  const untouched = await create(h, 'Review the brief for 30 minutes today');
+  const id = await h.service.createTask({ text: 'Interview at 9am today for 60 minutes' });
+  await successfulSync(h.service);
+  assert.equal(savedTask(h, id).start, at('09:00'));
+  assert.equal(h.google.events.get(first.remote.eventId).start, at('10:30'));
+  assert.equal(h.google.events.get(second.remote.eventId).start, at('11:00'));
+  assert.equal(h.google.events.get(untouched.remote.eventId).start, at('10:00'));
+  assert.equal(h.google.insertRequests, 4);
+  assert.ok(!h.google.eventCalls.some(call => call.method === 'deleteTaskEvent'));
+});
+
+test('real meetings overlapping an owned reservation remain occupied across every selected account and calendar', async () => {
+  for (const calendarId of ['work-primary', 'shared-room', 'home-primary']) {
+    const h = fixture();
+    const flex = await create(h);
+    const meeting = { calendarId, start: at('09:10'), end: at('09:20') };
+    h.google.meetings = [structuredClone(meeting)];
+    h.google.eventCalls = [];
+    const id = await h.service.createTask({ text: 'Interview today at 9am for 30 minutes' });
+    await successfulSync(h.service);
+    assert.equal(savedTask(h, id).start, null);
+    assert.match(savedTask(h, id).issue, /09:00/);
+    assert.equal(h.google.events.get(flex.remote.eventId).start, at('09:00'));
+    assert.deepEqual(h.google.meetings, [meeting]);
+    assert.ok(!h.google.eventCalls.some(call => ['putTaskEvent', 'deleteTaskEvent'].includes(call.method)));
+  }
+});
+
+test('a flexible Google event with no replacement is retained in its original slot', async () => {
+  const h = fixture();
+  h.service.updateSettings({ endTime: '09:30' });
+  const flex = await create(h, 'Prepare the brief today for 30 minutes');
+  const id = await h.service.createTask({ text: 'Review today at 9am for 30 minutes' });
+  await successfulSync(h.service);
+  assert.equal(savedTask(h, id).start, null);
+  assert.match(savedTask(h, id).issue, /no other open slot/);
+  assert.equal(h.google.events.get(flex.remote.eventId).start, at('09:00'));
+  assert.equal(h.google.insertRequests, 1);
+});
+
+test('a time chosen manually in Google remains fixed after restarting the planner', async () => {
+  const h = fixture();
+  const flex = await create(h);
+  h.google.change(flex.remote.eventId, { start: at('11:00'), end: at('11:30') });
+  await successfulSync(h.service);
+  const restarted = fixture(h.google, h.store.saved);
+  const id = await restarted.service.createTask({ text: 'Call today at 11am for 15 minutes' });
+  await successfulSync(restarted.service);
+  assert.equal(savedTask(restarted, id).start, null);
+  assert.equal(restarted.google.events.get(flex.remote.eventId).start, at('11:00'));
+  assert.equal(restarted.google.insertRequests, 1);
+});
+
+test('a Dayline block converted into a shared meeting in Google keeps its time',async () => {
+  const h = fixture();
+  const flex = await create(h);
+  h.google.change(flex.remote.eventId,{calendarAppointment:true});
+  const id = await h.service.createTask({text:'Interview today at 9am for 15 minutes'});
+  await successfulSync(h.service);
+  assert.equal(savedTask(h,id).start,null);
+  assert.equal(h.google.events.get(flex.remote.eventId).start,at('09:00'));
+  assert.equal(h.google.insertRequests,1);
+});
+
+test('a lost relocation response recovers after restart without duplicates or lost reservations', async () => {
+  const h = fixture();
+  const first = await create(h, 'Write the summary for 30 minutes today');
+  const second = await create(h, 'File receipts for 30 minutes today');
+  const put = h.google.putTaskEvent.bind(h.google);
+  let drop = true;
+  h.google.putTaskEvent = (account, input) => {
+    const result = put(account, input);
+    if (input.expectedEtag != null && drop) { drop = false; throw failure(503, 'Lost the relocation response'); }
+    return result;
+  };
+  const id = await h.service.createTask({ text: 'Interview at 9am today for 60 minutes' });
+  await h.service.queueSync();
+  assert.match(h.service.snapshot().connection.error, /relocation response/);
+  assert.equal(h.google.events.size, 2);
+  assert.equal(savedTask(h, first.id).start, at('09:00'));
+  assert.equal(h.google.events.get(first.remote.eventId).start, at('10:00'));
+  assert.equal(h.google.events.get(second.remote.eventId).start, at('09:30'));
+
+  const restarted = fixture(h.google, h.store.saved);
+  await successfulSync(restarted.service);
+  assert.equal(savedTask(restarted, id).start, at('09:00'));
+  assert.equal(savedTask(restarted, first.id).remote.manualTime, undefined);
+  assert.equal(h.google.events.get(first.remote.eventId).start, at('10:00'));
+  assert.equal(h.google.events.get(second.remote.eventId).start, at('10:30'));
+  assert.equal(h.google.insertRequests, 3);
+  await successfulSync(restarted.service);
+  assert.equal(h.google.events.size, 3);
+});
+
+test('a meeting that appears during relocation blocks the exact insertion on the final check', async () => {
+  const h = fixture();
+  const flexible = await create(h);
+  const put = h.google.putTaskEvent.bind(h.google);
+  h.google.putTaskEvent = (account, input) => {
+    const result = put(account, input);
+    if (input.expectedEtag != null) h.google.meetings.push({ calendarId: 'shared-room', start: at('09:00'), end: at('09:15') });
+    return result;
+  };
+  const id = await h.service.createTask({ text: 'Call today at 9am for 15 minutes' });
+  await h.service.queueSync();
+  assert.match(h.service.snapshot().connection.error, /occupies the requested time/);
+  assert.equal(savedTask(h, id).remote, null);
+  assert.equal(h.google.events.get(flexible.remote.eventId).start, at('09:15'));
+  await successfulSync(h.service);
+  assert.equal(savedTask(h, id).start, null);
+  assert.equal(h.google.insertRequests, 1);
 });

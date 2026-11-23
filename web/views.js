@@ -1,7 +1,8 @@
 import {
   addDays, button, categoryColor, dayIndex, displayTime, duration, element, formatDay,
-  hhmmMinutes, icon, instantMinutes, instantTime, weekdayNames, zonedDay
+  hhmmMinutes, icon, instantTime, weekdayNames, zonedDay
 } from "./ui.js";
+import { meetingCard, nonblockingMeeting, rangeOnDay } from "./meetings.js";
 
 const id = (key) => document.getElementById(key);
 
@@ -24,7 +25,7 @@ export function renderKey(categories) {
   }));
 }
 
-export function summary(container, tasks) {
+export function summary(container, tasks, meetings = 0) {
   const timed = tasks.filter(task => !task.allDay);
   const total = timed.reduce((n,t) => n + Number(t.minutes || 0),0);
   const allDay = tasks.length - timed.length;
@@ -34,6 +35,7 @@ export function summary(container, tasks) {
   if (timed.length) items.push(element("span","middle-dot","·"),element("span","",duration(total) + " planned"));
   if (allDay) items.push(element("span","middle-dot","·"),element("span","",allDay + " all-day"));
   if (completed) items.push(element("span","middle-dot","·"),element("span","",completed + " complete"));
+  if (meetings) items.push(element("span","middle-dot","·"),element("span","",meetings + (meetings === 1 ? " meeting" : " meetings")));
   container.replaceChildren(...items);
 }
 
@@ -113,7 +115,7 @@ function groupWeek(tasks,days,zone) {
   const grouped = new Map(days.map(day => [day,[]]));
   for (const task of tasks) {
     if (task.allDay && !task.pendingEstimate) {
-      for (const day of days) if (wallRange(task,day,zone)) grouped.get(day).push(task);
+      for (const day of days) if (rangeOnDay(task,day,zone)) grouped.get(day).push(task);
     } else grouped.get(taskDay(task,zone))?.push(task);
   }
   return grouped;
@@ -123,11 +125,13 @@ function ordered(tasks) {
   return [...tasks].sort((a,b) => String(a.start || a.createdAt).localeCompare(String(b.start || b.createdAt)) || a.text.localeCompare(b.text));
 }
 
-function dayStrip(container, days, selected, today, tasksByDay) {
+function dayStrip(container, days, selected, today, tasksByDay, calendar) {
   const buttons = days.map((day) => {
     const label = formatDay(day,{weekday:"long",month:"long",day:"numeric",year:"numeric"});
     const count = tasksByDay.get(day)?.length || 0;
-    const select = button(count ? "has-tasks" : "","pick-day",label + (count ? ", " + count + (count === 1 ? " task" : " tasks") : ""));
+    const meetings = calendar.get(day)?.meetings.length || 0;
+    const suffix = [count && count + (count === 1 ? " task" : " tasks"),meetings && meetings + (meetings === 1 ? " meeting" : " meetings")].filter(Boolean);
+    const select = button(count || meetings ? "has-tasks" : "","pick-day",[label,...suffix].join(", "));
     select.dataset.day = day;
     select.dataset.focus = container.id + "-" + day;
     select.setAttribute("aria-pressed",String(day === selected));
@@ -139,19 +143,20 @@ function dayStrip(container, days, selected, today, tasksByDay) {
   container.replaceChildren(...buttons);
 }
 
-export function renderWeek(state,{monday,selected,today,weekends}) {
+export function renderWeek(state,{monday,selected,today,weekends,events = []}) {
   const zone = state.settings.timeZone;
   const fullWeek = Array.from({length:7},(_,i) => addDays(monday,i));
   const days = weekends ? fullWeek : fullWeek.slice(0,5);
   const tasksByDay = groupWeek(ordered(state.tasks),fullWeek,zone);
+  const calendar = new Map(days.map(day => [day,calendarEntriesForDay(state,events,day,zone)]));
   const visible = new Set(days.flatMap(day => tasksByDay.get(day)));
   const hiddenWeekendTasks = new Set(fullWeek.slice(days.length).flatMap(day => tasksByDay.get(day)).filter(task => !visible.has(task))).size;
-  summary(id("week-summary"),[...visible]);
+  summary(id("week-summary"),[...visible],new Set(days.flatMap(day => calendar.get(day).meetings.map(entry => entry.meeting.id))).size);
   if (hiddenWeekendTasks) {
     const showWeekends = button("summary-link","show-weekends","Show weekend tasks",hiddenWeekendTasks + (hiddenWeekendTasks === 1 ? " weekend task" : " weekend tasks"));
     id("week-summary").append(element("span","middle-dot","·"),showWeekends);
   }
-  dayStrip(id("week-strip"),days,selected,today,tasksByDay);
+  dayStrip(id("week-strip"),days,selected,today,tasksByDay,calendar);
   const columns = days.map((day) => {
     const isToday = day === today;
     const off = !state.settings.workDays.includes(dayIndex(day));
@@ -175,7 +180,18 @@ export function renderWeek(state,{monday,selected,today,weekends}) {
     if (isToday) endControls.append(element("span","today-tag","Today"));
     head.append(jump,endControls);
     const body = element("div","day-body");
-    for (const task of tasksByDay.get(day)) body.append(taskRow(task,state));
+    const {meetings,anonymous} = calendar.get(day);
+    const entries = tasksByDay.get(day).map(task => ({task,...rangeOnDay(task,day,zone)}));
+    for (const entry of [...entries,...meetings,...anonymous].sort(entryOrder)) {
+      if (entry.task) body.append(taskRow(entry.task,state));
+      else if (entry.meeting) body.append(meetingCard(entry,day,false));
+      else {
+        const row = element("div","week-busy");
+        const time = entry.start === 0 && entry.end === 1440 ? "All day" : displayTime(entry.start) + "–" + displayTime(entry.end);
+        row.append(element("span","","Calendar busy"),element("small","",time));
+        body.append(row);
+      }
+    }
     column.append(head,body);
     return column;
   });
@@ -184,18 +200,6 @@ export function renderWeek(state,{monday,selected,today,weekends}) {
   board.replaceChildren(...columns);
 }
 
-function wallRange(interval,day,zone) {
-  if (!interval?.start || !interval?.end) return null;
-  const startDay = zonedDay(interval.start,zone);
-  const endDay = zonedDay(interval.end,zone);
-  if (!startDay || !endDay || startDay > day || endDay < day) return null;
-  const start = startDay < day ? 0 : instantMinutes(interval.start,zone);
-  const end = endDay > day ? 1440 : instantMinutes(interval.end,zone);
-  if (end <= start) return null;
-  return {start,end};
-}
-
-// Calendar free/busy is a union. Subtract task blocks to avoid showing the same reservation twice.
 function mergeRanges(ranges) {
   const result = [];
   for (const next of [...ranges].sort((a,b) => a.start - b.start || a.end - b.end)) {
@@ -204,6 +208,30 @@ function mergeRanges(ranges) {
     else result.push({...next});
   }
   return result;
+}
+
+function entryOrder(a,b) {
+  const allDay = e => Boolean(e.task?.allDay || e.meeting?.allDay);
+  return Number(allDay(b)) - Number(allDay(a)) || a.start - b.start || a.end - b.end;
+}
+
+export function calendarEntriesForDay(state,events,day,zone) {
+  const meetings = events.flatMap(meeting => {
+    const range = rangeOnDay(meeting,day,zone);
+    return range ? [{...range,kind:"meeting",meeting}] : [];
+  });
+  const busy = mergeRanges(state.busy.map(item => rangeOnDay(item,day,zone)).filter(Boolean));
+  const known = meetings.filter(entry => !nonblockingMeeting(entry.meeting));
+  const linked = state.settings.calendarMode === "sync" ? state.tasks
+    .filter(t => t.hasCalendarEvent ?? t.syncStatus === "synced")
+    .map(t => rangeOnDay(t,day,zone)).filter(Boolean) : [];
+  const identified = mergeRanges([...known,...linked]);
+  const anonymous = busy.flatMap(period => subtractRanges(period,identified).map(range => ({...range,kind:"busy"})));
+  // An invitation can be visible in Google Calendar without reserving the
+  // viewer's time. Free/busy is authoritative over the area it has verified.
+  const coverage = !state.connection.error && rangeOnDay({start:state.busyStart,end:state.busyEnd},day,zone);
+  const unverified = coverage ? known.flatMap(entry => subtractRanges(entry,[coverage])) : known;
+  return {meetings,anonymous,occupied:mergeRanges([...busy,...unverified])};
 }
 
 function subtractRanges(range, cuts) {
@@ -227,37 +255,37 @@ function agendaTask(entry,state) {
   return card;
 }
 
-export function renderAgenda(state,{monday,selected,today}) {
+export function renderAgenda(state,{monday,selected,today,events = []}) {
   const zone = state.settings.timeZone;
   const days = Array.from({length:7},(_,i) => addDays(monday,i));
   const tasksByDay = groupWeek(state.tasks,days,zone);
-  dayStrip(id("agenda-strip"),days,selected,today,tasksByDay);
+  const calendar = new Map(days.map(day => [day,calendarEntriesForDay(state,events,day,zone)]));
+  dayStrip(id("agenda-strip"),days,selected,today,tasksByDay,calendar);
   const taskEntries = state.tasks.flatMap((task) => {
-    const range = !task.pendingEstimate && wallRange(task,selected,zone);
+    const range = !task.pendingEstimate && rangeOnDay(task,selected,zone);
     return range ? [{...range,kind:"task",task}] : [];
   });
   const booked = mergeRanges(taskEntries);
-  const busyRanges = mergeRanges(state.busy.map((entry) => wallRange(entry,selected,zone)).filter(Boolean));
-  const entries = [...taskEntries];
-  for (const busy of busyRanges) {
-    for (const range of subtractRanges(busy,booked)) entries.push({...range,kind:"busy"});
-  }
+  const {meetings,anonymous,occupied} = calendar.get(selected);
+  const entries = [...taskEntries,...meetings,...anonymous];
   const workday = state.settings.workDays.includes(dayIndex(selected));
-  const coverage = !state.connection.error && wallRange({start:state.busyStart,end:state.busyEnd},selected,zone);
+  const coverage = !state.connection.error && rangeOnDay({start:state.busyStart,end:state.busyEnd},selected,zone);
   if (workday) {
     const hours = {start:hhmmMinutes(state.settings.startTime),end:hhmmMinutes(state.settings.endTime)};
-    for (const range of subtractRanges(hours,mergeRanges([...booked,...busyRanges]))) entries.push({...range,kind:"available"});
+    for (const range of subtractRanges(hours,mergeRanges([...booked,...occupied]))) entries.push({...range,kind:"available"});
   }
-  entries.sort((a,b) => a.start - b.start || a.end - b.end);
-  summary(id("agenda-summary"),taskEntries.map((entry) => entry.task));
+  entries.sort(entryOrder);
+  summary(id("agenda-summary"),taskEntries.map((entry) => entry.task),meetings.length);
   if (!entries.length) {
     id("agenda").replaceChildren(element("p","agenda-empty",workday ? "No time blocks for this day." : "Outside your working days. No tasks are scheduled."));
     return;
   }
   const rows = entries.map((entry) => {
     const row = element("div","agenda-slot");
-    row.append(element("span","agenda-start",entry.task?.allDay ? "All day" : displayTime(entry.start)));
+    const fullBusyDay = entry.kind === "busy" && entry.start === 0 && entry.end === 1440;
+    row.append(element("span","agenda-start",entry.task?.allDay || entry.meeting?.allDay || fullBusyDay ? "All day" : displayTime(entry.start)));
     if (entry.kind === "task") row.append(agendaTask(entry,state));
+    else if (entry.meeting) row.append(meetingCard(entry,selected,true));
     else {
       const isBusy = entry.kind === "busy";
       const block = element("div","agenda-block " + (isBusy ? "agenda-busy" : "agenda-free"));

@@ -87,6 +87,10 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
         const selectedAgent = agents?.selected ?? { provider: 'local', model: '' };
         return send(res, 200, 'application/json', JSON.stringify({ ...service.snapshot(), selectedAgent }));
       }
+      if (req.method === 'GET' && pathname === '/api/meetings') {
+        const week = await service.meetings({ from: url.searchParams.get('from'), to: url.searchParams.get('to') });
+        return send(res, 200, 'application/json', JSON.stringify(week));
+      }
       if (req.method === 'GET' && pathname === '/api/agent' && agents) {
         const details = await agents.status(url.searchParams.get('provider') ?? undefined);
         return send(res, 200, 'application/json', JSON.stringify({ ...details, durationNotes: durationNotes(service.data) }));
@@ -138,6 +142,7 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
       } else if (req.method === 'POST' && pathname === '/api/connection/disconnect') {
         await service.run(() => service.disconnect(body.sub));
       } else if (req.method === 'POST' && pathname === '/api/sync') {
+        service.meetingAgenda.expire();
         await service.queueSync();
         syncAfter = false;
       } else throw invalid('Unknown Dayline action.', 404);

@@ -273,6 +273,24 @@ test('checking an owned time slice sees concurrent recurring instances without r
   assert.equal(await hasOtherBusyEvent(token, slice), true);
 });
 
+test('a task event turned into an invitation or a recurring meeting is no longer a flexible reservation',async t => {
+  simulate(t,reply(event({attendees:[{self:true},{}]})),reply(event({recurrence:['RRULE:FREQ=WEEKLY']})),reply(event({attendees:[{self:true}]})));
+  const read = () => getTaskEvent(token,{calendarId,eventId,taskId:task.id});
+  assert.equal((await read()).calendarAppointment,true);
+  assert.equal((await read()).calendarAppointment,true);
+  assert.equal((await read()).calendarAppointment,undefined);
+});
+
+test('clearing overlapping owned blocks requires every expected event and no other opaque event',async t => {
+  const second = '22222222222222222222222222222222';
+  const both = [{id:eventId},{id:second}];
+  simulate(t,reply({items:both}),reply({items:both.slice(0,1)}),reply({items:[...both,{id:'another'}]}));
+  const query = () => hasOtherBusyEvent(token,{calendarId,eventIds:[eventId,second],start,end});
+  assert.equal(await query(),false);
+  assert.equal(await query(),true);
+  assert.equal(await query(),true);
+});
+
 test('an all-day event stays all-day on completion and clears date-only endpoints on an explicit move', async t => {
   const allDay = event({ start: { date: '2026-11-24' }, end: { date: '2026-11-25' } });
   simulate(t, reply(allDay), (_, init) => {

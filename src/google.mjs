@@ -12,9 +12,10 @@ const AVAILABILITY_SCOPES = [
   'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
   'https://www.googleapis.com/auth/calendar.events.freebusy',
 ];
+const MEETING_SCOPES = [...AVAILABILITY_SCOPES, 'https://www.googleapis.com/auth/calendar.events.readonly'];
 const SYNC_SCOPES = [...AVAILABILITY_SCOPES, 'https://www.googleapis.com/auth/calendar.events'];
 const WRITABLE = new Set(['owner', 'writer', 'writerWithoutPrivateAccess']);
-const EVENT_FIELDS = 'id,etag,status,summary,start,end,colorId,extendedProperties/private';
+const EVENT_FIELDS = 'id,etag,status,summary,start,end,colorId,extendedProperties/private,attendees(self),attendeesOmitted,recurrence,recurringEventId,hangoutLink,conferenceData/conferenceId,eventType';
 const CHECK = '(?:[✓✔☑]\\uFE0F?|\\[x\\])';
 const LEADING_CHECK = new RegExp('^(?:' + CHECK + '\\s*)+', 'iu');
 const TRAILING_CHECK = new RegExp('(?:\\s*' + CHECK + ')+$', 'iu');
@@ -32,11 +33,11 @@ function invalidResponse(message) {
   return new GoogleError(502, 'invalidResponse', message);
 }
 
-async function googleRequest(url, init = {}) {
+async function googleRequest(url, init = {}, request = fetch) {
   let response;
   let data;
   try {
-    response = await fetch(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(20000) });
+    response = await request(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(20000) });
     const body = await response.text();
     try {
       data = JSON.parse(body);
@@ -74,11 +75,12 @@ function authorized(accessToken, options = {}) {
 
 function scopesFor(mode) {
   if (mode === 'availability') return AVAILABILITY_SCOPES;
+  if (mode === 'details') return MEETING_SCOPES;
   if (mode === 'sync') return SYNC_SCOPES;
   throw new GoogleError(400, 'invalidMode', 'Choose availability or calendar sync for this connection.');
 }
 
-export function authorizationUrl({ clientId, redirectUri, state, codeChallenge, mode = 'availability' }) {
+export function authorizationUrl({ clientId, redirectUri, state, codeChallenge, mode = 'availability', loginHint }) {
   const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
   url.search = new URLSearchParams({
     client_id: clientId,
@@ -91,6 +93,7 @@ export function authorizationUrl({ clientId, redirectUri, state, codeChallenge, 
     code_challenge: codeChallenge,
     code_challenge_method: 'S256',
   }).toString();
+  if (loginHint) url.searchParams.set('login_hint', loginHint);
   return url.toString();
 }
 
@@ -140,11 +143,11 @@ export async function getProfile(accessToken) {
   return { sub: profile.sub, email: profile.email };
 }
 
-async function paginatedItems(accessToken, url, kind) {
+export async function paginatedItems(accessToken, url, kind, request = fetch) {
   const items = [];
   const seen = new Set();
   for (;;) {
-    const page = await googleRequest(url.toString(), authorized(accessToken));
+    const page = await googleRequest(url.toString(), authorized(accessToken), request);
     if (Array.isArray(page.items)) {
       items.push(...page.items);
     } else if (page.items !== undefined || page.kind !== kind) {
@@ -167,7 +170,7 @@ export async function listCalendars(accessToken) {
   const url = new URL(API + '/users/me/calendarList');
   url.searchParams.set('showHidden', 'true');
   url.searchParams.set('maxResults', '250');
-  url.searchParams.set('fields', 'kind,nextPageToken,items(id,summary,summaryOverride,backgroundColor,accessRole,primary,deleted)');
+  url.searchParams.set('fields', 'kind,nextPageToken,items(id,summary,summaryOverride,backgroundColor,accessRole,primary,deleted,timeZone)');
   const calendars = new Map();
   for (const item of await paginatedItems(accessToken, url, 'calendar#calendarList')) {
     if (item.deleted) continue;
@@ -175,6 +178,8 @@ export async function listCalendars(accessToken) {
     calendars.set(item.id, {
       id: item.id,
       name: item.summaryOverride || item.summary || item.id,
+      accessRole: item.accessRole,
+      timeZone: item.timeZone || null,
       canCheckAvailability: canCheckAvailability(item.id),
       canInspectReservations: item.accessRole === 'owner' || item.accessRole === 'writer',
       writable: canCheckAvailability(item.id) && WRITABLE.has(item.accessRole),
@@ -228,7 +233,7 @@ export async function getBusy(accessToken, { calendarIds, start, end }) {
   return intervals.sort((a, b) => a.start.localeCompare(b.start));
 }
 
-function eventCollection(calendarId) {
+export function eventCollection(calendarId) {
   if (!calendarId || calendarId === '.' || calendarId === '..') {
     throw new GoogleError(400, 'invalidCalendar', 'Choose a destination calendar.');
   }
@@ -263,7 +268,11 @@ function normalizeEvent(event, expectedTaskId) {
   if (!event.id || !event.etag || (owned && !validInterval(start, end))) {
     throw invalidResponse('Google returned an incomplete event. Sync again to check it.');
   }
-  return { eventId: event.id, taskId, ...splitTitle(event.summary), start, end, etag: event.etag, owned };
+  const calendarAppointment = Boolean(event.attendeesOmitted || event.attendees?.some(person => !person.self) ||
+    event.recurrence?.length || event.recurringEventId || event.hangoutLink || event.conferenceData?.conferenceId ||
+    (event.eventType && event.eventType !== 'default'));
+  return { eventId: event.id, taskId, ...splitTitle(event.summary), start, end, etag: event.etag, owned,
+    ...(calendarAppointment && { calendarAppointment: true }) };
 }
 
 async function readEvent(accessToken, calendarId, eventId) {
@@ -311,8 +320,10 @@ export async function listTaskEvents(accessToken, { calendarId }) {
 
 // Used only on a fully visible sync destination to test an edited reservation.
 // Basic identifiers and visibility are sufficient to detect another busy event.
-export async function hasOtherBusyEvent(accessToken, { calendarId, eventId, start, end }) {
-  checkEventId(eventId);
+export async function hasOtherBusyEvent(accessToken, { calendarId, eventId, eventIds = [eventId], start, end }) {
+  const expected = new Set(eventIds);
+  if (!expected.size) throw new GoogleError(400, 'missingEvent', 'Choose the reservation to check.');
+  for (const id of expected) checkEventId(id);
   if (!validInterval(start, end)) throw new GoogleError(400, 'invalidInterval', 'Choose a valid time range.');
   const url = new URL(eventCollection(calendarId));
   url.searchParams.set('timeMin', start);
@@ -322,7 +333,8 @@ export async function hasOtherBusyEvent(accessToken, { calendarId, eventId, star
   url.searchParams.set('fields', 'kind,nextPageToken,items(id,status,transparency)');
   const events = await paginatedItems(accessToken, url, 'calendar#events');
   const live = events.filter(event => event?.status !== 'cancelled');
-  return !live.some(event => event?.id === eventId) || live.some(event => event?.id !== eventId && event?.transparency !== 'transparent');
+  const seen = new Set(live.map(event => event?.id));
+  return [...expected].some(id => !seen.has(id)) || live.some(event => !expected.has(event?.id) && event?.transparency !== 'transparent');
 }
 
 function actionLink(actionUrl, done) {

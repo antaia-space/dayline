@@ -6,6 +6,7 @@ import { renderAgenda, renderBacklog, renderKey, renderWeek } from "./views.js";
 import { createAgentSettings, estimateSource } from "./agent.js";
 import { createComposer } from "./composer.js";
 import { createDurationControls } from "./duration.js";
+import { createMeetingDetails, createMeetingFeed } from "./meetings.js";
 import { localRead,localWrite } from "./outbox.js";
 
 const byId = (id) => document.getElementById(id);
@@ -42,6 +43,9 @@ const composer = createComposer({
   context:() => ({state,view,monday,selectedDay,compact:compact.matches})
 });
 const durationControls = createDurationControls({api,refresh,getState:() => state,notify:toast});
+const meetings = createMeetingFeed({read:api,changed:render});
+const meetingDetails = createMeetingDetails({root:byId("planner"),zone:() => state.settings.timeZone,
+  find:id => meetings.current.events.find(event => event.id === id)});
 
 for (const holder of document.querySelectorAll("[data-icon]")) holder.append(icon(holder.dataset.icon));
 for (const [index,name] of weekdayNames.entries()) {
@@ -112,7 +116,7 @@ async function api(path, method = "GET", body) {
   return data;
 }
 
-async function refresh(force = false) {
+async function refresh(force = false, forceMeetings = false) {
   const request = ++lastRequest;
   try {
     const next = await api("/api/state");
@@ -138,6 +142,7 @@ async function refresh(force = false) {
       weekends = saved === "true" || (saved === null && (dayIndex(day) > 5 || next.settings.workDays.some((d) => d > 5)));
     }
     if (!weekends && view === "week" && dayIndex(selectedDay) > 5) selectedDay = addDays(monday,4);
+    meetings.update(state,monday,forceMeetings);
     const paint = JSON.stringify([state.tasks,state.categories,state.settings,state.selectedAgent,state.busy,state.busyStart,state.busyEnd,state.connection,day,selectedDay]);
     if (force || lastPaint !== paint) {
       render();
@@ -168,7 +173,7 @@ function render() {
   const active = document.activeElement;
   const bookmark = active?.dataset.focus;
   const weekView = view === "week";
-  const context = {monday,selected:selectedDay,today,weekends};
+  const context = {monday,selected:selectedDay,today,weekends,events:meetings.update(state,monday).events};
   byId("view-week").setAttribute("aria-pressed",String(weekView));
   byId("view-day").setAttribute("aria-pressed",String(!weekView));
   byId("week-section").hidden = !weekView;
@@ -188,15 +193,20 @@ function render() {
     byId(id).setAttribute("aria-label",prefix + " " + unit);
     byId(id).title = prefix + " " + unit;
   }
-  if (weekView) renderWeek(state,context);
-  else renderAgenda(state,context);
+  if (weekView) {
+    byId("agenda").replaceChildren();
+    renderWeek(state,context);
+  } else {
+    byId("week-board").replaceChildren();
+    renderAgenda(state,context);
+  }
   renderBacklog(state);
   durationControls.paint();
   composer.update();
   renderKey(state.categories);
   const account = state.connection;
   const readOnly = calendarMode() === "availability";
-  const status = !account.connected ? "Local planner" : account.error ? "Calendar needs attention" : account.syncing ? (readOnly ? "Checking availability" : "Syncing calendars") : (readOnly ? "Availability only" : "Calendar sync on");
+  const status = !account.connected ? "Local planner" : account.error ? "Calendar needs attention" : account.syncing ? (readOnly ? "Checking availability" : "Syncing calendars") : (readOnly ? (account.accounts?.some(a => a.meetingDetails) ? "Read-only calendars" : "Availability only") : "Calendar sync on");
   byId("connection-text").textContent = status;
   byId("connection-status").setAttribute("aria-label",status + ". Open calendar settings");
   byId("connection-status").title = status + (account.connected && account.email ? " · " + account.email : "");
@@ -214,6 +224,7 @@ function render() {
   byId("hours-summary").textContent = workdaysLabel(hours.workDays) + " · " + displayTime(hhmmMinutes(hours.startTime)) + "–" + displayTime(hhmmMinutes(hours.endTime)) + " · " + hours.timeZone.replaceAll("_"," ");
   byId("hours-open").title = "Edit working hours and time zone";
   renderPlanningNote();
+  meetingDetails.sync();
   if (bookmark && !active.isConnected) {
     const matches = document.querySelectorAll('[data-focus="' + CSS.escape(bookmark) + '"]');
     const visible = [...matches].find(node => !node.disabled && node.getClientRects().length);
@@ -223,26 +234,28 @@ function render() {
 
 function renderPlanningNote() {
   const note = byId("planning-note");
-  let label;
-  let explanation;
+  const lines = [];
+  const add = (...pieces) => {
+    const line = element("span");
+    line.append(...pieces);
+    lines.push(line);
+  };
+  const settingsLink = label => button("","calendar-settings",label,label);
   if (state.connection.error) {
-    label = "Calendar settings";
-    explanation = state.connection.error;
+    add(state.connection.error," ",settingsLink("Calendar settings"));
   } else if (!state.connection.connected) {
-    label = "Connect Google Calendar";
-    explanation = calendarMode() === "availability" ? "to plan around your busy times." : "to place scheduled tasks on your calendar.";
+    add(settingsLink("Connect Google Calendar"),calendarMode() === "availability" ? " to see meetings and plan around busy times." : " to place scheduled tasks on your calendar.");
   } else if (view === "day" && state.busyStart && state.busyEnd && (selectedDay < zonedDay(state.busyStart,state.settings.timeZone) || selectedDay >= zonedDay(state.busyEnd,state.settings.timeZone))) {
-    explanation = "Calendar availability has not been checked for this date.";
+    add("Calendar availability has not been checked for this date.");
   }
-  note.hidden = !explanation;
-  if (explanation) {
-    const text = element("span");
-    if (label && !state.connection.error) { text.append(button("","calendar-settings",label,label),document.createTextNode(" " + explanation)); }
-    else {
-      text.append(document.createTextNode(explanation));
-      if (label) text.append(document.createTextNode(" "),button("","calendar-settings",label,label));
-    }
-    note.replaceChildren(icon("info"),text);
+  for (const warning of meetings.current.warnings) add(warning);
+  if (state.connection.accounts?.some(account => !account.meetingDetails)) {
+    add(settingsLink("Show meeting details")," to see titles, guests and join links for accounts sharing only busy times.");
+  }
+  note.hidden = !lines.length;
+  if (lines.length) {
+    const text = element("div","planning-lines");
+    text.append(...lines); note.replaceChildren(icon("info"),text);
   }
 }
 
@@ -420,7 +433,7 @@ function updateModeControls() {
   chooser.value = selected;
   chooser.disabled = savingCalendarMode;
   byId("mode-description").textContent = selected === "availability"
-    ? "Dayline reads busy times from your selected calendars. Task blocks and completion stay on this Mac."
+    ? "Dayline can show meetings and plan around busy times on your selected calendars. Task blocks and completion stay on this Mac."
     : "Dayline can write upcoming, unfinished tasks to Google Calendar as colored events and sync completion in both directions.";
   byId("mode-actions").hidden = !dirty;
   byId("apply-mode").textContent = selected === "sync" ? "Enable event syncing" : "Use availability only";
@@ -428,6 +441,7 @@ function updateModeControls() {
   byId("cancel-mode").disabled = savingCalendarMode;
   byId("google-login").hidden = !state.connection.configured || dirty || savingCalendarMode;
   byId("calendar-form").hidden = !state.connection.connected || dirty || savingCalendarMode;
+  for (const control of byId("calendar-accounts").querySelectorAll('[data-action="meeting-access"]')) control.disabled = dirty || savingCalendarMode;
 }
 
 byId("calendar-mode").addEventListener("change",() => {
@@ -480,7 +494,14 @@ function fillCalendarSettings() {
     remove.dataset.sub = account.sub;
     remove.addEventListener("click",() => disconnect(account,remove));
     const identity = element("div","account-identity");
-    identity.append(element("strong","",account.email),element("small","",account.mode === "sync" ? "Google permission to read and write events" : "Google permission to read busy times"));
+    const grant = account.meetingDetails ? (events && account.mode === "sync" ? "Meeting details and task event syncing" : "Read-only meeting details and busy times") : "Busy times only";
+    identity.append(element("strong","",account.email),element("small","",grant));
+    if (!account.meetingDetails && connection.configured) {
+      const access = button("account-access","meeting-access","Show meeting details for " + account.email,"Show meeting details");
+      access.disabled = savingCalendarMode || Boolean(calendarModeDraft && calendarModeDraft !== calendarMode());
+      access.addEventListener("click",() => startConnection(access,{mode:"details",accountSub:account.sub}));
+      identity.append(access);
+    }
     row.append(identity,remove);
     return row;
   }));
@@ -587,15 +608,14 @@ byId("oauth-file").addEventListener("change",async (event) => {
   finally { input.disabled = false; input.value = ""; }
 });
 
-byId("connect-account").addEventListener("click",async () => {
-  const start = byId("connect-account");
+async function startConnection(start,options) {
   const link = byId("continue-google");
   const savedMode = calendarMode();
   if (savingCalendarMode || (calendarModeDraft && calendarModeDraft !== savedMode)) return;
   errorAt("settings-error");
   start.disabled = true;
   try {
-    const {url} = await api("/api/connection/start","POST",{expectedMode:savedMode});
+    const {url} = await api("/api/connection/start","POST",{expectedMode:savedMode,...options});
     if (calendarMode() !== savedMode || (calendarModeDraft && calendarModeDraft !== savedMode)) return;
     const destination = new URL(url);
     if (destination.protocol !== "https:" || destination.hostname !== "accounts.google.com") throw new Error("The sign-in address was unavailable. Try connecting again.");
@@ -604,7 +624,9 @@ byId("connect-account").addEventListener("click",async () => {
     link.click();
   } catch (error) { errorAt("settings-error",error.message); }
   finally { start.disabled = false; }
-});
+}
+byId("connect-account").addEventListener("click",event =>
+  startConnection(event.currentTarget,calendarMode() === "availability" ? {mode:"details"} : {}));
 
 async function disconnect(account,control) {
   if (!window.confirm("Disconnect " + account.email + " from Dayline on this Mac?")) return;
@@ -625,7 +647,7 @@ byId("sync-now").addEventListener("click",async () => {
   byId("sync-label").textContent = refreshLabel(true);
   try {
     await api("/api/sync","POST",{});
-    await refresh(true);
+    await refresh(true,true);
     if (state.connection.error) toast(state.connection.error);
     else if (state.connection.syncing) toast(refreshLabel(true));
     else toast(calendarMode() === "availability" ? "Calendar availability refreshed." : "Calendars synced.");

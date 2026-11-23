@@ -19,3 +19,5 @@ Give the ordinary, unadjusted duration estimate. When durationHistory is present
 Use the supplied local date, current time, and time zone to resolve relative dates. Report dates as YYYY-MM-DD and clocks as 24-hour HH:mm. The workweek is supplied for interpreting terms such as “end of the workweek.” It does not itself impose task-specific constraints. Leave unspecified limits null.
 
 For a task requested on one day, set earliestDay and latestDay to that day. “By Friday” sets only latestDay. “Starting Tuesday” sets only earliestDay. A dated cutoff such as “by Friday at 3pm” uses deadlineTime on latestDay. A daily restriction such as “before noon” uses windowEnd. At an exact start time set windowStart to that time and windowEnd to the stated or estimated finish. A time window describes availability for this task, not its duration. Do not choose a particular day or hour simply because it seems convenient.
+
+For “eat breakfast for 30 minutes at 10:15,” use the title “Eat breakfast,” 30 minutes, windowStart 10:15 and windowEnd 10:45. Preserve the requested clock time even if another task might occupy it. The local scheduler checks meetings and moves flexible tasks.

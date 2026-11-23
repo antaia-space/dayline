@@ -39,7 +39,8 @@ function external(url) {
     const allowed = ['accounts.google.com', 'console.cloud.google.com', 'console.developers.google.com', 'developers.google.com',
       'developers.openai.com', 'geminicli.com', 'antigravity.google', 'code.claude.com', 'claude.com'];
     if (target.protocol === 'https:' && !target.username && !target.password &&
-      (allowed.includes(target.hostname) || (target.hostname === 'github.com' && target.pathname.startsWith('/antaia-space/dayline')))) {
+      (allowed.includes(target.hostname) || (target.hostname === 'github.com' && target.pathname.startsWith('/antaia-space/dayline')) ||
+       service?.meetingAgenda.containsLink(target.href))) {
       void shell.openExternal(target.href);
     }
   } catch { /* Ignore unsupported navigation. */ }
