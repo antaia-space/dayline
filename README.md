@@ -6,7 +6,7 @@ Dayline finds time for your to-do list. Write a task in plain English and it est
 
 ## Install on a Mac
 
-1. Sign in to GitHub with access to the Antaia repository. For an Apple silicon or Intel Mac running macOS 13 or later, download **Dayline-1.5.0-mac-universal.zip**. [Latest Mac release](https://github.com/antaia-space/dayline/releases/latest)
+1. Sign in to GitHub with access to the Antaia repository. Download the universal Mac ZIP for an Apple silicon or Intel Mac running macOS 13 or later. [Latest Mac release](https://github.com/antaia-space/dayline/releases/latest)
 2. Unzip the download, drag **Dayline.app** to **Applications**, and open it. To use the same planner in your browser, choose **File → Open in Browser** in the Mac app. Both views follow your system’s light or dark appearance.
 
 The internal build uses an ad hoc signature and has not been notarized by Apple. If your Mac’s launch policy requires approval, follow Antaia’s approved procedure or run the app from source below.
@@ -21,6 +21,12 @@ The internal build uses an ad hoc signature and has not been notarized by Apple.
 Calendar access is read-only by default. Task blocks, checkmarks, and deletions stay on your Mac. Google’s busy periods keep those times clear for meetings. If Google cannot confirm availability, upcoming tasks wait under **Unscheduled** until a refresh succeeds. Choose **Refresh availability** to retry. After an internal Mac update, macOS may ask for access to **Dayline Safe Storage** in Keychain. Allow that item in the system dialog and refresh. You can keep capturing and estimating tasks while calendar access is waiting.
 
 Hover over a meeting or select it in either calendar view to see its time, organizer, and guests’ responses. Choose **Join** to open the meeting in your browser, or open the original event in Google Calendar. Google controls which details and guests you can see on shared calendars. Calendars shared as free/busy show anonymous busy blocks. Entries marked free can appear in the agenda while leaving that time available for tasks. Dayline keeps meeting details in memory on your Mac and sends only task information to the task agent. [Google Calendar permissions](https://developers.google.com/workspace/calendar/api/auth)
+
+### Live meeting updates
+
+With your Antaia Google account connected, the Mac app subscribes to changes on your selected calendars. When Google delivers a change, Dayline refreshes the meeting, frees its former slot and replans flexible tasks in every open planner window. An open meeting panel follows changes to the time, guest responses and joining details. **Settings → Calendars** shows how many calendars have live delivery.
+
+Antaia hosts the notification receiver on Cloudflare. Dayline proves workspace membership with a Google ID token issued for the Dayline client. Google sends the receiver calendar channel headers. The receiver forwards an opaque change signal to your Mac. Meeting content, tasks and Google credentials that can read calendar data stay on your Mac or with Google. If a live channel disconnects, Dayline checks Google directly while reconnecting. Reopening the app or waking the Mac also catches up on changes. Google controls notification timing and can occasionally miss a notification. [Google Calendar push delivery](https://developers.google.com/workspace/calendar/api/guides/push)
 
 ### Google Calendar setup
 
@@ -48,11 +54,13 @@ Enter **“Move the budget review task to Wednesday”** to reschedule the exist
 
 Dayline resolves direct instructions locally. For indirect phrasing such as **“Wednesday would work better for the budget review”**, the selected subscription agent can interpret the sentence and its date/time context. Task matching and availability checks happen on your Mac. If two tasks match, their names and scheduling details appear under the entry field. Select the one you mean, edit the request, or explicitly choose **Add as new task**. You can keep entering other tasks while a choice is open.
 
+The day you’re viewing helps identify the task, including when your wording uses a familiar abbreviation, a typo or a checklist item. When viewing tomorrow, **“Move the IC presentation prep to today”** moves the matching task to your actual local date. For an earlier unmatched request, choose **Try matching again**.
+
 ### Reorder the day
 
 Drag the grip on the left edge of a flexible task to place it above or below another task in its day. The five-minute controls stay at the right edge. You can also click or tap the grip and choose **Move earlier** or **Move later**, or focus it and use the up and down arrow keys. The same controls let you prioritize tasks in **Unscheduled**. The desktop and browser save one order. Working hours, time windows, fixed tasks and Google meetings determine where that order fits.
 
-Dayline packs flexible work into the earliest available slots and checks Google about once a minute while the app runs. When a meeting appears, moves, or disappears, the next check replans your tasks. Already-queued work can start at the end of the preceding block when a refresh comes a few minutes later and that task would still be underway. A newly entered task starts from its capture time or later. Short blocks in the day agenda take less vertical space than long ones.
+Dayline packs flexible work into the earliest available slots and replans when a meeting appears, moves or disappears. Already-queued work can start at the end of the preceding block when a refresh comes a few minutes later and that task would still be underway. A newly entered task starts from its capture time or later. Short blocks in the day agenda take less vertical space than long ones.
 
 Checking off a task before its scheduled start frees the whole slot. The day agenda shows the checked item beside the block that takes its place, or below it on a narrow screen. The checked line uses a short display title. Open it for the full wording, checklist and original time. Several completions in the same slot share an expandable line. Items without a matching time appear under **Completed** on their original day. Finishing a task during its slot releases the unused portion. Reopen it to schedule the unfinished work again.
 
@@ -90,7 +98,7 @@ Codex defaults to `gpt-6.2-sol` with **low** reasoning effort. For Google or Ant
 2. The next successful sync can publish upcoming, unfinished tasks as events. Google receives their titles, times, category colors, and completion state. Tick a task in Dayline to mark its linked event with ✓. From Google Calendar, add ✓ to either end of an event title, or open **Mark complete** in the event description and confirm on the Mac running Dayline. Remove the title’s ✓ or uncheck the task to reopen it.
 3. **Sync now** retries pending changes. Dayline checks the event version before updating or deleting it so it can reconcile edits made in Google Calendar. Confirming **Delete task** also removes its linked event while event syncing is enabled. To pause calendar writes, choose **Read calendars, keep tasks local** and confirm the change.
 
-Closing the Mac window keeps Dayline running and checking Google about once a minute. After quitting, reopen Dayline to catch up. The planner lives in `~/Library/Application Support/Dayline`. The desktop app protects Google credentials with macOS Keychain-backed encryption.
+Closing the Mac window keeps Dayline listening for calendar changes. After quitting, reopen Dayline to catch up. The planner lives in `~/Library/Application Support/Dayline`. The desktop app protects Google credentials with macOS Keychain-backed encryption.
 
 ## Run from source
 
@@ -110,3 +118,9 @@ npm start
 | `npm run dev` | Start the browser-only development server. Open the single-use URL printed in the terminal. |
 
 The app and **File → Open in Browser** share the desktop profile on loopback port 43127. The development server runs on `127.0.0.1:43128` and stores its separate profile in `~/Library/Application Support/Dayline Development`.
+
+### Maintain the Antaia receiver
+
+The Mac app uses the `dayline-calendar` Worker in Antaia’s Cloudflare account. Google delivers callbacks to its public HTTPS address. Each running Mac opens an authenticated outbound WebSocket. The Worker checks the Dayline client ID and the account’s verified Antaia Workspace membership before issuing separate, expiring receive and notification tickets. A Durable Object forwards signals to each connected Mac and can hibernate between messages.
+
+For an update, run `npm ci`, sign in to Wrangler as an Antaia administrator, and run `npx wrangler@4.167.0 deploy --config relay/wrangler.jsonc`. Cloudflare holds the existing `RELAY_SECRET`. A new installation of the receiver needs a cryptographically random secret with at least 32 bytes and the public Dayline Desktop OAuth client ID. The Mac app reads `DAYLINE_PUSH_RELAY` as an optional HTTPS origin override. The browser-only development server enables the hosted receiver only when this variable is set. [Receiver health](https://dayline-calendar.antaia-space.workers.dev/health)

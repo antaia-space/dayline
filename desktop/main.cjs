@@ -116,10 +116,12 @@ else {
     const agents = new TaskAgents({ store, helperPath: fs.existsSync(estimator) ? estimator : null });
     service = new DaylineService({ store, vault,
       estimate: (text, context) => agents.estimate(text, context), bundledClient: loadBundledClient(resources) });
-    local = await startServer({ service, agents, webRoot: path.join(__dirname, '..', 'web'), port: Number(process.env.DAYLINE_PORT || 43127) });
+    const relay = process.env.DAYLINE_PUSH_RELAY ?? 'https://dayline-calendar.antaia-space.workers.dev';
+    local = await startServer({ service, agents, webRoot: path.join(__dirname, '..', 'web'), port: Number(process.env.DAYLINE_PORT || 43127),
+      calendarPushOptions: relay ? { origin: relay } : undefined });
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     if (app.isPackaged) app.setAsDefaultProtocolClient('dayline');
-    powerMonitor.on('resume', () => { if (service.data.accounts.length) void service.queueSync().catch(() => {}); });
+    powerMonitor.on('resume', () => local.resumeCalendars());
     installMenu();
     showPlanner(requestedPage);
     if (browserRequested) void openBrowserPlanner();

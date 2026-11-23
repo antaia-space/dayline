@@ -1,0 +1,14 @@
+{
+  "name": "dayline-calendar",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "logpush": false,
+  "observability": { "enabled": false, "logs": { "enabled": false }, "traces": { "enabled": false } },
+  "vars": {
+    "GOOGLE_CLIENT_ID": "1084728392138-s82su94gcrvrs8le83j8ck8997kid0rb.apps.googleusercontent.com"
+  },
+  "durable_objects": { "bindings": [{ "name": "STREAMS", "class_name": "DeviceStream" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DeviceStream"] }]
+}

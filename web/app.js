@@ -9,6 +9,7 @@ import { createDurationControls } from "./duration.js";
 import { createTaskOrder } from "./task-order.js";
 import { createSubtaskControls, overrunNote } from "./subtasks.js";
 import { createMeetingDetails, createMeetingFeed } from "./meetings.js";
+import { createCalendarUpdates } from "./calendar-updates.js";
 import { localRead,localWrite } from "./outbox.js";
 
 const byId = (id) => document.getElementById(id);
@@ -34,6 +35,10 @@ let settingsSignature = "";
 let calendarModeDraft = null;
 let savingCalendarMode = false;
 let lastRequest = 0;
+let calendarGeneration = 0;
+let displayedGeneration = 0;
+let stateRead = null;
+let calendarPaint = null;
 let lastPaint = "";
 let lastConnection = "";
 let noticeTimer;
@@ -47,8 +52,19 @@ const composer = createComposer({
 const durationControls = createDurationControls({api,refresh,getState:() => state,notify:toast});
 const taskOrder = createTaskOrder({root:byId("planner"),api,refresh,getState:() => state,notify:toast,repaint:render});
 const subtaskControls = createSubtaskControls({api,refresh,getState:() => state,notify:toast,editor:byId("editor-checklist")});
-const meetings = createMeetingFeed({read:api,changed:render});
+const meetings = createMeetingFeed({read:(url,signal) => api(url,"GET",undefined,signal),
+  changed:() => {
+    if (calendarPaint?.request === lastRequest && calendarPaint.generation === calendarGeneration) calendarPaint.changed = true;
+    else render();
+  },live:() => calendarUpdates.connected});
+const calendarUpdates = createCalendarUpdates({
+  open:typeof EventSource === "function" ? () => new EventSource("/api/updates") : null,
+  visible:() => !document.hidden,canCheck:() => Boolean(state?.connection.connected),
+  check:() => api("/api/calendar/check","POST",{},AbortSignal.timeout(6000)),
+  invalidate:() => { calendarGeneration++; stateRead?.abort(); meetings.invalidate(); },refresh:() => refresh()
+});
 const meetingDetails = createMeetingDetails({root:byId("planner"),zone:() => state.settings.timeZone,
+  authorized:() => Boolean(state?.connection.connected && state.connection.accounts?.some(account => account.meetingDetails)),
   find:id => meetings.current.events.find(event => event.id === id)});
 
 for (const holder of document.querySelectorAll("[data-icon]")) holder.append(icon(holder.dataset.icon));
@@ -86,16 +102,19 @@ function refreshLabel(inProgress) {
   return inProgress ? "Syncing…" : "Sync now";
 }
 
-async function api(path, method = "GET", body) {
+async function api(path, method = "GET", body, cancellation) {
   if (loadingPairing) throw new Error("Reconnect this browser to Dayline on this Mac.");
   let response;
   try {
+    const timeout = AbortSignal.timeout(115000);
+    const signal = cancellation ? (AbortSignal.any ? AbortSignal.any([cancellation,timeout]) : cancellation) : timeout;
     response = await fetch(path,{
       method, credentials:"same-origin", cache:"no-store",
       ...(body !== undefined ? {headers:{"Content-Type":"application/json"},body:JSON.stringify(body)} : {}),
-      signal:AbortSignal.timeout(115000)
+      signal
     });
   } catch (error) {
+    if (cancellation?.aborted) throw error;
     if (error.name === "TimeoutError") throw new Error("Dayline took too long to respond. Refresh before trying again.");
     throw new Error("The local planner is unavailable. Open Dayline on this Mac, then try again.");
   }
@@ -122,9 +141,13 @@ async function api(path, method = "GET", body) {
 
 async function refresh(force = false, forceMeetings = false) {
   const request = ++lastRequest;
+  if (forceMeetings) { calendarGeneration++; meetings.invalidate(); }
+  const generation = calendarGeneration;
+  const controller = new AbortController();
+  stateRead?.abort(); stateRead = controller;
   try {
-    const next = await api("/api/state");
-    if (request !== lastRequest) return;
+    const next = await api("/api/state","GET",undefined,controller.signal);
+    if (request !== lastRequest || generation !== calendarGeneration) return;
     const zone = next.settings.timeZone;
     const day = zonedDay(next.now || Date.now(),zone);
     state = next;
@@ -133,7 +156,7 @@ async function refresh(force = false, forceMeetings = false) {
     state.categories ||= [];
     today = day;
     window.clearTimeout(syncRefreshTimer);
-    if (next.connection.syncing || next.tasks.some(task => task.estimateState === "queued" || task.estimateState === "estimating")) {
+    if ((!calendarUpdates.connected && next.connection.syncing) || next.tasks.some(task => task.estimateState === "queued" || task.estimateState === "estimating")) {
       syncRefreshTimer = window.setTimeout(() => refresh(),1100);
     }
     if (!selectedDay || (lastToday && day !== lastToday && selectedDay === lastToday)) {
@@ -146,15 +169,30 @@ async function refresh(force = false, forceMeetings = false) {
       weekends = saved === "true" || (saved === null && (dayIndex(day) > 5 || next.settings.workDays.some((d) => d > 5)));
     }
     if (!weekends && view === "week" && dayIndex(selectedDay) > 5) selectedDay = addDays(monday,4);
-    meetings.update(state,monday,forceMeetings);
+    meetings.update(state,monday);
+    // Keep a visible week's old rows together until the refreshed meetings
+    // and replanned reservations are both ready. Initial and newly authorized
+    // views can display local tasks immediately.
+    if (generation !== displayedGeneration && meetings.replacing && (!force || forceMeetings)) {
+      const staged = {request,generation,changed:false};
+      calendarPaint = staged;
+      try { await meetings.replacing; }
+      finally { if (calendarPaint === staged) calendarPaint = null; }
+      if (request !== lastRequest || generation !== calendarGeneration) return;
+      force ||= staged.changed;
+    }
+    displayedGeneration = generation;
     const currentMinute = view === "day" && selectedDay === day ? Math.ceil(new Date(state.now || Date.now()).getTime()/60000) : null;
-    const paint = JSON.stringify([state.tasks,state.categories,state.settings,state.selectedAgent,state.busy,state.busyStart,state.busyEnd,state.connection,day,selectedDay,currentMinute]);
+    const connection = {...state.connection,lastSync:undefined};
+    const paint = JSON.stringify([state.tasks,state.categories,state.settings,state.selectedAgent,state.busy,state.busyStart,state.busyEnd,connection,day,selectedDay,currentMinute]);
     if (force || lastPaint !== paint) {
       render();
       lastPaint = paint;
     }
     byId("planner").setAttribute("aria-busy","false");
     byId("service-error").hidden = true;
+    byId("sync-now").title = state.connection.lastSync ? (calendarMode() === "availability" ? "Last checked " : "Last synced ") +
+      new Date(state.connection.lastSync).toLocaleString() : refreshLabel(false);
     if (byId("settings").open && settingTab === "calendars") fillCalendarSettings();
     if (byId("settings").open && settingTab === "agent") agentSettings.update(next);
     if (byId("action-dialog").open) renderCalendarAction();
@@ -172,11 +210,11 @@ async function refresh(force = false, forceMeetings = false) {
       openCalendarAction();
     }
   } catch (error) {
-    if (request !== lastRequest) return;
+    if (request !== lastRequest || generation !== calendarGeneration || controller.signal.aborted) return;
     byId("service-error-text").textContent = error.message;
     byId("service-error").hidden = false;
     byId("planner").setAttribute("aria-busy","false");
-  }
+  } finally { if (stateRead === controller) stateRead = null; }
 }
 
 function render() {
@@ -232,7 +270,6 @@ function render() {
   byId("sync-now").hidden = !account.connected;
   byId("sync-now").disabled = Boolean(account.syncing);
   byId("sync-label").textContent = refreshLabel(account.syncing);
-  byId("sync-now").title = account.lastSync ? (readOnly ? "Last checked " : "Last synced ") + new Date(account.lastSync).toLocaleString() : refreshLabel(false);
   const hours = state.settings;
   byId("hours-summary").textContent = workdaysLabel(hours.workDays) + " · " + displayTime(hhmmMinutes(hours.startTime)) + "–" + displayTime(hhmmMinutes(hours.endTime)) + " · " + hours.timeZone.replaceAll("_"," ");
   byId("hours-open").title = "Edit working hours and time zone";
@@ -274,6 +311,7 @@ function renderPlanningNote() {
 
 function switchView(next) {
   if (!state) return;
+  const changed = view !== next;
   view = next;
   pref.set("view",view);
   if (view === "week" && dayIndex(selectedDay) > 5 && !weekends) {
@@ -281,10 +319,13 @@ function switchView(next) {
     pref.set("weekends",true);
   }
   render();
+  if (changed) calendarUpdates.wake();
 }
 
 function navigateTo(day) {
   if (!state) return;
+  const previousWeek = monday;
+  if (day !== selectedDay) meetingDetails.close();
   selectedDay = day;
   monday = startOfWeek(day);
   if (view === "week" && dayIndex(day) > 5 && !weekends) {
@@ -292,6 +333,7 @@ function navigateTo(day) {
     pref.set("weekends",true);
   }
   render();
+  if (monday !== previousWeek) calendarUpdates.wake({reloadMeetings:false});
 }
 
 function showTaskLocation(task) {
@@ -500,8 +542,17 @@ function fillCalendarSettings() {
   const connection = state.connection;
   const events = calendarMode() === "sync";
   const health = connection.error || (connection.lastSync && connection.connected ? (events ? "Last synced " : "Availability checked ") + new Date(connection.lastSync).toLocaleString() + "." : "");
-  byId("calendar-health").textContent = health || "";
-  byId("calendar-health").hidden = !health;
+  const push = state.calendarPush;
+  let delivery = "";
+  if (connection.connected) {
+    delivery = push?.connected && push.covered
+      ? "Google push is live for " + push.covered + " of " + push.selected + (push.selected === 1 ? " calendar." : " calendars.")
+      : "Dayline is checking Google for changes automatically.";
+  }
+  byId("calendar-health").textContent = [delivery,health].filter(Boolean).join(" ");
+  byId("calendar-health").hidden = !delivery && !health;
+  byId("calendar-health").title = push?.lastNotificationAt
+    ? "Last Google notification received " + new Date(push.lastNotificationAt).toLocaleString() : "";
   const accounts = connection.accounts || (connection.connected && connection.email ? [{sub:"",email:connection.email}] : []);
   updateModeControls();
   const signature = JSON.stringify([events,accounts,state.calendars,state.settings.targetCalendarId,state.settings.excludedCalendarIds,connection.configured]);
@@ -877,7 +928,11 @@ byId("confirm-action").addEventListener("click",async () => {
 });
 byId("action-dialog").addEventListener("close",() => { if (route) history.replaceState(null,"","/"); });
 
-window.addEventListener("focus",() => refresh());
-document.addEventListener("visibilitychange",() => { if (!document.hidden) refresh(); });
-window.setInterval(() => { if (!document.hidden) refresh(); },20000);
+window.addEventListener("focus",calendarUpdates.wake);
+window.addEventListener("online",calendarUpdates.wake);
+document.addEventListener("visibilitychange",() => { if (document.hidden) calendarUpdates.sleep(); else calendarUpdates.wake(); });
+window.addEventListener("pagehide",calendarUpdates.sleep);
+window.addEventListener("pageshow",event => { if (event.persisted) calendarUpdates.wake(); });
+window.setInterval(calendarUpdates.poll,20000);
+calendarUpdates.connect();
 refresh(true);

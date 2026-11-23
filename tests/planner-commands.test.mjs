@@ -156,3 +156,40 @@ test('a single order choice resolves its original role and rechecks the opposite
   assert.deepEqual(both.candidates, []);
   assert.equal(parse('Prioritize unknown ahead of Vercel', tasks).reason, 'unmatched');
 });
+
+test('a transposed presentation name, a work abbreviation, and an informal action identify the same task on the viewed day', () => {
+  const presentation = task('investment-deck', 'Fill out IC presentation with all details and compare with Philip', {
+    text:'Fill out the IC presentation with all details and compare with Philip.',
+    subtasks:[{title:'Fill out the IC presentation with all details'},{title:'Compare supporting forecasts with Philip'}] });
+  const unrelated = task('shipping', 'Carry supplies');
+  const context = { contextDay:'2026-11-24' };
+  for (const name of ['Ic presnetation preparation', 'IC slide deck prep', 'Investment committee deck prep',
+    'IC presentation', 'I.C. slides', 'Philip’s supporting forecasts', 'Philip forecast comparison']) {
+    assert.deepEqual(parse('Move the ' + name + ' to today', [unrelated,presentation], context),
+      result('move', {day:'2026-11-23'}, [presentation.id]), name);
+  }
+  const expanded = task('expanded', 'Fill out the investment committee presentation with Philip');
+  assert.deepEqual(parse('Move IC deck prep to today', [unrelated,expanded], context),
+    result('move', {day:'2026-11-23'}, [expanded.id]));
+  for (const name of ['IC presnetation for Sarah', 'payroll preparation', 'task', 'IC presentation preparation']) {
+    const list = name === 'IC presentation preparation' ? [task('false-acronym','Invoice cleanup presentation')] :
+      name === 'IC presnetation for Sarah' ? [presentation] : [unrelated];
+    assert.equal(parse('Move the ' + name + ' to today', list, context).kind, 'clarify', name);
+  }
+});
+
+test('the viewed date orders plausible choices, preserves off-day targets and yields to an explicit source day', () => {
+  const tuesday = task('tue', 'Fill out IC presentation with Philip');
+  const thursday = task('thu', 'Revise the IC slide deck with Tracy', {start:'2026-11-26T17:00:00Z',end:'2026-11-26T17:30:00Z'});
+  const unrelated = task('other','Print tickets');
+  const context = {contextDay:'2026-11-24'};
+  const choice = parse('Move IC presnetation preparation to today', [thursday,unrelated,tuesday], context);
+  assert.deepEqual(choice.candidates.map(t => t.id), [tuesday.id,thursday.id]);
+  assert.deepEqual(parse('Move IC slides with Tracy to today', [thursday,unrelated,tuesday], context),
+    result('move', {day:'2026-11-23'}, [thursday.id]));
+  assert.deepEqual(parse('Move IC deck prep from Thursday to today', [thursday,unrelated,tuesday], context),
+    result('move', {day:'2026-11-23'}, [thursday.id]));
+  const budget = task('budget','Collect the budget figures');
+  assert.equal(parse('Move budget preparation to today', [budget], {contextDay:'2026-11-26'}).reason, 'unmatched');
+  assert.deepEqual(parse('Move budget preparation to today', [budget], context), result('move', {day:'2026-11-23'}, [budget.id]));
+});

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { invalid } from './service.mjs';
 import { durationNotes } from './task-learning.mjs';
 import { createCaptureHandler } from './capture.mjs';
+import { LiveCalendar } from './live-calendar.mjs';
 
 const POLICY = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.woff2': 'font/woff2', '.png': 'image/png' };
@@ -38,7 +39,8 @@ function page(title, body, link = '/', label = 'Open planner') {
     '</h1><p>' + escape(body) + '</p><a href="' + escape(link) + '">' + escape(label) + '</a></html>';
 }
 
-export async function startServer({ service, agents, webRoot, port = 43127, intervalMs = 60000 }) {
+export async function startServer({ service, agents, webRoot, port = 43127, intervalMs = 60000,
+  calendarMonitorOptions, calendarPushOptions }) {
   const sessionSecret = randomBytes(32).toString('base64url');
   const invitations = new Map();
   const capture = createCaptureHandler(service,agents);
@@ -46,6 +48,10 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
   let cookieName;
   let origin;
   let closed = false;
+  const live = new LiveCalendar(service, {
+    monitor: calendarMonitorOptions, push: calendarPushOptions,
+    enabled: Boolean(intervalMs || calendarMonitorOptions || calendarPushOptions)
+  });
   const headers = {
     'Cache-Control': 'no-store', 'Content-Security-Policy': POLICY, 'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY', 'Cross-Origin-Resource-Policy': 'same-origin'
@@ -74,7 +80,7 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
     if (req.method === 'GET' && pathname === '/oauth/callback') {
       try {
         await service.run(() => service.finishConnection(Object.fromEntries(url.searchParams)));
-        background();
+        void live.refresh().catch(() => {});
         res.writeHead(303, { ...headers, Location: '/connected', 'Set-Cookie': sessionCookie() }); res.end();
       } catch (error) {
         send(res, 400, 'text/html', page('Google connection incomplete', error.message, 'dayline://open', 'Return to Dayline'));
@@ -87,9 +93,15 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
 
     if (pathname.startsWith('/api/')) {
       if (!hasSession) throw invalid('Open Dayline on this Mac and choose File → Open in Browser.', 401);
+      if (req.method === 'GET' && pathname === '/api/updates') {
+        if (req.headers.origin && req.headers.origin !== origin) throw invalid('Open the planner on this Mac.', 403);
+        res.writeHead(200, { ...headers, 'Content-Type': 'text/event-stream', 'X-Accel-Buffering': 'no' });
+        live.attach(res);
+        return;
+      }
       if (req.method === 'GET' && pathname === '/api/state') {
         const selectedAgent = agents?.selected ?? { provider: 'local', model: '' };
-        return send(res, 200, 'application/json', JSON.stringify({ ...service.snapshot(), selectedAgent,
+        return send(res, 200, 'application/json', JSON.stringify({ ...service.snapshot(), selectedAgent, calendarPush: live.status(),
           lastAgentRun: service.data.agent?.lastRun || null }));
       }
       if (req.method === 'GET' && pathname === '/api/meetings') {
@@ -110,7 +122,11 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
       const subtask = SUBTASK_ROUTE.exec(pathname);
       let status = 200;
       let syncAfter = true;
-      if (req.method === 'POST' && pathname === '/api/capture') {
+      if (req.method === 'POST' && pathname === '/api/calendar/check') {
+        live.check();
+        status = 202;
+        syncAfter = false;
+      } else if (req.method === 'POST' && pathname === '/api/capture') {
         result = await capture(body);
         status = result.kind === 'command' ? 200 : 202;
         syncAfter = result.status === 'applied';
@@ -154,16 +170,21 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
           return service.enqueueEdit(match[1], body);
         });
       } else if (req.method === 'DELETE' && match) await service.run(() => service.deleteTask(match[1]));
-      else if (req.method === 'PATCH' && pathname === '/api/settings') await service.run(() => service.updateSettings(body));
+      else if (req.method === 'PATCH' && pathname === '/api/settings') {
+        await service.run(() => service.updateSettings(body));
+        if (service.data.accounts.length) void live.refresh().catch(() => {});
+        syncAfter = false;
+      }
       else if (req.method === 'POST' && pathname === '/api/connection/config') await service.run(() => service.configure(body));
       else if (req.method === 'POST' && pathname === '/api/connection/start') {
         result = await service.run(() => service.beginConnection(body));
         syncAfter = false;
       } else if (req.method === 'POST' && pathname === '/api/connection/disconnect') {
         await service.run(() => service.disconnect(body.sub));
+        void live.refresh().catch(() => {});
+        syncAfter = false;
       } else if (req.method === 'POST' && pathname === '/api/sync') {
-        service.meetingAgenda.expire();
-        await service.queueSync();
+        await live.refresh();
         syncAfter = false;
       } else throw invalid('Unknown Dayline action.', 404);
       if (syncAfter) background();
@@ -201,12 +222,18 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
   service.startEstimateWorker();
   // Local planners also need the clock to advance active work at its scheduled end.
   const timer = intervalMs ? setInterval(() => {
-    if (!closed) service.queueSync().catch(() => {});
+    if (closed || service.retrySyncAt > Date.now()) return;
+    if (service.data.accounts.length) void live.refresh().catch(() => {});
+    else service.queueSync().catch(() => {});
   }, intervalMs) : null;
   timer?.unref();
-  background();
+  const keepAlive = setInterval(() => live.heartbeat(), 25000);
+  keepAlive.unref();
+  if (service.data.accounts.length) void live.refresh().catch(() => {});
   return {
     origin,
+    checkCalendars: () => live.check(),
+    resumeCalendars: () => live.resume(),
     launchUrl(destination = '/') {
       if (destination !== '/' && !/^\/action\/[a-f0-9]{32}(?:\?done=[01])?$/.test(destination)) destination = '/';
       for (const [key, ticket] of invitations) if (ticket.expires < Date.now()) invitations.delete(key);
@@ -217,8 +244,10 @@ export async function startServer({ service, agents, webRoot, port = 43127, inte
     async close() {
       closed = true;
       clearInterval(timer);
+      clearInterval(keepAlive);
       clearTimeout(durationSyncTimer);
       service.stopEstimateWorker();
+      await live.close();
       await new Promise(resolve => server.close(resolve));
       await service.tail;
     }

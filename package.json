@@ -1,7 +1,7 @@
 {
   "name": "antaia-dayline",
   "productName": "Dayline",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "private": true,
   "description": "A private, local-first weekly task planner for Antaia.",
   "author": "Antaia",
@@ -15,5 +15,5 @@
     "package:mac": "node scripts/package-mac.mjs"
   },
   "dependencies": { "luxon": "3.7.2" },
-  "devDependencies": { "@electron/packager": "20.3.0", "electron": "45.4.1" }
+  "devDependencies": { "@electron/packager": "20.3.0", "electron": "45.4.1", "jose": "6.2.18" }
 }

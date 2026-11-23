@@ -4,6 +4,9 @@ dist/
 .DS_Store
 .env
 .env.*
+.wrangler/
+.dev.vars
+.dev.vars.*
 !.env.example
 *.sqlite*
 oauth-client*.json

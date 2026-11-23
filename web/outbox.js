@@ -65,10 +65,15 @@ export function createCaptureOutbox({api,onChange,onAccepted,onRemoteChange}) {
     const request = {requestId:item.id,text:item.text};
     if (Number.isFinite(item.createdAt)) request.capturedAt = item.createdAt;
     if (item.captureTimeZone) request.captureTimeZone = item.captureTimeZone;
+    if (item.contextDay) request.contextDay = item.contextDay;
     if (item.provider) request.captureAgent = {provider:item.provider,model:item.model || "",...(item.effort ? {effort:item.effort} : {})};
     if (item.day) request[item.implicit ? "viewDay" : "day"] = item.day;
     if (item.decision?.chosenTaskId) request.chosenTaskId = item.decision.chosenTaskId;
     if (item.decision?.forceCreate === true) request.forceCreate = true;
+    if (item.decision?.retryMatch === true) {
+      request.retryMatch = true;
+      request.retryMatchId = item.decision.retryMatchId;
+    }
     try {
       const response = await api("/api/capture","POST",request);
       const command = commandResult(response);
@@ -136,8 +141,13 @@ export function createCaptureOutbox({api,onChange,onAccepted,onRemoteChange}) {
       const item = entries().find(entry => entry.id === id);
       if (!item?.command || (item.decision && !item.blocked)) return false;
       const choice = decision?.chosenTaskId && item.command.choices.some(option => option.id === decision.chosenTaskId);
-      if (!choice && decision?.forceCreate !== true) return false;
-      const answer = choice ? {chosenTaskId:decision.chosenTaskId} : {forceCreate:true};
+      let answer;
+      if (choice) answer = {chosenTaskId:decision.chosenTaskId};
+      else if (decision?.forceCreate === true) answer = {forceCreate:true};
+      else if (decision?.retryMatch === true && ["unmatched","clarify"].includes(item.command.status)) {
+        answer = {retryMatch:true,retryMatchId:crypto.randomUUID().replaceAll("-","")};
+      }
+      else return false;
       put({...item,decision:answer,blocked:false,tries:0,nextAt:0,problem:""});
       onChange(); wake();
       return true;

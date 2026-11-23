@@ -19,6 +19,17 @@ function originalText(input) {
   return input.text.trim();
 }
 
+function commandDay(input) {
+  // Older agenda captures saved their displayed day as viewDay. The explicit
+  // day picker belongs to task scheduling and is never a source-day hint.
+  const day = input.contextDay ?? input.viewDay;
+  if (day == null || day === '') return undefined;
+  if (typeof day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(day) || !DateTime.fromISO(day, { zone:'UTC' }).isValid) {
+    throw fail('Choose a valid planner date.');
+  }
+  return day;
+}
+
 // The regular capture endpoint and the command handler share the outbox ID
 // namespace. A delayed normal capture cannot turn a completed edit into a task.
 export function guardCommandCapture(data, input) {
@@ -153,6 +164,9 @@ export function settlePlannerClarification(service, input, message) {
   const details = saved || { id:requestId, text, ...service.captureContext(input) };
   const request = { id:requestId, text, at:details.at, timeZone:details.timeZone };
   if (details.interpretedText) request.interpretedText = details.interpretedText;
+  const day = details.contextDay ?? commandDay(input);
+  if (day) request.contextDay = day;
+  if (details.matchRetryIds) request.matchRetryIds = details.matchRetryIds;
   const summary = typeof message === 'string' && message.trim() ? message.trim().slice(0, 500) : 'Name the task and the change you want.';
   return persist(service, request, { kind:'clarification', reason:'syntax', message:summary, taskIds:[] });
 }
@@ -164,6 +178,10 @@ export function executePlannerCommand(service, input, { interpretedText } = {}) 
   if (requestId != null && (typeof requestId !== 'string' || !ID.test(requestId))) throw fail('Invalid planner request identifier.');
   if (chosenTaskId != null && (typeof chosenTaskId !== 'string' || !ID.test(chosenTaskId))) throw fail('Choose a task from the offered list.');
   if (input.forceCreate != null && typeof input.forceCreate !== 'boolean') throw fail('Choose whether to add this as a new task.');
+  if ((input.retryMatch != null && typeof input.retryMatch !== 'boolean') ||
+      (input.retryMatchId != null && (input.retryMatch !== true || typeof input.retryMatchId !== 'string' || !ID.test(input.retryMatchId))) ||
+      (input.retryMatch === true && (chosenTaskId || input.forceCreate))) throw fail('Choose one planner action to retry.');
+  const enteredDay = commandDay(input);
   const saved = requestId && service.data.plannerCommands?.[requestId];
   if (saved && saved.text !== text) throw fail('This request identifier belongs to a different planner instruction.', 409);
   if (saved?.receipt.kind === 'applied') return structuredClone(saved.receipt);
@@ -172,22 +190,30 @@ export function executePlannerCommand(service, input, { interpretedText } = {}) 
   if (chosenTaskId && (!saved || saved.receipt.kind !== 'needs-choice' || !saved.receipt.candidates.some(item => item.id === chosenTaskId))) {
     throw fail('Choose a task offered for this instruction.', 409);
   }
-  if (saved && !chosenTaskId && (saved.receipt.kind !== 'unparsed' || !interpretedText)) return structuredClone(saved.receipt);
+  const attemptId = input.retryMatchId || 'explicit';
+  const retry = input.retryMatch === true && (!saved || (['no-match','clarification','unparsed'].includes(saved.receipt.kind) &&
+    !saved.matchRetryIds?.includes(attemptId)));
+  if (saved && !chosenTaskId && !retry && (saved.receipt.kind !== 'unparsed' || !interpretedText)) return structuredClone(saved.receipt);
   const item = saved ? { id:requestId, text, at:saved.at, timeZone:saved.timeZone } : { id:requestId, text, ...service.captureContext(input) };
+  const day = saved?.contextDay ?? enteredDay;
+  if (day) item.contextDay = day;
+  if (saved?.matchRetryIds || retry) item.matchRetryIds = [...(saved?.matchRetryIds || []), ...(retry ? [attemptId] : [])];
   if (saved?.interpretedText) item.interpretedText = saved.interpretedText;
   else if (interpretedText != null) item.interpretedText = originalText({ text:interpretedText });
-  const context = { tasks:service.data.tasks, now:new Date(item.at), timeZone:item.timeZone };
+  const context = { tasks:service.data.tasks, now:new Date(item.at), timeZone:item.timeZone, contextDay:item.contextDay };
   const original = parsePlannerCommand(text, context);
   const useInterpretation = Boolean(item.interpretedText && (original.kind === 'create' || original.reason === 'syntax'));
   const wording = useInterpretation ? item.interpretedText : text;
   const parsed = chosenTaskId || useInterpretation ? parsePlannerCommand(wording, { ...context, selectedTaskId:chosenTaskId,
     ...(saved?.receipt.choiceRole && { choiceRole:saved.receipt.choiceRole }),
     ...(saved?.receipt.counterpartId && { counterpartId:saved.receipt.counterpartId }) }) : original;
-  if (parsed.kind === 'create' && !item.interpretedText && !chosenTaskId) return { kind:'create' };
+  if (parsed.kind === 'create' && !item.interpretedText && !chosenTaskId && !retry) return { kind:'create' };
   if (!requestId) throw fail('A request identifier is required to apply this planner instruction.');
   if (parsed.kind !== 'command') {
     const reason = parsed.kind === 'clarify' ? parsed : { reason:'syntax', message:'Try a task name and the change you want.' };
-    return persist(service, item, clarification(service, reason));
+    const receipt = clarification(service, reason);
+    if (retry && receipt.kind === 'unparsed') receipt.kind = 'clarification';
+    return persist(service, item, receipt);
   }
   if (useInterpretation && (parsed.taskIds.length > 1 || groupInOriginal.test(wording)) && !groupInOriginal.test(text)) {
     return persist(service, item, { kind:'clarification', reason:'scope',

@@ -16,7 +16,9 @@ const service = new DaylineService({
   store, vault: developmentVault(directory),
   estimate: (text, context) => agents.estimate(text, context)
 });
-const app = await startServer({ service, agents, webRoot: path.join(root, 'web'), port: Number(process.env.DAYLINE_PORT || 43128) });
+const relay = process.env.DAYLINE_PUSH_RELAY;
+const app = await startServer({ service, agents, webRoot: path.join(root, 'web'), port: Number(process.env.DAYLINE_PORT || 43128),
+  calendarPushOptions: relay ? { origin: relay } : undefined });
 console.log('Dayline is running. Open this single-use link on this computer:');
 console.log(app.launchUrl());
 process.on('SIGINT', async () => { await app.close(); process.exit(); });

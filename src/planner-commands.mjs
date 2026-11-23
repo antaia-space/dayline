@@ -16,6 +16,7 @@ const unquote = value => value.trim().replace(/^["“‘'](.*)["”’']$/u, '$1
 
 function tokens(value) {
   const text = value.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase()
+    .replace(/['’]s\b/gu, '').replace(/\b(?:[a-z]\.){2,}/g, initials => initials.replaceAll('.', ''))
     .replace(/\b(clean|follow|back|wrap|check|set)[\s-]+up\b/g, '$1up');
   const meaningful = (text.match(/[\p{L}\p{N}]+/gu) || []).filter(word => !ignored.has(word));
   // Single-letter names such as “Task A” are meaningful even when the same
@@ -23,18 +24,103 @@ function tokens(value) {
   return meaningful.length ? meaningful : (value.match(/\b[A-Z]\b/g) || []).map(letter => letter.toLowerCase());
 }
 
-function matchTasks(query, tasks) {
-  const asked = tokens(unquote(query));
-  if (!asked.length) return [];
-  const words = [...new Set(asked)].sort().join(' ');
-  const exact = [], contains = [];
-  for (const task of tasks) {
-    if (task.deleting) continue;
-    const versions = [titleOf(task), task.text, task.estimateJob?.text].filter(Boolean).map(tokens);
-    if (versions.some(version => [...new Set(version)].sort().join(' ') === words)) exact.push(task);
-    else if (versions.some(version => asked.every(word => version.includes(word)))) contains.push(task);
+const aliases = new Map([
+  ['presentation', 'slides', 'slide', 'deck', 'decks', 'slideshow', 'powerpoint', 'ppt', 'pptx'],
+  ['prepare', 'prep', 'preparation', 'preparing', 'prepared'],
+  ['compare', 'comparison', 'comparisons', 'comparing'], ['document', 'doc', 'docs', 'documents'],
+  ['meeting', 'meetings', 'mtg'], ['appointment', 'appt'], ['operations', 'ops'],
+  ['review', 'reviewing', 'reviewed'], ['update', 'updating', 'updated'], ['reconcile', 'reconciliation', 'reconciling'],
+].flatMap(group => group.map(word => [word, group[0]])));
+const descriptors = new Set(['prepare', 'work']);
+const keyFor = words => [...new Set(words)].sort().join(' ');
+const twoWordInitialisms = new Set(['investment committee', 'individual contributor', 'integrated circuit', 'quality assurance',
+  'pull request', 'public relations', 'product management', 'project management', 'product manager', 'project manager',
+  'user interface', 'user experience', 'artificial intelligence', 'machine learning', 'business development', 'human resources']);
+
+function wordForm(word) {
+  if (aliases.has(word)) return aliases.get(word);
+  if (word.length > 4 && word.endsWith('ies')) return word.slice(0, -3) + 'y';
+  return word.length > 4 && /[^siu]s$/.test(word) ? word.slice(0, -1) : word;
+}
+
+// Allow one insertion, omission, substitution or adjacent transposition in a
+// longer word. Short names, acronyms and numbers need exact evidence.
+function nearWord(a, b) {
+  if (Math.min(a.length, b.length) < 5 || Math.abs(a.length - b.length) > 1 || !/^\p{L}+$/u.test(a) || !/^\p{L}+$/u.test(b)) return false;
+  let i = 0;
+  while (i < a.length && a[i] === b[i]) i++;
+  if (a.length < b.length) return a.slice(i) === b.slice(i + 1);
+  if (a.length > b.length) return a.slice(i + 1) === b.slice(i);
+  return a.slice(i + 1) === b.slice(i + 1) ||
+    (a[i] === b[i + 1] && a[i + 1] === b[i] && a.slice(i + 2) === b.slice(i + 2));
+}
+
+function identify(task) {
+  const parents = [titleOf(task), task.text, task.estimateJob?.text].filter(Boolean);
+  const children = (task.subtasks || []).map(child => child.title || child.text).filter(Boolean);
+  const texts = [...new Set([...parents, ...children])];
+  const phrases = texts.map(text => tokens(text).map(wordForm));
+  const initials = new Set(texts.flatMap(text => text.match(/\b[A-Z]{2,5}\b/g) || []).map(word => word.toLowerCase()));
+  return { exact:new Set(parents.map(text => keyFor(tokens(text)))), title:new Set(phrases[0]),
+    words:new Set(phrases.flat()), phrases, initials };
+}
+
+function initialsIn(short, words) {
+  return words.some((_, index) => {
+    const group = words.slice(index, index + short.length);
+    return group.map(term => term[0]).join('') === short && (short.length > 2 || twoWordInitialisms.has(group.join(' ')));
+  });
+}
+
+function evidence(asked, source) {
+  const words = [...source.words];
+  const hits = asked.map(word => source.words.has(word) || words.some(other => nearWord(word, other)));
+  if (hits.every(Boolean)) return 'grounded';
+  // Resolve an initialism in either direction only when another subject word
+  // independently matches. Initials by themselves cannot identify a phrase.
+  const independent = (from, end) => hits.some((hit, i) => hit && !descriptors.has(asked[i]) && (i < from || i >= end));
+  for (let i = 0; i < asked.length; i++) {
+    if (hits[i]) continue;
+    const word = asked[i];
+    if (/^[a-z]{2,5}$/.test(word) && independent(i, i + 1) && source.phrases.some(phrase => initialsIn(word, phrase))) {
+      hits[i] = true;
+      continue;
+    }
+    for (let end = Math.min(i + 5, asked.length); end >= i + 2; end--) {
+      const group = asked.slice(i, end);
+      if (!group.every(term => term.length >= 3 && !descriptors.has(term)) || !independent(i, end) ||
+          (group.length === 2 && !twoWordInitialisms.has(group.join(' ')))) continue;
+      if (source.initials.has(group.map(term => term[0]).join(''))) { hits.fill(true, i, end); break; }
+    }
   }
-  return exact.length ? exact : contains;
+  if (hits.every(Boolean)) return 'grounded';
+  if (asked.some((word, i) => !hits[i] && !descriptors.has(word))) return null;
+  const anchors = [...new Set(asked.filter(word => !descriptors.has(word)))];
+  if (anchors.length >= 2) return 'grounded';
+  return anchors.length === 1 && anchors[0].length >= 5 && source.title.has(anchors[0]) ? 'contextual' : null;
+}
+
+function matchTasks(query, context, from) {
+  const literal = tokens(unquote(query));
+  if (!literal.length) return [];
+  const key = keyFor(literal), asked = literal.map(wordForm);
+  const exact = [], grounded = [], contextual = [];
+  const zone = context.timeZone, visible = from || context.contextDay;
+  for (const task of context.tasks) {
+    if (task.deleting || (from && taskDay(task, zone) !== from)) continue;
+    if (!context.index.has(task)) context.index.set(task, identify(task));
+    const source = context.index.get(task);
+    if (source.exact.has(key)) { exact.push(task); continue; }
+    const match = evidence(asked, source);
+    if (match === 'grounded') grounded.push(task);
+    if (match === 'contextual') contextual.push(task);
+  }
+  const onDay = task => Boolean(visible && taskDay(task, zone) === visible);
+  // The visible day may support one well-grounded subject plus a generic
+  // action. Other plausible matches stay in the chooser, including other days.
+  const contextualMatches = contextual.some(onDay) ? contextual : [];
+  const found = exact.length ? exact : [...grounded, ...contextualMatches];
+  return visible ? found.sort((a,b) => Number(onDay(b)) - Number(onDay(a))) : found;
 }
 
 const weekday = '(?:(?:next|this)\\s+)?(?:mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:rs(?:day)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)\\.?';
@@ -83,7 +169,7 @@ function command(action, tasks, changes) {
 
 function order(sourceName, relation, targetName, context) {
   const names = { source: unquote(sourceName), target: unquote(targetName) };
-  const matches = { source: matchTasks(names.source, context.tasks), target: matchTasks(names.target, context.tasks) };
+  const matches = { source: matchTasks(names.source, context), target: matchTasks(names.target, context) };
   const roles = ['source', 'target'];
   const selection = context.chosenTaskId ?? context.selectedTaskId;
   const stale = () => clarify('stale-selection', 'One of these tasks changed. Enter both current task names again.');
@@ -127,8 +213,7 @@ function order(sourceName, relation, targetName, context) {
 function resolveTarget(query, action, changes, context, from) {
   const label = unquote(query);
   if (!tokens(label).length) return clarify('missing-target', 'Include the name of the task you want to change.');
-  let matches = matchTasks(label, context.tasks);
-  if (from) matches = matches.filter(task => taskDay(task, context.timeZone) === from);
+  let matches = matchTasks(label, context, from);
   const selection = context.chosenTaskId ?? context.selectedTaskId;
   if (selection != null) {
     if (!matches.some(task => task.id === selection)) {
@@ -171,7 +256,7 @@ function move(verb, body, context) {
   if (!changes) {
     const left = body.split(/\s+(?:to|until|for|on|at)\s+/i)[0];
     const isDirective = /^(?:reschedule|postpone|defer|bump)$/.test(verb) || plannerNoun.test(body) ||
-      timeHint.test(body) || /^(?:push|shift)\b/i.test(verb) && /\bback\b/i.test(body) || matchTasks(left, context.tasks).length;
+      timeHint.test(body) || /^(?:push|shift)\b/i.test(verb) && /\bback\b/i.test(body) || matchTasks(left, context).length;
     if (!isDirective) return context.chosenTaskId != null || context.selectedTaskId != null
       ? clarify('stale-selection', 'That choice no longer matches a planner instruction.') : create();
     return separators.length || timeHint.test(body) ? invalidDate() :
@@ -182,7 +267,7 @@ function move(verb, body, context) {
   // “Move boxes to storage on Friday” describes new work with a destination.
   // A known task title containing “to” still resolves as a planner command.
   if (verb === 'move' && /\s+to\s+/i.test(subject) && !plannerNoun.test(subject) &&
-      context.chosenTaskId == null && context.selectedTaskId == null && !matchTasks(subject, context.tasks).length) {
+      context.chosenTaskId == null && context.selectedTaskId == null && !matchTasks(subject, context).length) {
     return timeHint.test(subject.split(/\s+to\s+/i).at(-1)) ? invalidDate() : create();
   }
   let from;
@@ -212,11 +297,11 @@ function duration(query, amount, relative, context) {
   return resolveTarget(query, 'duration', relative ? { deltaMinutes: relative * value } : { minutes: value }, context);
 }
 
-export function parsePlannerCommand(text, { tasks = [], now, timeZone = 'UTC', chosenTaskId, selectedTaskId, choiceRole, counterpartId } = {}) {
+export function parsePlannerCommand(text, { tasks = [], now, timeZone = 'UTC', contextDay, chosenTaskId, selectedTaskId, choiceRole, counterpartId } = {}) {
   const timestamp = now instanceof Date ? now : new Date(now);
   const local = DateTime.fromJSDate(timestamp, { zone: timeZone });
   if (!local.isValid) throw new RangeError('A valid command capture time and planner time zone are required.');
-  const context = { tasks, now: timestamp, timeZone, today: local.toISODate(), instant: timestamp.toISOString(),
+  const context = { tasks, now: timestamp, timeZone, contextDay, index:new Map(), today: local.toISODate(), instant: timestamp.toISOString(),
     chosenTaskId, selectedTaskId, choiceRole, counterpartId };
   const input = String(text || '').trim().replace(/\s+/g, ' ')
     .replace(/^(?:(?:please|kindly)\s+|(?:can|could|would|will)\s+(?:we|you)\s+(?:please\s+)?|(?:let['’]s|let us|I want to|I(?: would|['’]d) like to)\s+)+/i, '')
@@ -232,13 +317,13 @@ export function parsePlannerCommand(text, { tasks = [], now, timeZone = 'UTC', c
     if (/^move$/i.test(verb) && [...input.matchAll(/\s+to\s+/gi)].some(m => destination(input.slice(m.index + m[0].length), context))) {
       return move('move', input.slice(5), context);
     }
-    const matches = matchTasks(target, tasks);
+    const matches = matchTasks(target, context);
     if (!matches.length && destination(target, context)) {
-      if (plannerNoun.test(source) || matchTasks(source, tasks).length) {
+      if (plannerNoun.test(source) || matchTasks(source, context).length) {
         return clarify('syntax', 'For a time change, name a requested start. For list order, name a task before or after another task.');
       }
     } else if (chosenTaskId != null || selectedTaskId != null || /^(?:prioriti[sz]e|reorder)$/i.test(verb) ||
-        plannerNoun.test(input) || matches.length || matchTasks(source, tasks).length) {
+        plannerNoun.test(input) || matches.length || matchTasks(source, context).length) {
       return order(source, relation, target, context);
     }
   }
@@ -251,7 +336,7 @@ export function parsePlannerCommand(text, { tasks = [], now, timeZone = 'UTC', c
     const done = !/^(?:reopen|uncheck)$/i.test(match[1]);
     return resolveTarget(match[2], done ? 'complete' : 'reopen', { done }, context);
   }
-  if ((match = /^complete\s+(.+)$/i.exec(input)) && (plannerNoun.test(match[1]) || matchTasks(match[1], tasks).length)) {
+  if ((match = /^complete\s+(.+)$/i.exec(input)) && (plannerNoun.test(match[1]) || matchTasks(match[1], context).length)) {
     return resolveTarget(match[1], 'complete', { done: true }, context);
   }
   if ((match = /^rename\s+(["“‘'].+?["”’'])\s+to\s+(.+)$/i.exec(input)) || (match = /^rename\s+(.+?)\s+to\s+(.+)$/i.exec(input))) {

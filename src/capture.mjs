@@ -68,8 +68,8 @@ export function createCaptureHandler(service, agents) {
         (body.forceCreate != null && typeof body.forceCreate !== 'boolean') || (body.chosenTaskId && body.forceCreate)) throw invalid('Choose a single planner action.');
     const first = await evaluate(body);
     if (first.kind !== 'unparsed' && first.kind !== 'suggestion') return forComposer(first);
-    if (body.chosenTaskId || body.forceCreate) return forComposer(first);
-    const fingerprint = JSON.stringify([body.text,body.capturedAt,body.captureTimeZone,body.day,body.viewDay]);
+    if (body.chosenTaskId || body.forceCreate || body.retryMatch) return forComposer(first);
+    const fingerprint = JSON.stringify([body.text,body.capturedAt,body.captureTimeZone,body.day,body.viewDay,body.contextDay]);
     const prior = interpreting.get(body.requestId);
     if (prior) {
       if (prior.fingerprint !== fingerprint) throw invalid('This capture already has different wording.',409);

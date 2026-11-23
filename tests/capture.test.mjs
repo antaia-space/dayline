@@ -115,3 +115,34 @@ test('a paid clarification can be replayed after a restart or explicitly capture
   assert.equal((await send({...body,forceCreate:true})).status,202);
   assert.equal(service.data.tasks.length,1);
 });
+
+test('the visible Tuesday presentation moves to real local today from the screenshot wording, including an explicitly retried old no-match', async t => {
+  const { service, store, send } = await paired(t, () => assert.fail('Presentation matching must remain on this Mac.'));
+  const incomplete = {text:'Move the Ic presnetation preparation to today', requestId:id(40),
+    capturedAt:'2026-11-23T07:59:00.000Z', captureTimeZone:'UTC', contextDay:'2026-11-24'};
+  const submit = async change => (await (await send({...incomplete,...change})).json());
+  assert.equal((await submit({})).status,'unmatched');
+  // Exercise a record saved by an earlier version, which had no contextDay.
+  delete store.state.plannerCommands[incomplete.requestId].contextDay;
+  const retry = {retryMatch:true,retryMatchId:id(50)};
+  assert.equal((await submit(retry)).status,'unmatched');
+  const text = 'Fill out IC presentation with all details and compare with Philip';
+  const presentation = await service.createTask({text,day:'2026-11-24'});
+  const original = structuredClone(service.findTask(presentation));
+  const other = await service.createTask({text:'Buy markers tomorrow'});
+  assert.equal((await submit({})).status,'unmatched');
+  assert.equal((await submit(retry)).status,'unmatched');
+  assert.match(service.findTask(presentation).start,/^2026-11-24T/);
+  const second = {retryMatch:true,retryMatchId:id(51)};
+  const applied = await submit(second);
+  assert.deepEqual([applied.status,applied.taskIds],['applied',[presentation]]);
+  const moved = service.findTask(presentation);
+  assert.match(moved.start,/^2026-11-23T/);
+  assert.deepEqual([moved.text,moved.minutes,moved.subtasks],[original.text,original.minutes,original.subtasks]);
+  assert.equal((await submit(second)).status,'applied');
+  assert.equal((await submit({})).status,'applied');
+  assert.equal(store.state.tasks.length,2);
+  assert.match(service.findTask(other).start,/^2026-11-24T/);
+  const restarted = new DaylineService({ store:{state:structuredClone(store.state),save(){}}, clock:()=>now, vault:{} });
+  assert.deepEqual(restarted.runPlannerCommand({...incomplete, ...second}).taskIds,[presentation]);
+});

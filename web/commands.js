@@ -33,6 +33,11 @@ export function createCommandPrompts(container,{decide,edit,dismiss,retry,focusI
       }
       if (controls.childElementCount) card.append(controls);
       const options = element("div","command-options");
+      if (["unmatched","clarify"].includes(item.command.status)) {
+        const matchAgain = control("Try matching again","match",() => decide(item,{retryMatch:true}));
+        matchAgain.disabled = sending;
+        options.append(matchAgain);
+      }
       const add = control("Add as new task","new",() => decide(item,{forceCreate:true}));
       const revise = control("Edit request","edit",() => edit(item));
       const close = control("Dismiss","dismiss",() => dismiss(item));

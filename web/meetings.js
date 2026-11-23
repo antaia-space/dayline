@@ -4,8 +4,14 @@ const empty = () => ({events:[],warnings:[]});
 
 // Meeting titles, guests and links live only in this window and are dropped
 // immediately when the week, enabled calendars or account permissions change.
-export function createMeetingFeed({read,changed,now = Date.now}) {
-  let key = null, data = empty(), pending = false, generation = 0, loaded = 0, stamp = "";
+export function createMeetingFeed({read,changed,now = Date.now,live = () => false}) {
+  let key = null, data = empty(), request = null, pending = null, presented = false, loaded = null, stamp = "";
+  function invalidate() {
+    const previous = request;
+    request = null; pending = null;
+    loaded = null;
+    previous?.abort();
+  }
   function update(state,monday,force = false) {
     const accounts = state.connection.accounts || [];
     const authorized = state.connection.connected && accounts.some(account => account.meetingDetails);
@@ -13,24 +19,28 @@ export function createMeetingFeed({read,changed,now = Date.now}) {
       accounts.map(a => [a.sub,a.mode,Boolean(a.meetingDetails)]),state.settings.excludedCalendarIds]) : "";
     const sync = state.connection.lastSync ?? "";
     if (next !== key) {
-      key = next; data = empty(); pending = false; generation++; loaded = 0; stamp = "";
-    }
-    if (!authorized || (!force && (pending || (loaded && stamp === sync && now() - loaded < 60000)))) return data;
-    const request = ++generation;
-    pending = true;
+      key = next; data = empty(); stamp = ""; presented = false; invalidate();
+    } else if (force) invalidate();
+    const age = now()-loaded;
+    const fresh = loaded !== null && (live() ? !data.warnings.length || age < 30000 : stamp === sync && age < 60000);
+    if (!authorized || request || fresh) return data;
+    const controller = new AbortController();
+    request = controller;
     stamp = sync;
-    read("/api/meetings?from=" + monday + "&to=" + addDays(monday,7)).then(result => {
-      if (request !== generation) return;
-      data = {events:Array.isArray(result.events) ? result.events : [],warnings:Array.isArray(result.warnings) ? result.warnings : []};
-    }).catch(error => {
-      if (request === generation) data = {events:[],warnings:[error.message || "Meeting details are unavailable."]};
-    }).finally(() => {
-      if (request !== generation) return;
-      pending = false; loaded = now(); changed();
+    const apply = nextData => {
+      if (request !== controller) return;
+      request = null; pending = null; presented = true; loaded = now();
+      if (JSON.stringify(data) === JSON.stringify(nextData)) return;
+      data = nextData; changed();
+    };
+    pending = read("/api/meetings?from=" + monday + "&to=" + addDays(monday,7),controller.signal).then(result => {
+      apply({events:Array.isArray(result.events) ? result.events : [],warnings:Array.isArray(result.warnings) ? result.warnings : []});
+    },error => {
+      apply({events:[],warnings:[error.message || "Meeting details are unavailable."]});
     });
     return data;
   }
-  return {update,get current() { return data; }};
+  return {update,invalidate,get current() { return data; },get replacing() { return presented && pending; }};
 }
 
 export function rangeOnDay(item,day,zone) {
@@ -118,12 +128,12 @@ function guestList(event) {
 
 // One nonmodal, anchored panel serves pointer previews, keyboard focus and touch.
 // Clicking the title keeps it open while its links or guest list are explored.
-export function createMeetingDetails({root,find,zone}) {
+export function createMeetingDetails({root,find,zone,authorized = () => true}) {
   const panel = element("div","meeting-popover");
   panel.id = "meeting-popover"; panel.setAttribute("popover","manual");
   panel.setAttribute("role","dialog"); panel.setAttribute("aria-labelledby","meeting-popover-title");
   panel.hidden = true; document.body.append(panel);
-  let anchor = null, pinned = false, timer, suppressed = null, signature = "";
+  let anchor = null, pinned = false, timer, suppressed = null, signature = "", bounds = null, painting = false;
   function trigger(node) {
     if (!(node instanceof Element) || node.closest("a")) return null;
     return node.closest(".meeting-card")?.querySelector('button[data-action="meeting-details"]');
@@ -132,32 +142,55 @@ export function createMeetingDetails({root,find,zone}) {
     clearTimeout(timer);
     if (!anchor) return;
     const previous = anchor;
-    anchor = null; pinned = false; signature = "";
+    anchor = null; pinned = false; signature = ""; bounds = null;
     previous.setAttribute("aria-expanded","false");
     if (panel.matches(":popover-open")) panel.hidePopover();
     panel.hidden = true; panel.replaceChildren();
-    if (restore && previous.isConnected) {
-      suppressed = previous;
-      previous.focus({preventScroll:true});
+    if (restore) {
+      const target = previous.isConnected ? previous : document.getElementById("quick-text");
+      suppressed = target;
+      target?.focus({preventScroll:true});
       queueMicrotask(() => { suppressed = null; });
     }
   }
   function position() {
-    if (!anchor || !anchor.isConnected) return;
-    const rect = anchor.getBoundingClientRect(), margin = 8;
+    if (anchor?.isConnected) bounds = anchor.getBoundingClientRect();
+    if (!anchor || !bounds) return;
+    const rect = bounds, margin = 8;
     const height = panel.offsetHeight, width = panel.offsetWidth;
     const below = rect.bottom + margin;
     const top = below + height <= innerHeight - margin ? below : Math.max(margin,rect.top - height - margin);
     panel.style.top = Math.min(top,Math.max(margin,innerHeight - height - margin)) + "px";
     panel.style.left = Math.min(Math.max(margin,rect.left),Math.max(margin,innerWidth - width - margin)) + "px";
   }
+  function closeControl() {
+    const closeButton = button("icon-button","close-meeting","Close meeting details");
+    closeButton.append(icon("x")); closeButton.addEventListener("click",() => close(true));
+    closeButton.dataset.meetingControl = "close";
+    return closeButton;
+  }
+  function replace(content) {
+    const focused = panel.contains(document.activeElement) && document.activeElement.dataset.meetingControl;
+    const scroll = panel.scrollTop;
+    painting = true;
+    try {
+      panel.replaceChildren(...content);
+      if (focused) (panel.querySelector('[data-meeting-control="' + CSS.escape(focused) + '"]') || panel.querySelector("button"))?.focus({preventScroll:true});
+      panel.scrollTop = scroll;
+    } finally { painting = false; }
+  }
   function paint(event) {
     const next = JSON.stringify([event,zone()]);
     if (signature === next) return;
     signature = next;
-    const closeButton = button("icon-button","close-meeting","Close meeting details");
-    closeButton.append(icon("x")); closeButton.addEventListener("click",() => close(true));
+    const closeButton = closeControl();
     const heading = element("div","meeting-heading"), identity = element("div");
+    if (!event) {
+      const title = element("h2","","Meeting no longer in view");
+      title.id = "meeting-popover-title"; heading.append(title,closeButton);
+      replace([heading,element("p","hint","Meeting details are unavailable in the selected calendars for this week.")]);
+      return;
+    }
     if (event.calendarName) identity.append(element("p","meeting-source",event.calendarName));
     const title = element("h2","",event.title || "Calendar busy"); title.id = "meeting-popover-title";
     identity.append(title); heading.append(identity,closeButton);
@@ -173,12 +206,12 @@ export function createMeetingDetails({root,find,zone}) {
     const links = element("div","meeting-actions");
     const join = linkTo(event.joinUrl,"Join meeting","primary");
     const open = linkTo(event.calendarUrl,"Open in Calendar","meeting-calendar-link");
-    if (join) links.append(join);
-    if (open) links.append(open);
+    if (join) { join.dataset.meetingControl = "join"; links.append(join); }
+    if (open) { open.dataset.meetingControl = "calendar"; links.append(open); }
     if (links.children.length) content.push(links);
     const guests = guestList(event);
     if (guests) content.push(guests);
-    panel.replaceChildren(...content);
+    replace(content);
   }
   function show(target,stick = false) {
     const event = target && find(target.dataset.id);
@@ -215,7 +248,7 @@ export function createMeetingDetails({root,find,zone}) {
   panel.addEventListener("pointerenter",() => clearTimeout(timer));
   panel.addEventListener("pointerleave",delayClose);
   panel.addEventListener("focusout",event => {
-    if (!panel.contains(event.relatedTarget) && !trigger(event.relatedTarget)) close();
+    if (!painting && !panel.contains(event.relatedTarget) && !trigger(event.relatedTarget)) close();
   });
   document.addEventListener("pointerdown",event => {
     if (anchor && !panel.contains(event.target) && !trigger(event.target)) close();
@@ -227,10 +260,16 @@ export function createMeetingDetails({root,find,zone}) {
   window.addEventListener("scroll",position,true);
   function sync() {
     if (!anchor) return;
-    const target = root.querySelector('[data-focus="' + CSS.escape(anchor.dataset.focus) + '"]');
-    const event = target && target.getClientRects().length && find(target.dataset.id);
-    if (!event) return close();
-    anchor = target; target.setAttribute("aria-expanded","true"); paint(event); position();
+    if (!authorized()) return close();
+    const event = find(anchor.dataset.id);
+    let target = root.querySelector('[data-focus="' + CSS.escape(anchor.dataset.focus) + '"]');
+    if (!target?.getClientRects().length) {
+      target = [...root.querySelectorAll('[data-action="meeting-details"]')].find(button =>
+        button.dataset.id === anchor.dataset.id && button.getClientRects().length);
+    }
+    if ((!event || !target) && !pinned) return close();
+    if (target) { anchor = target; target.setAttribute("aria-expanded","true"); }
+    paint(event); position();
   }
   return {sync,close};
 }

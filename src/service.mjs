@@ -210,6 +210,7 @@ export class DaylineService {
     this.calendars = [];
     this.busy = [];
     this.busyRange = null;
+    this.checkedPlanningRanges = [];
     this.error = null;
     this.syncing = false;
     this.tail = Promise.resolve();
@@ -223,6 +224,7 @@ export class DaylineService {
     this.refreshes = new Map();
     this.discovery = null;
     this.discoveryErrors = new Set();
+    this.discoveredSubs = new Set();
     let migrated = migrateCalendarModes(this.data);
     if (this.data.settings.calendarMode === 'availability' && this.data.tasks.some(t =>
       t.remote || t.intent || t.deleting || Object.keys(t.dirty || {}).length)) {
@@ -926,6 +928,7 @@ export class DaylineService {
       this.meetingAgenda.clear();
       this.busy = [];
       this.busyRange = null;
+      this.checkedPlanningRanges = [];
     }
     if (next.calendarMode !== old.calendarMode) {
       this.auth.clear();
@@ -1029,6 +1032,8 @@ export class DaylineService {
     this.busy = [];
     this.busyRange = null;
     this.refreshes.delete(profile.sub);
+    this.discoveredSubs.delete(profile.sub);
+    this.checkedPlanningRanges = [];
     this.cacheToken(profile.sub, tokens, request.mode);
     this.error = null;
     this.store.save();
@@ -1039,6 +1044,7 @@ export class DaylineService {
     this.data.accounts = this.data.accounts.filter(a => sub && a.sub !== sub);
     this.calendars = this.calendars.filter(c => sub && c.sub !== sub);
     if (sub) this.discoveryErrors.delete(sub); else this.discoveryErrors.clear();
+    if (sub) this.discoveredSubs.delete(sub); else this.discoveredSubs.clear();
     if (sub) this.tokens.delete(sub); else this.tokens.clear();
     this.refreshes.clear();
     this.discovery = null;
@@ -1048,6 +1054,7 @@ export class DaylineService {
     this.error = null;
     this.auth.clear();
     this.authVersion++;
+    this.checkedPlanningRanges = [];
     for (const t of this.data.tasks) {
       if ((t.remote || t.intent) && !this.data.accounts.some(a => a.sub === (t.remote || t.intent).sub)) {
         t.syncStatus = t.deleting ? 'deleting' : 'pending';
@@ -1059,7 +1066,17 @@ export class DaylineService {
   }
 
   cacheToken(sub, tokens, mode) {
-    this.tokens.set(sub, { mode, access: tokens.access_token, expires: Date.now() + (tokens.expires_in || 3600) * 1000 });
+    this.tokens.set(sub, { mode, access: tokens.access_token, identity: tokens.id_token,
+      expires: Date.now() + (tokens.expires_in || 3600) * 1000 });
+  }
+
+  async relayIdentity() {
+    const account = this.data.accounts.find(a => a.email?.toLowerCase().endsWith('@antaia.space'));
+    if (!account) throw invalid('Connect your Antaia Google account for live calendar notifications.', 401);
+    await this.token(account.sub);
+    const proof = this.tokens.get(account.sub)?.identity;
+    if (typeof proof !== 'string' || !proof) throw invalid('Google did not return an identity for live notifications.', 401);
+    return proof;
   }
 
   async token(sub) {
@@ -1095,6 +1112,7 @@ export class DaylineService {
       if (this.discovery !== current) return;
       const calendars = groups.flatMap(group => group.status === 'fulfilled' ? group.value : []);
       this.discoveryErrors = new Set(accounts.filter((account, i) => groups[i].status === 'rejected').map(account => account.sub));
+      this.discoveredSubs = new Set(accounts.filter((account, i) => groups[i].status === 'fulfilled').map(account => account.sub));
       if (JSON.stringify(calendars) !== JSON.stringify(this.calendars)) this.meetingAgenda.clear();
       this.calendars = calendars;
       const failure = groups.find(group => group.status === 'rejected');
@@ -1108,6 +1126,25 @@ export class DaylineService {
 
   canReadMeetings(account) {
     return account.meetingDetails === true || (account.mode === 'sync' && this.data.settings.calendarMode === 'sync');
+  }
+
+  calendarBoardRange(now = this.clock()) {
+    const monday = DateTime.fromJSDate(now, { zone: this.data.settings.timeZone }).startOf('week');
+    return { start: monday.toUTC().toISO(), end: monday.plus({ weeks: 5 }).toUTC().toISO() };
+  }
+
+  calendarMonitorSources() {
+    const accounts = new Map(this.data.accounts.map(account => [account.sub, account]));
+    const excluded = new Set(this.data.settings.excludedCalendarIds);
+    const target = this.data.settings.calendarMode === 'sync' ? this.selectedTarget()?.id : null;
+    const calendars = this.calendars.filter(c => accounts.has(c.sub) && c.canCheckAvailability !== false &&
+      (c.id === target || !excluded.has(c.id))).map(c => ({
+        sub: c.sub, id: c.providerId, details: c.accessRole !== 'freeBusyReader' && this.canReadMeetings(accounts.get(c.sub))
+      }));
+    const ranges = calendars.length ? [this.busyRange || this.calendarBoardRange(),
+      ...this.checkedPlanningRanges, ...this.meetingAgenda.ranges()] : [];
+    const uncertainSubs = this.data.accounts.filter(a => !this.discoveredSubs.has(a.sub)).map(a => a.sub);
+    return { revision: this.authVersion, calendars, ranges, uncertainSubs };
   }
 
   async meetings({ from, to }) {
@@ -1855,14 +1892,14 @@ export class DaylineService {
       if (after.hasSame(before, 'day')) break;
       // A laptop can wake during a request. Cover the new day's horizon and
       // schedule from the current clock before exposing any placements.
-      const monday = after.startOf('week');
-      boardRange = { start: monday.toUTC().toISO(), end: monday.plus({ weeks: 5 }).toUTC().toISO() };
+      boardRange = this.calendarBoardRange(now);
     }
 
     const planned = this.plannedTasks(this.data.tasks, busy, now, { overruns: true });
     planned.forEach((task, i) => { if (task !== this.data.tasks[i]) copyRecord(this.data.tasks[i], task); });
     this.busy = busy.filter(e => Date.parse(e.end) > Date.parse(boardRange.start) && Date.parse(e.start) < Date.parse(boardRange.end));
     this.busyRange = boardRange;
+    this.checkedPlanningRanges = combinedRanges(checked);
   }
 
   unavailableLocalPlans(error) {
@@ -1878,11 +1915,12 @@ export class DaylineService {
 
   async reconcile() {
     this.error = null;
+    this.transientSyncError = false;
+    this.retrySyncAt = 0;
     if (!this.data.accounts.length) { this.persistLocalPlan(this.data.tasks); return; }
     try {
       await this.discover();
-      const monday = DateTime.fromJSDate(this.clock(), { zone: this.data.settings.timeZone }).startOf('week');
-      const range = { start: monday.toUTC().toISO(), end: monday.plus({ weeks: 5 }).toUTC().toISO() };
+      const range = this.calendarBoardRange();
       if (this.data.settings.calendarMode === 'availability') {
         await this.planAgainstCalendars(range);
         this.data.lastSync = this.clock().toISOString();
@@ -1922,6 +1960,8 @@ export class DaylineService {
       }
     } catch (error) {
       this.error = messageOf(error);
+      this.transientSyncError = error.status >= 500 || error.status === 429 || /quota|rate.?limit|resource_exhausted/i.test(error.reason || '');
+      if (this.transientSyncError && error.retryAfterSeconds > 0) this.retrySyncAt = Date.now() + error.retryAfterSeconds * 1000;
       if (error.status === 401) this.tokens.clear();
       if (this.data.settings.calendarMode === 'availability') {
         this.unavailableLocalPlans(this.error);

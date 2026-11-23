@@ -245,7 +245,8 @@ export function createComposer({api,refresh,context,showLocation,openTask}) {
     capture();
     const agent = ctx.state.selectedAgent || {};
     const item = {id:draft.id,text:draft.text.trim(),day:draft.day,implicit:Boolean(draft.implicit),createdAt:Date.now(),
-      captureTimeZone:ctx.state.settings.timeZone,provider:agent.provider,model:agent.model,effort:agent.effort,...(draft.revises && {revises:draft.revises})};
+      captureTimeZone:ctx.state.settings.timeZone,contextDay:ctx.selectedDay,provider:agent.provider,model:agent.model,effort:agent.effort,
+      ...(draft.revises && {revises:draft.revises})};
     const saved = outbox.add(item);
     remember(item);
     if (saved) { storeDraft(null); input.value = ""; lastContext = ""; }

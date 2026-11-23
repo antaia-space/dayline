@@ -33,12 +33,16 @@ function invalidResponse(message) {
   return new GoogleError(502, 'invalidResponse', message);
 }
 
-async function googleRequest(url, init = {}, request = fetch) {
+const notModified = Symbol('not modified');
+
+async function googleRequest(url, init = {}, request = fetch, conditional = false, emptySuccess = false) {
   let response;
   let data;
   try {
     response = await request(url, { ...init, redirect: 'error', signal: AbortSignal.timeout(20000) });
+    if (conditional && response.status === 304) return notModified;
     const body = await response.text();
+    if (emptySuccess && response.ok && !body) return null;
     try {
       data = JSON.parse(body);
     } catch {
@@ -56,7 +60,10 @@ async function googleRequest(url, init = {}, request = fetch) {
     const message = providerError?.message ?? data?.error_description ?? 'Google returned HTTP ' + response.status + '.';
     const error = new GoogleError(response.status, reason, message);
     const retry = response.headers.get('retry-after');
-    if (retry && /^\d+$/.test(retry)) error.retryAfterSeconds = Number(retry);
+    if (retry) {
+      const seconds = /^\d+$/.test(retry) ? Number(retry) : Math.ceil((Date.parse(retry) - Date.now()) / 1000);
+      if (Number.isFinite(seconds)) error.retryAfterSeconds = Math.max(0, seconds);
+    }
     throw error;
   }
   if (response.status === 204) return null;
@@ -162,7 +169,7 @@ export async function paginatedItems(accessToken, url, kind, request = fetch) {
 
 // Google's virtual Week Numbers feed has a locale-dependent prefix. Its
 // generated labels are never appointments and its freeBusy item returns notFound.
-function canCheckAvailability(id) {
+export function canCheckAvailability(id) {
   return !/^[^#@\s]*#weeknum@group\.v\.calendar\.google\.com$/i.test(id);
 }
 
@@ -195,14 +202,14 @@ function validInterval(start, end) {
   return Number.isFinite(Date.parse(start)) && Date.parse(start) < Date.parse(end);
 }
 
-export async function getBusy(accessToken, { calendarIds, start, end }) {
+export async function getBusyByCalendar(accessToken, { calendarIds, start, end }, request = fetch) {
   if (!Array.isArray(calendarIds) || !calendarIds.length || calendarIds.some(id => typeof id !== 'string' || !id)) {
     throw new GoogleError(400, 'missingCalendars', 'Select a calendar to check availability.');
   }
   if (!validInterval(start, end)) throw new GoogleError(400, 'invalidInterval', 'Choose a valid time range.');
   const ids = [...new Set(calendarIds)].filter(canCheckAvailability);
   if (!ids.length) throw new GoogleError(400, 'missingCalendars', 'Select at least one calendar that can report availability.');
-  const intervals = [];
+  const results = [];
 
   // https://developers.google.com/workspace/calendar/api/v3/reference/freebusy/query
   for (let offset = 0; offset < ids.length; offset += 50) {
@@ -211,7 +218,7 @@ export async function getBusy(accessToken, { calendarIds, start, end }) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ timeMin: start, timeMax: end, calendarExpansionMax: 50, items: batch.map(id => ({ id })) }),
-    }));
+    }), request);
     for (const id of batch) {
       const calendar = data.calendars?.[id];
       if (calendar?.errors?.length || !Array.isArray(calendar?.busy)) {
@@ -220,17 +227,77 @@ export async function getBusy(accessToken, { calendarIds, start, end }) {
         error.calendarId = id;
         throw error;
       }
+      const busy = [];
       for (const period of calendar.busy) {
         if (!validInterval(period?.start, period?.end)) {
           const error = invalidResponse('Google returned an incomplete busy period.');
           error.calendarId = id;
           throw error;
         }
-        intervals.push({ start: new Date(period.start).toISOString(), end: new Date(period.end).toISOString() });
+        busy.push({ start: new Date(period.start).toISOString(), end: new Date(period.end).toISOString() });
       }
+      results.push({ calendarId: id, busy });
     }
   }
-  return intervals.sort((a, b) => a.start.localeCompare(b.start));
+  return results;
+}
+
+export async function getBusy(accessToken, params) {
+  return (await getBusyByCalendar(accessToken, params)).flatMap(calendar => calendar.busy).sort((a, b) => a.start.localeCompare(b.start));
+}
+
+// Google permits a lower time limit for the bootstrap, then syncToken alone
+// carries updates, deletions and recurring exceptions. No event content is needed.
+// https://developers.google.com/workspace/calendar/api/guides/sync
+export async function readCalendarChangePage(accessToken, { calendarId, timeMin, syncToken, pageToken, etag }, request = fetch) {
+  const url = new URL(eventCollection(calendarId));
+  url.searchParams.set('maxResults', '2500');
+  url.searchParams.set('singleEvents', 'false');
+  url.searchParams.set('showDeleted', 'true');
+  url.searchParams.set('fields', 'kind,etag,nextPageToken,nextSyncToken,items(etag)');
+  if (syncToken) url.searchParams.set('syncToken', syncToken);
+  else if (timeMin) url.searchParams.set('timeMin', timeMin);
+  if (pageToken) url.searchParams.set('pageToken', pageToken);
+  const options = authorized(accessToken, { headers: etag ? { 'If-None-Match': etag } : {} });
+  const page = await googleRequest(url.toString(), options, request, Boolean(etag));
+  if (page === notModified) return { notModified: true };
+  if (page.kind !== 'calendar#events' || (page.items !== undefined && !Array.isArray(page.items)) ||
+      ![page.nextPageToken, page.nextSyncToken].some(value => typeof value === 'string' && value)) {
+    throw invalidResponse('Google returned an incomplete calendar change cursor.');
+  }
+  return { etag: typeof page.etag === 'string' ? page.etag : null, nextPageToken: page.nextPageToken || null,
+    nextSyncToken: page.nextSyncToken || null, hasChanges: Boolean(page.items?.length) };
+}
+
+// Watches contain a receiver-chosen opaque secret; the Google access token is
+// sent only to Google. The relay never needs calendar IDs or event content.
+// https://developers.google.com/workspace/calendar/api/v3/reference/events/watch
+export async function watchCalendar(accessToken, { calendarId, channelId, channelToken, address, ttlSeconds = 604800 }, request = fetch) {
+  const url = new URL(address);
+  if (url.protocol !== 'https:' || url.username || url.password || url.hash || typeof channelId !== 'string' || !channelId ||
+      channelId.length > 64 || typeof channelToken !== 'string' || !channelToken || channelToken.length > 256 ||
+      !Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 604800) {
+    throw new GoogleError(400, 'invalidWatch', 'Invalid calendar notification channel.');
+  }
+  const response = await googleRequest(eventCollection(calendarId) + '/watch', authorized(accessToken, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: channelId, type: 'web_hook', token: channelToken, address: url.href, params: { ttl: String(ttlSeconds) } }),
+  }), request);
+  const expiration = Number(response.expiration);
+  if (response.id !== channelId || typeof response.resourceId !== 'string' || !response.resourceId || !Number.isSafeInteger(expiration) || expiration <= 0) {
+    throw invalidResponse('Google returned an incomplete notification channel.');
+  }
+  return { channelId, resourceId: response.resourceId, expiration };
+}
+
+export async function stopCalendarWatch(accessToken, { channelId, resourceId }, request = fetch) {
+  if (!channelId || !resourceId) throw new GoogleError(400, 'invalidWatch', 'Missing calendar notification channel.');
+  try {
+    await googleRequest(API + '/channels/stop', authorized(accessToken, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: channelId, resourceId }) }), request, false, true);
+  } catch (error) {
+    if (error.status !== 404 && error.status !== 410) throw error;
+  }
 }
 
 export function eventCollection(calendarId) {

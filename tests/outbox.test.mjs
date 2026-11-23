@@ -110,7 +110,7 @@ test('a definitive rejection retains the text and does not hold up valid capture
 
 test('unresolved commands survive later entries and reload, and the selected task is replayed with the original capture',async t => {
   const env = browser(t), calls = [], seen = [];
-  const change = {...task('a','Move the review to Friday'),implicit:true,captureTimeZone:'UTC',provider:'gemini',model:'example-model'};
+  const change = {...task('a','Move the review to Friday'),implicit:true,contextDay:'2026-11-23',captureTimeZone:'UTC',provider:'gemini',model:'example-model'};
   const ordinary = task('b','Buy envelopes'), target = 'c'.repeat(32);
   const prompt = {kind:'command',status:'choice',message:'Which review?',choices:[{id:target,title:'Sample review',detail:'Tuesday at 09:00'}]};
   let loseReply = true;
@@ -125,6 +125,7 @@ test('unresolved commands survive later entries and reload, and the selected tas
   const outbox = make(api);
   outbox.add(change);outbox.add(ordinary);await env.tick();await env.tick();
   assert.deepEqual(calls.map(body=>body.requestId),[change.id,ordinary.id]);
+  assert.equal(calls[0].contextDay,'2026-11-23');assert.equal(calls[0].viewDay,change.day);
   assert.equal(outbox.entries()[0].text,change.text);
   assert.deepEqual(outbox.entries()[0].command.choices,prompt.choices);
   const next = createCaptureOutbox({api,onChange(){},onRemoteChange(){},onAccepted:(item,result)=>seen.push(result)});
@@ -138,6 +139,27 @@ test('unresolved commands survive later entries and reload, and the selected tas
   assert.deepEqual(calls[3],calls[2]);
   assert.deepEqual(seen.at(-1).taskIds,[target]);
   assert.deepEqual(next.entries(),[]);
+});
+
+test('visible-day matching stays independent of a date pin and retries one explicit rematch after a lost response',async t => {
+  const env=browser(t),calls=[];
+  const original={...task('a','Move the office review to Friday'),contextDay:'2026-11-23'};
+  let loseReply=true;
+  const outbox=make(async (_url,_method,body)=>{
+    calls.push(body);
+    if (body.retryMatch && loseReply) { loseReply=false;throw new Error('Lost confirmation'); }
+    return {kind:'command',status:'unmatched',message:'Could not find that review.'};
+  });
+  outbox.add(original);await env.tick();
+  const first=calls[0];
+  assert.equal(first.contextDay,original.contextDay);assert.equal(first.day,original.day);
+  assert.equal(first.retryMatch,undefined);assert.equal(first.retryMatchId,undefined);
+  outbox.decide(original.id,{retryMatch:true});await env.tick();
+  const second=calls[1];assert.match(second.retryMatchId,/^[0-9a-f]{32}$/);
+  assert.deepEqual(second,{...first,retryMatch:true,retryMatchId:second.retryMatchId});
+  outbox.retry(original.id);await env.tick();assert.deepEqual(calls[2],second);
+  outbox.decide(original.id,{retryMatch:true});await env.tick();
+  assert.notEqual(calls[3].retryMatchId,second.retryMatchId);
 });
 
 test('unmatched and clarification requests wait for an explicit create or an acknowledged revision',async t => {

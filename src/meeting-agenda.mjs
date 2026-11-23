@@ -43,8 +43,14 @@ export class MeetingAgenda {
   clear() { this.weeks.clear(); }
 
   expire() {
-    for (const week of this.weeks.values()) week.expires = 0;
+    for (const [key, week] of this.weeks) {
+      // A Google response that began before a change must never renew the cache.
+      if (week.pending) this.weeks.set(key, { range: week.range, result: week.result, expires: 0 });
+      else week.expires = 0;
+    }
   }
+
+  ranges() { return Array.from(this.weeks.values(), week => week.range); }
 
   async read(calendars, range, read) {
     if (!calendars.length) return empty();
@@ -54,7 +60,7 @@ export class MeetingAgenda {
     if (week?.expires > Date.now()) return week.result;
     if (!week) {
       if (this.weeks.size >= 12) this.weeks.delete(this.weeks.keys().next().value);
-      week = { result: null, expires: 0 };
+      week = { range, result: null, expires: 0 };
       this.weeks.set(key, week);
     }
     week.pending = loadWeek(calendars, range, read).then(result => {
