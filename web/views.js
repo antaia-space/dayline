@@ -7,7 +7,7 @@ import { groupOverlappingMeetings, meetingColumns } from "./meeting-columns.js";
 import { addOrderHandle } from "./task-order.js";
 import { timelineBlock } from "./current-time.js";
 import { overrunNote, taskChecklist } from "./subtasks.js";
-import { moveLaterButton, movedMarker, movesByDay } from "./task-moves.js";
+import { moveLaterButton, movedMarker, movesByDay, placeControls } from "./task-moves.js";
 
 const id = (key) => document.getElementById(key);
 
@@ -122,6 +122,8 @@ function taskControls(task, state, view,openChecklist = false) {
   content.append(details);
   const move = moveLaterButton(task,view);
   if (move) content.append(move);
+  const place = view === "backlog" && placeControls(task,state);
+  if (place) content.append(place);
   const fit = fittedDuration(task);
   if (fit) {
     const note = element("span","task-fit",fit.label);
@@ -137,7 +139,9 @@ function taskControls(task, state, view,openChecklist = false) {
   const checklist = taskChecklist(task,view,openChecklist);
   if (checklist) content.append(checklist);
   const issue = task.syncStatus === "deleting" ? "Removal queued" : task.issue;
-  if (issue && task.estimateState !== "queued" && task.estimateState !== "estimating") content.append(element("span","task-issue",issue));
+  // A calendar problem that holds every task is said once, above the list.
+  const shared = view === "backlog" && issue === state.connection?.error;
+  if (issue && !shared && task.estimateState !== "queued" && task.estimateState !== "estimating") content.append(element("span","task-issue",issue));
   return [checkbox,content];
 }
 
@@ -581,7 +585,19 @@ export function renderBacklog(state) {
   if (tasks.length) {
     const list = element("div","tray-list");
     list.append(...tasks.map((task) => taskRow(task,state,"unscheduled","backlog")));
-    id("backlog-content").replaceChildren(list);
+    const problem = state.connection?.error, held = problem ? tasks.filter(task => task.issue === problem).length : 0;
+    if (held) {
+      // Say once why the tasks are here and what brings them back.
+      const reason = element("div","tray-reason");
+      reason.setAttribute("role","status");
+      const text = element("p","",(held === 1 ? "1 task waits" : held + " tasks wait") + " here because Dayline could not read Google Calendar, so it cannot tell which times are free. " +
+        "As soon as the calendar can be read, Dayline plans " + (held === 1 ? "it" : "them") + " again, at the same time as before where that is still free.");
+      const actions = element("div","tray-reason-actions");
+      actions.append(element("span","tray-reason-detail",problem),button("secondary","refresh-availability","Check Google Calendar again","Check again"),
+        button("secondary","calendar-settings","Open calendar settings","Calendar settings"));
+      reason.append(text,actions);
+      id("backlog-content").replaceChildren(reason,list);
+    } else id("backlog-content").replaceChildren(list);
   } else {
     id("backlog-content").replaceChildren(element("p","empty-tray","Tasks waiting for a slot will appear here."));
   }

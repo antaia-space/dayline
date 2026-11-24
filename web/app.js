@@ -9,7 +9,7 @@ import { createComposer } from "./composer.js";
 import { createDurationControls } from "./duration.js";
 import { createTaskOrder } from "./task-order.js";
 import { createCurrentTime } from "./current-time.js";
-import { createMovePicker, nextMoveCheck } from "./task-moves.js";
+import { createMovePicker, nextMoveCheck, placedMessage } from "./task-moves.js";
 import { createSubtaskControls, overrunNote, restoreSubtaskCaret, subtaskCaret } from "./subtasks.js";
 import { createMeetingDetails, createMeetingFeed } from "./meetings.js";
 import { retainMeetingScroll } from "./meeting-columns.js";
@@ -413,6 +413,22 @@ byId("backlog-toggle").addEventListener("click",() => {
 });
 
 
+// A waiting task goes on the chosen day; an empty day lets Dayline pick the next free time.
+async function placeTask(task,day,control) {
+  control.disabled = true;
+  try {
+    await api("/api/tasks/" + encodeURIComponent(task.id),"PATCH",{day});
+    await refresh(true);
+    toast(placedMessage(state.tasks.find(({id}) => id === task.id),day,state));
+  } catch (error) { toast(error.message); }
+  finally { control.disabled = false; }
+}
+byId("planner").addEventListener("change",(event) => {
+  const date = event.target.closest?.("input[data-place-for]");
+  const task = date && state?.tasks.find(({id}) => id === date.dataset.placeFor);
+  if (task && date.value && date.checkValidity()) placeTask(task,date.value,date);
+});
+
 byId("planner").addEventListener("click",async (event) => {
   const target = event.target.closest("button[data-action]");
   if (!target || !state) return;
@@ -429,9 +445,11 @@ byId("planner").addEventListener("click",async (event) => {
     return render();
   }
   if (action === "calendar-settings") return openSettings("calendars");
+  if (action === "refresh-availability") return byId("sync-now").click();
   if (action === "booking-settings") return switchView("bookings");
   const task = state.tasks.find(({id}) => id === target.dataset.id);
   if (!task) return;
+  if (action === "place-task") return placeTask(task,target.dataset.day,target);
   if (action === "move-later") return movePicker.open(task);
   if (action === "move-destination") {
     switchView("day");

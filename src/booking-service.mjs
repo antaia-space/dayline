@@ -301,7 +301,7 @@ export async function bookingSnapshot(service, now = service.clock().getTime()) 
     return { page, bookings, upcoming };
   } catch (error) {
     if (transient(error)) throw error; // The last published times stay until Google answers again.
-    const reconnect = error.status === 401 || error.status === 409 || /invalid_grant|insufficientScopes|unexpectedScopes/.test(error.reason || '');
+    const reconnect = error.status === 401 || error.status === 409 || /invalid_grant|invalid_scope|insufficientScopes|unexpectedScopes/.test(error.reason || '');
     return { page: { ...page, slots: {}, paused: reconnect ? 'reconnect' : 'unavailable' }, problem: error.message };
   }
 }

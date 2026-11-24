@@ -102,7 +102,9 @@ test('each task surface puts the reorder button first and keeps duration buttons
     const editor=each(row).find(part=>part.dataset.action==='edit-task');
     assert.deepEqual(editor.children.map(child=>child.tag),['span','svg']);
     assert.equal(editor.title,'Edit task');
-    assert.deepEqual(actions,['task-order','toggle-task','edit-task','adjust-duration','adjust-duration']);
+    // A waiting task also offers its next four working days, after the controls every surface shares.
+    assert.deepEqual(actions,['task-order','toggle-task','edit-task','adjust-duration','adjust-duration',
+      ...(container==='backlog-content' ? Array(4).fill('place-task') : [])]);
     const group=each(row).find(part=>part.attributes.role==='group');
     assert.equal(group.dataset.durationFor,id);
     assert.deepEqual(group.children.filter(part=>part.tag==='button').map(part=>part.dataset.delta),['-5','5']);

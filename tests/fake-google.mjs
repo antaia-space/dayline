@@ -27,7 +27,9 @@ export function fakeGoogle({ accounts, clientId, identity = async () => undefine
         return json(400, { error: 'invalid_grant', error_description: 'Token has been expired or revoked.' });
       }
       const wanted = (form.get('scope') || grant.account.scope).split(' ');
-      const scope = wanted.filter(s => grant.account.scope.split(' ').includes(s)).join(' ');
+      // As Google does: a refresh may narrow the grant, and one that names a scope outside it is refused.
+      if (wanted.some(s => !grant.account.scope.split(' ').includes(s))) return json(400, { error: 'invalid_scope', error_description: 'Bad Request' });
+      const scope = wanted.join(' ');
       const token = 'access-' + grant.account.key + '-' + ++issued;
       access.set(token, { account: grant.account, scope });
       return json(200, { access_token: token, expires_in: 3600, scope, token_type: 'Bearer', id_token: await identity(grant.account) });

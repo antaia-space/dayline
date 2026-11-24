@@ -8,7 +8,7 @@ import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { createRelay } from '../relay/receiver.mjs';
 import { BookingBoard } from '../relay/booking.mjs';
 import { BookingDesk } from '../src/booking-relay.mjs';
-import { DaylineService } from '../src/service.mjs';
+import { DaylineService, tokenMode } from '../src/service.mjs';
 import { createBookingPass, defaultBooking } from '../src/booking-service.mjs';
 import { defaultSettings } from '../src/store.mjs';
 import { zonedToUtcMs } from '../src/booking-slots.mjs';
@@ -278,4 +278,40 @@ test('the page pauses when Google access ends and clears when booking is switche
   assert.equal(w.desk.status().state, 'off');
   assert.equal((await w.guest('GET', '/api/urs/page')).status, 404);
   assert.equal(w.stored.size, 0);
+});
+
+test('an account allowed for booked meetings keeps its calendar access whatever is booked with it', async t => {
+  const w = await world(t);
+  const work = w.service.data.accounts[0], state = w.service.data.booking;
+  const asked = async () => {
+    w.service.tokens.clear();
+    await w.service.token(work.sub);
+    return new URLSearchParams(w.google.requests.findLast(r => r.path === '/token').body).get('scope').split(' ').filter(s => s.includes('/auth/')).map(s => s.split('/auth/')[1]);
+  };
+  const availability = ['calendar.calendarlist.readonly', 'calendar.events.freebusy'], writes = [...availability, 'calendar.events'];
+  // Meeting types are booked with it: event writes.
+  assert.deepEqual(await asked(), writes);
+
+  // Every meeting type moved to the other address. The grant for booked meetings has no read-only event
+  // scope, so asking Google for "details" access is refused with "Bad Request". Details are read with the write scope.
+  work.meetingDetails = true;
+  for (const type of state.types) type.accountSub = 'sub-home';
+  assert.deepEqual(await asked(), writes);
+  state.enabled = false;
+  assert.deepEqual(await asked(), writes);
+  assert.equal((await w.service.google.listCalendars(await w.service.token(work.sub))).length, 1);
+
+  // Without meeting details and without bookings, only availability is asked for.
+  work.meetingDetails = false;
+  assert.deepEqual(await asked(), availability);
+
+  assert.deepEqual([tokenMode({ mode: 'sync' }, { syncing: true }), tokenMode({ mode: 'sync', meetingDetails: true }), tokenMode({ mode: 'sync' }),
+    tokenMode({ mode: 'availability', meetingDetails: true }), tokenMode({ mode: 'availability' }), tokenMode({ mode: 'availability', booking: true }, { booking: true })],
+    ['sync', 'booking', 'availability', 'details', 'availability', 'booking']);
+
+  // When Google does refuse an account, the message names it and says what to do; Google's own words are "Bad Request".
+  w.google.revoke('refresh-work');
+  w.service.tokens.clear();
+  await assert.rejects(w.service.token(work.sub), error => error.status === 400 && error.reason === 'invalid_grant' &&
+    error.message === 'Google no longer accepts Dayline’s access to urs@antaia.space. Reconnect that account under Settings → Calendars.');
 });

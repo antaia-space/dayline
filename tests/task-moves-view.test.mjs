@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {freeTimeRows,renderAgenda,renderWeek,renderBacklog} from '../web/views.js';
-import {moveDates,movesByDay,nextMoveCheck} from '../web/task-moves.js';
+import {moveDates,movesByDay,nextMoveCheck,placeControls,placeDays,placedMessage} from '../web/task-moves.js';
 
 const mon='2026-11-23', tue='2026-11-24', wed='2026-11-25';
 const at=(day,time)=>day+'T'+time+':00Z';
@@ -114,4 +114,54 @@ test('date limits and wall-clock history use planner days across time zones; end
   const [slot]=movesByDay([history],[mon,tue],'Asia/Tokyo').get(mon);
   assert.deepEqual([slot.start,slot.end],[23*60+40,23*60+59]);
   assert.equal(movesByDay([history],[mon,tue],'Asia/Tokyo').get(tue).length,0);
+});
+
+test('a waiting task offers the next working days in one click, and a calendar problem is explained once above the list',t=>{
+  const dom=fixture(t), fri='2026-11-27', nextMon='2026-11-30';
+  const waiting={id:'a'.repeat(32),text:'Call the hotel',minutes:10,category:'admin',start:null,end:null,done:false,syncStatus:'attention'};
+  const state={settings,categories:[],connection:{connected:true,error:null},busy:[],tasks:[waiting],now:at(mon,'10:00')};
+
+  // Today while working time is left, then the following working days; weekends are skipped.
+  assert.deepEqual(placeDays(state).map(d=>[d.day,d.label]),[[mon,'Today'],[tue,'Tomorrow'],[wed,'Wed, Nov 25'],['2026-11-26','Thu, Nov 26']]);
+  assert.deepEqual(placeDays({...state,now:at(mon,'17:00')}).map(d=>d.label),['Tomorrow','Wed, Nov 25','Thu, Nov 26','Fri, Nov 27']);
+  assert.deepEqual(placeDays({...state,now:at(fri,'18:00')}).map(d=>d.day)[0],nextMon);
+  assert.deepEqual(placeDays({...state,settings:{...settings,workDays:[]}}),[]);
+
+  renderBacklog(state);
+  const days=()=>dom.match('backlog-content','place-task').map(n=>[n.dataset.day,n.textContent,n.attributes['aria-pressed']]);
+  assert.deepEqual(days(),[[mon,'Today','false'],[tue,'Tomorrow','false'],[wed,'Wed, Nov 25','false'],['2026-11-26','Thu, Nov 26','false']]);
+  assert.ok(dom.match('backlog-content','place-task').every(n=>n.dataset.id===waiting.id));
+  const date=dom.all(dom.get('backlog-content')).find(n=>n.dataset.placeFor);
+  assert.deepEqual([date.type,date.min,date.dataset.placeFor],['date',mon,waiting.id]);
+
+  // A task kept for a day shows that day as chosen and offers to let Dayline pick again, also for a day beyond the offered ones.
+  state.tasks=[{...waiting,earliestDay:tue,latestDay:tue,issue:'No open work period fits.'}];
+  renderBacklog(state);
+  assert.deepEqual(days(),[[mon,'Today','false'],[tue,'Tomorrow','true'],[wed,'Wed, Nov 25','false'],['2026-11-26','Thu, Nov 26','false'],['','Any day',undefined]]);
+  assert.match(dom.text(dom.get('backlog-content')),/No open work period fits\./);
+  state.tasks=[{...waiting,earliestDay:'2026-12-04',latestDay:'2026-12-04'}];
+  renderBacklog(state);
+  assert.deepEqual(days().slice(4),[['2026-12-04','Fri, Dec 4','true'],['','Any day',undefined]]);
+
+  // Scheduled, finished and still-estimating tasks get no day buttons.
+  for (const other of [{...waiting,start:at(tue,'09:00'),end:at(tue,'09:10')},{...waiting,done:true},{...waiting,pendingEstimate:true}]) assert.equal(placeControls(other,state),null);
+
+  // Google could not be read: every task carries the same message. It is said once, with what brings the tasks back.
+  const problem='Google no longer accepts Dayline’s access to ada@example.org. Reconnect that account under Settings → Calendars.';
+  const held={...state,connection:{connected:true,error:problem},tasks:[{...waiting,issue:problem},{...waiting,id:'b'.repeat(32),issue:problem},
+    {...waiting,id:'c'.repeat(32),issue:'No open work period fits.'}]};
+  renderBacklog(held);
+  const shown=dom.text(dom.get('backlog-content'));
+  assert.equal(shown.split(problem).length-1,1);
+  assert.match(shown,/2 tasks wait here because Dayline could not read Google Calendar.*As soon as the calendar can be read, Dayline plans them again, at the same time as before where that is still free\./);
+  assert.match(shown,/No open work period fits\./);
+  assert.equal(dom.match('backlog-content','refresh-availability').length,1);
+  assert.equal(dom.match('backlog-content','calendar-settings').length,1);
+  assert.equal(dom.match('backlog-content','place-task').length,12);
+
+  // After a choice: where it landed, or why it still waits.
+  assert.equal(placedMessage({...waiting,start:at(tue,'09:30'),end:at(tue,'09:40')},tue,state),'Scheduled for Tue, Nov 24, 09:30.');
+  assert.equal(placedMessage({...waiting,issue:'No open work period fits.'},tue,state),'No free time on Tue, Nov 24. Still in Unscheduled. No open work period fits.');
+  assert.equal(placedMessage(waiting,'',state),'No free time found yet. Still in Unscheduled.');
+  assert.equal(placedMessage({...waiting,issue:problem},tue,held),'Saved for Tue, Nov 24. It gets a time once Google Calendar can be read.');
 });
