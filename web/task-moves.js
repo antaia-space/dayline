@@ -61,6 +61,61 @@ export function moveDates(task,state) {
   return {min,value:min};
 }
 
+// The days offered on a task without a time: the next working days, today
+// first while it still has working time left.
+export function placeDays(state,count = 4) {
+  const {timeZone,workDays,endTime} = state.settings;
+  const instant = state.now || Date.now(), today = zonedDay(instant,timeZone), tomorrow = addDays(today,1);
+  const [h,m] = endTime.split(":").map(Number), days = [];
+  for (let day = today, tried = 0; days.length < count && tried < 14; day = addDays(day,1), tried++) {
+    if (!workDays.includes(dayIndex(day)) || (day === today && instantMinutes(instant,timeZone) >= h*60+m)) continue;
+    days.push({day,label:day === today ? "Today" : day === tomorrow ? "Tomorrow" : shortDate(day)});
+  }
+  return days;
+}
+
+// One click puts a waiting task on a day. Dayline still picks the time, around meetings and other tasks.
+export function placeControls(task,state) {
+  if (task.done || task.start || task.pendingEstimate || task.syncStatus === "deleting") return null;
+  const name = task.title || task.text, chosen = task.earliestDay && task.earliestDay === task.latestDay ? task.earliestDay : "";
+  const row = element("div","place-row");
+  row.setAttribute("role","group");
+  row.setAttribute("aria-label","Schedule " + name);
+  row.append(element("span","place-label","Schedule"));
+  const add = (day,text,label) => {
+    const control = button("place-day" + (day && day === chosen ? " is-chosen" : ""),"place-task",label,text);
+    control.dataset.id = task.id;
+    control.dataset.day = day;
+    control.dataset.focus = "backlog-place-" + task.id + "-" + (day || "any");
+    if (day) control.setAttribute("aria-pressed",String(day === chosen));
+    control.title = label;
+    row.append(control);
+  };
+  const offered = placeDays(state);
+  for (const {day,label} of offered) add(day,label,"Schedule on " + fullDate(day));
+  if (chosen && !offered.some(({day}) => day === chosen)) add(chosen,shortDate(chosen),"Scheduled for " + fullDate(chosen) + ", waiting for a free time");
+  if (chosen) add("","Any day","Let Dayline pick the next free time");
+  const other = element("label","place-other");
+  const date = element("input");
+  date.type = "date";
+  date.min = zonedDay(state.now || Date.now(),state.settings.timeZone);
+  date.dataset.placeFor = task.id;
+  date.dataset.focus = "backlog-place-" + task.id + "-date";
+  date.setAttribute("aria-label","Schedule " + name + " on another day");
+  other.append(element("span","","Other day"),date);
+  row.append(other);
+  return row;
+}
+
+// What to tell the person after they chose a day for a waiting task.
+export function placedMessage(task,day,state) {
+  const zone = state.settings.timeZone;
+  if (task?.start) return "Scheduled for " + shortDate(zonedDay(task.start,zone)) + ", " + instantTime(task.start,zone) + ".";
+  if (state.connection?.error) return (day ? "Saved for " + shortDate(day) : "Saved") + ". It gets a time once Google Calendar can be read.";
+  if (day) return "No free time on " + shortDate(day) + ". Still in Unscheduled." + (task?.issue ? " " + task.issue : "");
+  return "No free time found yet. Still in Unscheduled." + (task?.issue ? " " + task.issue : "");
+}
+
 export function nextMoveCheck(state) {
   const now = Date.parse(state.now);
   if (!Number.isFinite(now)) return null;

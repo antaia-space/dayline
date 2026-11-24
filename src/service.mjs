@@ -200,6 +200,21 @@ function copyRecord(current, next) {
   Object.assign(current, next);
 }
 
+/**
+ * The permission set to ask Google for when refreshing an account's access.
+ * Google refuses a refresh ("Bad Request") that names a scope the account's
+ * grant does not hold, so the choice must stay inside the grant:
+ * - A grant with event writes (booked meetings, or task sync) holds
+ *   calendar.events and not calendar.events.readonly. Meeting details are then
+ *   read with the write scope. Without a use for it, only availability is asked for.
+ * - Any other grant holds calendar.events.readonly only if details were allowed.
+ */
+export function tokenMode(account, { syncing = false, booking = false } = {}) {
+  if (account.mode === 'sync' && syncing) return 'sync';
+  if (canWriteBookings(account)) return booking || account.meetingDetails ? 'booking' : 'availability';
+  return account.meetingDetails ? 'details' : 'availability';
+}
+
 export class DaylineService {
   constructor({ store, vault, google = googleCalendar, readMeetings = readCalendarMeetings, estimate = estimateTask, clock = () => new Date(), bundledClient = null,
     relayAccount = receiverSettings({}).account }) {
@@ -1135,15 +1150,22 @@ export class DaylineService {
   async token(sub) {
     const account = this.data.accounts.find(a => a.sub === sub);
     if (!account) throw invalid('Reconnect the original Google account to sync this event.', 409);
-    const mode = account.mode === 'sync' && this.data.settings.calendarMode === 'sync' ? 'sync'
-      : writesBookings(this, account) ? 'booking' : account.meetingDetails ? 'details' : 'availability';
+    const mode = tokenMode(account, { syncing: this.data.settings.calendarMode === 'sync', booking: writesBookings(this, account) });
     const cached = this.tokens.get(sub);
     if (cached?.mode === mode && cached.expires > Date.now() + 60000) return cached.access;
     const pending = this.refreshes.get(sub);
     if (pending) return pending;
     const version = this.authVersion;
     const refresh = (async () => {
-      const tokens = await this.google.refreshToken({ ...await this.client(), mode, refreshToken: await this.vault.open(account.secret) });
+      let tokens;
+      try { tokens = await this.google.refreshToken({ ...await this.client(), mode, refreshToken: await this.vault.open(account.secret) }); }
+      catch (error) {
+        // Google's own words here are "Bad Request" or "Token has been expired or revoked." Say which account, and what to do.
+        if (error?.status === 400 && ['invalid_grant', 'invalid_scope'].includes(error.reason)) {
+          error.message = 'Google no longer accepts Dayline’s access to ' + account.email + '. Reconnect that account under Settings → Calendars.';
+        }
+        throw error;
+      }
       const replacement = tokens.refresh_token && await this.vault.seal(tokens.refresh_token);
       if (this.authVersion !== version || !this.data.accounts.includes(account)) throw invalid('Calendar access changed. Refresh your calendar.', 409);
       this.cacheToken(sub, tokens, mode);
