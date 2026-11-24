@@ -11,7 +11,7 @@ let service;
 let requestedPage = '/';
 let browserRequested = false;
 let bookingOrigin = null;
-const windowBackground = () => nativeTheme.shouldUseDarkColors ? '#1c1f1d' : '#fbfbf8';
+const windowBackground = () => nativeTheme.shouldUseDarkColors ? '#0c0e12' : '#f7f8fa';
 
 function openBrowserPlanner() {
   if (local) return shell.openExternal(local.launchUrl());

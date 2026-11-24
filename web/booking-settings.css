@@ -81,7 +81,7 @@
 .booking-menu-list button { padding: .5rem .7rem; text-align: start; font-size: .9rem; border-radius: .32rem; }
 .booking-menu-list button:hover:not(:disabled) { background: var(--surface-muted); }
 .booking-menu-list button:disabled { opacity: .45; cursor: default; }
-.booking-menu-list .is-danger { color: var(--accent-dark); }
+.booking-menu-list .is-danger { color: var(--warn); }
 .booking-share .form-body { padding-top: 1rem; }
 .booking-share .booking-link { max-width: none; margin-top: .35rem; }
 .form-body .booking-share textarea, .booking-share textarea { font-size: .88rem; line-height: 1.5; }

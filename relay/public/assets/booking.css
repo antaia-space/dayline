@@ -1,31 +1,31 @@
 /* The public booking page. Layout ported from antaia-space/meet; colours follow Dayline. */
 :root {
-  --bg: #fbfbf8;
+  --bg: #f7f8fa;
   --card: #ffffff;
-  --text: #282a25;
-  --muted: #62645d;
-  --line: #e2e2da;
-  --accent: #863827;
+  --text: #12151a;
+  --muted: #454d59;
+  --line: #cbd0d9;
+  --accent: #2448a8;
   --accent-text: #ffffff;
-  --accent-soft: #f6e9e4;
-  --danger: #a3261c;
-  --notice: #f4f0e2;
+  --accent-soft: #e3eafb;
+  --danger: #b42318;
+  --notice: #eaedf2;
   --radius: 12px;
   color-scheme: light dark;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1c1f1d;
-    --card: #242826;
-    --text: #ecece3;
-    --muted: #bbc0b4;
-    --line: #3a3f3b;
-    --accent: #f5ac93;
-    --accent-text: #2a1610;
-    --accent-soft: #3d2c26;
-    --danger: #ff9d91;
-    --notice: #2e2b20;
+    --bg: #0c0e12;
+    --card: #1a1d25;
+    --text: #f5f7fa;
+    --muted: #c9cfd9;
+    --line: #4a5261;
+    --accent: #adc4ff;
+    --accent-text: #0a1022;
+    --accent-soft: #1f2f5c;
+    --danger: #ffa29a;
+    --notice: #252a34;
   }
 }
 

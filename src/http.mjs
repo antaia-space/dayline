@@ -50,7 +50,7 @@ async function jsonInput(req) {
 
 function page(title, body, link = '/', label = 'Open planner') {
   return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>Dayline · ' + escape(title) +
-    '</title><style>:root{color-scheme:light dark}body{margin:clamp(32px,12vw,150px) auto;max-width:32em;padding:0 24px;background:#fbfbf8;color:#282a25;font:17px/1.55 system-ui}small{font-size:15px;color:#62645d}h1{font:normal 42px/1.1 Georgia,serif;margin:.7em 0 .4em}a{color:#863827;text-underline-offset:4px}:focus-visible{outline:2px solid currentColor;outline-offset:3px}@media(prefers-color-scheme:dark){body{background:#1c1f1d;color:#ecece3}small{color:#bbc0b4}a{color:#f5ac93}::selection{background:#704739;color:#fff0e9}}</style><small>Dayline / Antaia</small><h1>' + escape(title) +
+    '</title><style>:root{color-scheme:light dark}body{margin:clamp(32px,12vw,150px) auto;max-width:32em;padding:0 24px;background:#f7f8fa;color:#12151a;font:17px/1.55 system-ui}small{font-size:15px;color:#454d59}h1{font:normal 42px/1.1 Georgia,serif;margin:.7em 0 .4em}a{color:#2448a8;text-underline-offset:4px}:focus-visible{outline:2px solid currentColor;outline-offset:3px}@media(prefers-color-scheme:dark){body{background:#0c0e12;color:#f5f7fa}small{color:#c9cfd9}a{color:#adc4ff}::selection{background:#2f4a8f;color:#f5f7fa}}</style><small>Dayline / Antaia</small><h1>' + escape(title) +
     '</h1><p>' + escape(body) + '</p><a href="' + escape(link) + '">' + escape(label) + '</a></html>';
 }
 
